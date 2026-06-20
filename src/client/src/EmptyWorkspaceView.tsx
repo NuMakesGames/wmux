@@ -432,7 +432,10 @@ const pointerUv = (event: PointerEvent, canvas: HTMLCanvasElement): Vec2 => {
   const rect = canvas.getBoundingClientRect();
   const x = (event.clientX - rect.left) * (canvas.width / rect.width);
   const y = canvas.height - (event.clientY - rect.top) * (canvas.height / rect.height);
-  return [(x * 2 - canvas.width) / canvas.height, (y * 2 - canvas.height) / canvas.height];
+  const uv: Vec2 = [(x * 2 - canvas.width) / canvas.height, (y * 2 - canvas.height) / canvas.height];
+  const aspect = canvas.width / canvas.height;
+  const portrait = 1 - smoothstep(0.62, 0.95, aspect);
+  return [uv[0] * mix(1, 1.72, portrait), uv[1] * mix(1, 0.94, portrait)];
 };
 
 const unprojectGround = (screen: Vec2): Vec2 => {
@@ -775,6 +778,9 @@ vec3 faceColor(vec2 cell, float height, float face, float faceDistance, float co
 
 void main() {
   vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution) / u_resolution.y;
+  float portrait = 1.0 - smoothstep(0.62, 0.95, u_resolution.x / u_resolution.y);
+  uv.x *= mix(1.0, 1.72, portrait);
+  uv.y *= mix(1.0, 0.94, portrait);
   vec2 ground = floor(unprojectGround(uv));
   vec3 color = vec3(0.002, 0.0022, 0.0028);
   float bestDepth = -100000.0;

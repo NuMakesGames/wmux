@@ -330,6 +330,7 @@ export function TerminalPane({
       fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
       term.open(containerRef.current);
+      configureTerminalInput(term);
       terminalRef.current = term;
       await waitForVisibleBox(containerRef.current);
       fitAddon.fit();
@@ -452,7 +453,13 @@ export function TerminalPane({
           </button>
         </div>
       </div>
-      <div className="terminal-host-shell">
+      <div
+        className="terminal-host-shell"
+        onPointerDown={() => {
+          onActivate();
+          terminalRef.current?.focus();
+        }}
+      >
         <div ref={containerRef} className="terminal-host" />
         {visibleInlineItems.length > 0 ? (
           <div className="kitty-inline-layer" aria-hidden="true">
@@ -528,6 +535,21 @@ const renderMedia = (item: TerminalMedia, src: string) => {
 
 const safeCols = (cols: number): number => (Number.isFinite(cols) && cols >= 2 ? Math.floor(cols) : 80);
 const safeRows = (rows: number): number => (Number.isFinite(rows) && rows >= 1 ? Math.floor(rows) : 24);
+
+const configureTerminalInput = (term: Terminal): void => {
+  const textarea = term.textarea;
+  if (!textarea) return;
+  textarea.setAttribute("autocomplete", "off");
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocapitalize", "none");
+  textarea.setAttribute("spellcheck", "false");
+  textarea.setAttribute("enterkeyhint", "enter");
+  textarea.setAttribute("aria-autocomplete", "none");
+  textarea.setAttribute("data-form-type", "other");
+  textarea.setAttribute("data-lpignore", "true");
+  textarea.setAttribute("data-gramm", "false");
+  textarea.setAttribute("data-ms-editor", "false");
+};
 
 const sendInput = (ws: WebSocket | null, data: string): void => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));

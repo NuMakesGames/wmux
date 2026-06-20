@@ -27,7 +27,7 @@
 html,
 body,
 #root {
-  height: 100%;
+  height: var(--wmux-viewport-height, 100dvh);
   margin: 0;
   overflow: hidden;
 }
@@ -50,7 +50,7 @@ a {
 .app-shell {
   display: grid;
   grid-template-columns: 288px minmax(0, 1fr);
-  height: 100%;
+  height: var(--wmux-viewport-height, 100dvh);
   min-width: 0;
   background: var(--black);
 }
@@ -86,6 +86,11 @@ a {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.mobile-sidebar-toggle,
+.mobile-sidebar-backdrop {
+  display: none;
 }
 
 .brand {
@@ -1426,32 +1431,144 @@ button.attention-tool {
 
 @media (max-width: 800px) {
   .app-shell {
-    grid-template-columns: 76px minmax(0, 1fr);
+    position: relative;
+    grid-template-columns: minmax(0, 1fr);
+    height: var(--wmux-viewport-height, 100dvh);
   }
 
-  .brand span,
-  .target-host-label,
-  .new-session select,
-  .workspace-meta,
-  .workspace-toolbar select,
-  .sidebar-label,
-  .machine-list,
-  .service-status {
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-shell .sidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    width: min(324px, calc(100vw - 48px));
+    max-width: calc(100vw - 48px);
+    height: var(--wmux-viewport-height, 100dvh);
+    border-right: 1px solid rgba(212, 180, 95, 0.45);
+    box-shadow: 24px 0 70px rgba(0, 0, 0, 0.62);
+    transform: translateX(0);
+    transition: transform 140ms ease;
+  }
+
+  .app-shell.sidebar-collapsed .sidebar {
+    display: block;
+    overflow: hidden;
+    padding: 0;
+    border-right: 0;
+    transform: translateX(-100%);
+  }
+
+  .mobile-sidebar-toggle {
+    position: fixed;
+    left: max(8px, env(safe-area-inset-left));
+    bottom: max(8px, env(safe-area-inset-bottom));
+    z-index: 55;
+    display: inline-flex;
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+    border-color: rgba(212, 180, 95, 0.32);
+    background: rgba(5, 5, 5, 0.74);
+    color: var(--gold-hot);
+    backdrop-filter: blur(8px);
+  }
+
+  .mobile-keyboard-open .mobile-sidebar-toggle {
     display: none;
+  }
+
+  .mobile-sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    display: block;
+    width: 100vw;
+    height: var(--wmux-viewport-height, 100dvh);
+    min-width: 0;
+    border: 0;
+    background: rgba(0, 0, 0, 0.34);
   }
 
   .machine-picker {
     gap: 4px;
   }
 
-  .workspace-item {
-    grid-template-columns: 10px minmax(0, 1fr);
+  .workspace {
+    grid-template-rows: 40px minmax(0, 1fr);
+    height: var(--wmux-viewport-height, 100dvh);
+  }
+
+  .topbar {
+    min-height: 40px;
+    gap: 6px;
+    padding: 4px 6px 4px 44px;
+  }
+
+  .open-tui-topbar {
     height: 40px;
   }
 
-  .pane-toolbar {
+  .service-status,
+  .machine-picker > button[title="Enable browser notifications"],
+  .machine-picker > button[title="Mark workspace notifications read"] {
+    display: none;
+  }
+
+  .tabs {
+    display: flex;
     gap: 4px;
-    padding-left: 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab {
+    flex: 0 0 auto;
+    width: min(42vw, 140px);
+    height: 28px;
+    padding: 0 8px;
+  }
+
+  .split,
+  .split.vertical,
+  .split.horizontal {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: var(--black);
+  }
+
+  .split-child {
+    width: 100%;
+    height: 100%;
+  }
+
+  .split-child:not(:has(.terminal-pane.active)) {
+    display: none;
+  }
+
+  .split-handle {
+    display: none;
+  }
+
+  .terminal-pane {
+    grid-template-rows: 30px minmax(0, 1fr);
+  }
+
+  .terminal-pane.has-media {
+    grid-template-rows: 30px minmax(0, 1fr) auto;
+  }
+
+  .pane-toolbar {
+    min-height: 30px;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
   }
 
   .pane-title .machine-label {
@@ -1467,8 +1584,49 @@ button.attention-tool {
   }
 
   .pane-actions button {
-    width: 28px;
-    min-width: 28px;
+    width: 26px;
+    min-width: 26px;
+    height: 26px;
+  }
+
+  .mobile-keyboard-open .workspace {
+    grid-template-rows: 0 minmax(0, 1fr);
+  }
+
+  .mobile-keyboard-open .topbar,
+  .mobile-keyboard-open .open-tui-topbar {
+    min-height: 0;
+    height: 0;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+  }
+
+  .mobile-keyboard-open .topbar > *,
+  .mobile-keyboard-open .open-tui-topbar > * {
+    display: none;
+  }
+
+  .mobile-keyboard-open .pane-toolbar {
+    min-height: 0;
+    height: 0;
+    overflow: hidden;
+    border: 0;
+    padding: 0;
+  }
+
+  .mobile-keyboard-open .pane-toolbar > *,
+  .mobile-keyboard-open .media-shelf,
+  .mobile-keyboard-open .activity-panel,
+  .mobile-keyboard-open .open-tui-activity-panel,
+  .mobile-keyboard-open .life-settings-toggle,
+  .mobile-keyboard-open .life-settings-panel {
+    display: none;
+  }
+
+  .mobile-keyboard-open .terminal-pane,
+  .mobile-keyboard-open .terminal-pane.has-media {
+    grid-template-rows: 0 minmax(0, 1fr) 0;
   }
 
   .command-item {

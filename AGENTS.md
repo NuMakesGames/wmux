@@ -2,46 +2,118 @@
 
 ## Project
 
-wmux is a local web terminal multiplexer. It provides a browser UI with cmux-style workspaces, tabs, and split panes, backed by server-owned PTY sessions and rendered in the browser with `ghostty-web`.
+wmux is a browser terminal multiplexer for one user's Tailscale or internal network. It combines:
+
+- localterm-style PTY-over-WebSocket service ownership,
+- cmux-style workspaces, tabs, split panes, activity, generated titles, and agent notifications,
+- `ghostty-web` terminal rendering in the browser,
+- durable `tmux`/`screen` backing for local and SSH panes,
+- browser-aware media, clipboard, and mobile ergonomics.
+
+This is intentionally not a multi-tenant SaaS app. Authentication currently relies on the private network boundary plus bind/Host/Origin checks.
 
 ## Commands
 
 - `npm install` installs dependencies.
-- `npm run dev -- --host 127.0.0.1 --port 3478` starts the app in development mode.
+- `npm run dev -- --host 127.0.0.1 --port 3478` starts the app in development mode with Vite middleware.
+- `npm run typecheck` runs client and server TypeScript checks.
 - `npm run build` builds the client and server.
 - `npm run start -- --host 127.0.0.1 --port 3478` runs the built service.
+- `npm run audit:sessions` audits local wmux-managed durable `tmux`/`screen` sessions.
+- `npm run audit:sessions -- --json` emits the same audit as JSON.
+- `scripts/install-user-service.sh` installs or updates the systemd user service. It picks a Tailscale IPv4 address when available; override with `WMUX_HOST` and `WMUX_PORT`.
+
+Useful service commands:
+
+- `systemctl --user status wmux.service`
+- `systemctl --user restart wmux.service`
+- `journalctl --user -u wmux.service -f`
 
 ## Network Safety
 
-The service must only bind to loopback, Tailscale `100.64.0.0/10`, or RFC1918/internal addresses. Do not weaken the bind checks in `src/server/bind.ts` without adding a replacement control that still prevents public internet exposure.
+The service must only bind to loopback, Tailscale `100.64.0.0/10`, or RFC1918/internal addresses. Do not weaken the bind checks in `src/server/bind.ts` without adding a replacement control that still prevents public internet exposure. The current dogfood service is expected to bind to the host's Tailscale IP, not `0.0.0.0`.
 
 For MagicDNS names or reverse-proxy hostnames, set `WMUX_ALLOWED_HOSTS` to a comma-separated allowlist. `*.ts.net` is allowed for Tailscale host headers.
+
+Keep websocket, media, clipboard, hook, and run endpoints behind the same network boundary. Do not add CORS broadening or public callback endpoints without also adding an auth story.
 
 ## Architecture Notes
 
 - Server state lives in `~/.wmux/state.json` unless `WMUX_STATE_PATH` is set.
 - Server-backed UI settings live in `~/.wmux/settings.json` unless `WMUX_SETTINGS_PATH` is set.
 - Machine definitions are read from `./wmux.config.json` first, then `~/.wmux/config.json`.
-- Local and SSH panes default to durable `tmux`/`screen` sessions via `sessionBackend: "auto"`.
-- Same-machine workspace/tab/split creation should preserve the source pane cwd. The primary source is tmux `#{pane_current_path}`; OSC 7 cwd reports from wmux-managed zsh/bash prompt hooks are a secondary state update path.
-- A pane maps to one long-lived server PTY client while the wmux service process is alive.
-- Closing or refreshing the browser disconnects the WebSocket but does not kill the pane process.
+- Keep remote-machine behavior explicit in `MachineConfig`; do not hide durable/session behavior in UI-only state.
+- The `local` and SSH machines default to durable `tmux`/`screen` sessions via `sessionBackend: "auto"`.
+- Same-machine workspace/tab/split creation should preserve the source pane cwd. The primary source is tmux `#{pane_current_path}`; OSC 7 cwd reports from wmux-managed zsh/bash prompt hooks are the fallback state update path.
+- A pane maps to one long-lived server PTY client while the wmux service process is alive. Closing or refreshing the browser disconnects the WebSocket but does not kill the pane process.
 - Restarting the wmux service restores layout metadata and reattaches local/SSH durable sessions when the target has `tmux` or `screen`. Raw PTY and PowerShell panes still cannot preserve live process state across service restart.
+- Multiple browsers may attach to the same pane. Only one socket at a time owns PTY resize for that pane; passive viewers do not resize it. Input from a passive viewer promotes that viewer to resize owner and applies that viewer's latest dimensions.
+- Browser reconnect replay is bounded in memory. After service restart, durable sessions redraw from `tmux`/`screen`; wmux does not persist a full terminal transcript.
 - SSH panes stage `wmux-media`, `wmux-copy`, `wmux-notify`, `wmux-title`, `wmux-agent-event`, and `wmux-run` into `~/.cache/wmux/bin` on the remote host and try to place shims in common user bin directories such as `~/.local/bin`, `~/.cargo/bin`, and `~/bin`.
 - Remote helper staging must run under POSIX `sh`; do not rely on zsh/bash-specific word splitting in `src/server/machines.ts`.
+- Session audit cleanup must remain limited to local `wmux_` tmux/screen sessions that the audit marks duplicate or orphan. Never add automatic cleanup of active sessions or non-wmux multiplexer sessions.
+
+## UI And Interaction Notes
+
+- The terminal canvas/content area should remain visually untreated. Product styling belongs in surrounding chrome, overlays, sidebars, shelves, and toolbars.
+- The default chrome is the OpenTUI-inspired path. `?legacy=1` keeps the older React chrome available.
+- The OpenTUI sidebar uses the vendored `opentui-browser` package under `vendor/opentui-browser`; upstream is private/unpublished and currently treated as an experimental snapshot. Preserve provenance in `vendor/opentui-browser/UPSTREAM.md`.
+- The empty-workspace view is a sibling WebGL shader, not a ghostty-web shader. It renders a Game-of-Life/metal light-panel cube field with mobile-adjusted projection and click-to-toggle cells.
+- Settings remains a DOM modal because it contains editable controls and destructive session-audit actions.
+- Machine aliases are user-facing labels only. Underlying machine IDs and hosts must remain stable for links, state, and helper environment.
+- Host status should show useful network identity. Respect the current alias/IP display convention when adjusting host labels.
+- Workspace rows should show title, trimmed descriptor, and host context without overlapping. Use tooltips for longer descriptors.
+- Workspace rows and tab pills are real links. Preserve `/workspaces/:workspaceId/tabs/:tabId` direct-link behavior.
+- The command palette is opened by `Cmd/Ctrl+K` and should remain the preferred entry point for actions that do not need permanent top-level controls.
+- The host filter in the workspace rail narrows navigation. The target host for creating new workspaces/tabs/splits is still controlled by explicit host selection.
+- Mobile layout uses the VisualViewport API plus `--wmux-viewport-height`. When the software keyboard is open, hide chrome by collapsing dimensions while keeping terminal components mounted.
+- The mobile sidebar is a drawer and should default collapsed on narrow viewports.
+- On mobile, split panes collapse to the active pane instead of trying to show every split at once.
+- Do not rely on iOS Safari letting a web app remove all keyboard/browser accessory UI. The hidden terminal textarea should keep `autocomplete="off"`, `autocorrect="off"`, `autocapitalize="none"`, `spellcheck="false"`, and related assist-disabling attributes.
+
+## Terminal And Pane Behavior
+
+- Use `ghostty-web` for terminal rendering. Avoid swapping in DOM terminal rendering without a deliberate migration plan.
+- `TerminalPane` configures Option/Alt word movement, cmux-style split/close shortcuts, and mobile focus behavior. Be careful when changing key handling because browsers reserve some combos.
+- `Cmd/Ctrl+D` splits to the right; `Cmd/Ctrl+Shift+D` splits below.
+- Split dividers are draggable and ratios persist in the tab layout.
+- Closing a split pane removes it and collapses the layout. Exiting a shell in a split pane should remove that pane.
+- Exiting the last pane in a tab closes the tab. Exiting the last tab in a workspace closes the workspace. If all workspaces are closed, wmux creates or shows the idle empty state.
+- Explicitly closing a pane/tab/workspace should kill the matching durable session.
+- When adding terminal protocol support, make sure replay, resize, scrollback, and multiplexer passthrough behavior are considered.
+
+## Helpers And Integrations
+
 - Agent events are handled by `POST /api/agent-events`; this updates auto-owned workspace titles/descriptors and creates terminal notifications for completed/failed/stopped states.
-- Run metadata is handled by `POST /api/run-events`; `scripts/wmux-run` wraps a command and records start/completion state without changing the terminal canvas renderer.
+- `wmux-title` updates generated or manual workspace/tab titles. Generated titles must not overwrite user-owned titles.
+- `wmux-notify` creates browser/terminal notifications through the wmux API.
+- Run metadata is handled by `POST /api/run-events`; `scripts/wmux-run` wraps a command and records start/completion state without changing terminal canvas output.
 - Browser clipboard handoff is handled by `POST /api/clipboard`; `scripts/wmux-copy` reads stdin or a file and lets the browser attempt the OS clipboard write with a top-bar fallback button.
+- Browser media handoff is handled by `wmux-media`. Images prefer `kitten icat --transfer-mode=stream --passthrough=tmux --align=left --engine=builtin --stdin=no`; audio/video render in browser media controls; `--mode http` forces the media shelf and `--mode kitty` fails instead of falling back.
 - Terminal-native image rendering is intentionally implemented around the terminal viewport as Kitty placeholder overlays. Keep product styling out of the terminal canvas/content area.
-- Session audit cleanup must remain limited to local `wmux_` tmux/screen sessions that the audit marks duplicate or orphan. Do not add automatic cleanup of active sessions.
-- `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Be careful to merge hooks idempotently and preserve user settings.
+- `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Merge hooks idempotently and preserve user settings.
 - `wmux-hooks install codex` mutates `~/.codex/hooks.json` outside the repo. Codex command hooks require the user to review/trust them with `/hooks` before they run.
+- Remote hooks/helpers are not auto-installed retroactively into already-running shell sessions. Start a new wmux pane or ensure the staged helper directory is on `PATH` on the remote host.
+
+## Current Gaps To Preserve In Docs
+
+- Remote per-platform wmux agents are not implemented; remote panes currently run through local `ssh` or PowerShell client processes.
+- PowerShell remoting is scaffolded but not validated and does not have durable restart persistence.
+- Machine management is file-based; there is no in-app editor.
+- There is no login/token gate beyond private-network assumptions and request validation.
+- Full cmux-style transcript auto-naming is heuristic. Claude and Codex hook paths exist; OpenCode installation is not implemented.
+- Kitty graphics support is partial. File/shared-memory transfer, animation frames, z-index layering, scrollback-persistent placement, Sixel, and iTerm2 image protocols are not complete.
+- Command run tracking is explicit through `wmux-run`; arbitrary shell command detection is not implemented.
+- Cwd preservation is best-effort outside tmux and common POSIX shells.
+- OpenTUI migration is partial and vendored.
+- Keep `FEATURE_GAPS.md` current when a limitation is discovered or intentionally deferred.
 
 ## Code Style
 
 - Keep server-only code under `src/server` and browser code under `src/client/src`.
 - Prefer structured JSON APIs over ad hoc message strings.
 - Use `apply_patch` for manual edits.
-- Keep remote-machine behavior explicit in `MachineConfig` instead of hiding it in UI-only state.
 - Keep durable project documentation in `README.md`, `AGENTS.md`, and `FEATURE_GAPS.md`; avoid committing one-off planning or handoff markdown unless it remains actively maintained.
 - Do not commit generated runtime output such as `dist/`, `node_modules/`, or `test-results/`.
+- Avoid broad refactors when making focused fixes; follow existing state/API patterns.
+- Keep comments sparse and useful, especially around protocol parsing, terminal lifecycle, and remote helper staging.

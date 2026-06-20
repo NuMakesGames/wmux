@@ -41,12 +41,18 @@ const defaultSettings: WmuxSettings = {
   machineAliases: {},
 };
 
+interface MobileViewportState {
+  isMobile: boolean;
+  keyboardOpen: boolean;
+}
+
 export function App() {
   const openTuiMode = useMemo(() => new URLSearchParams(window.location.search).get("legacy") !== "1", []);
+  const mobileViewport = useMobileViewportState();
   const [state, setState] = useState<BootstrapPayload | null>(null);
   const [newMachineId, setNewMachineId] = useState("local");
   const [error, setError] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia("(max-width: 800px)").matches);
   const [mediaItems, setMediaItems] = useState<TerminalMedia[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -59,6 +65,13 @@ export function App() {
   const [clipboardStatus, setClipboardStatus] = useState<"idle" | "copied" | "blocked">("idle");
   const seenNotificationIds = useRef(new Set<string>());
   const lastSyncedPath = useRef("");
+  const previousMobileViewport = useRef(mobileViewport.isMobile);
+
+  useEffect(() => {
+    if (mobileViewport.isMobile && !previousMobileViewport.current) setSidebarCollapsed(true);
+    if (!mobileViewport.isMobile && previousMobileViewport.current) setSidebarCollapsed(false);
+    previousMobileViewport.current = mobileViewport.isMobile;
+  }, [mobileViewport.isMobile]);
 
   useEffect(() => {
     api
@@ -316,6 +329,7 @@ export function App() {
     const nextPath = chromePath(workspaceTabPath(workspaceId, tabId));
     window.history.pushState(null, "", nextPath);
     lastSyncedPath.current = nextPath;
+    if (mobileViewport.isMobile) setSidebarCollapsed(true);
     await refresh(await activateRouteTarget(await api.bootstrap()));
   };
 
@@ -323,6 +337,7 @@ export function App() {
     const nextPath = chromePath(workspaceTabPath(workspaceId, tabId));
     window.history.pushState(null, "", nextPath);
     lastSyncedPath.current = nextPath;
+    if (mobileViewport.isMobile) setSidebarCollapsed(true);
     await refresh(await activateRouteTarget(await api.bootstrap()));
   };
 
@@ -802,8 +817,18 @@ export function App() {
   if (error) return <div className="load-state">wmux failed to load: {error}</div>;
   if (!state) return <div className="load-state">Loading wmux...</div>;
 
+  const appClassName = [
+    "app-shell",
+    sidebarCollapsed ? "sidebar-collapsed" : "",
+    openTuiMode ? "open-tui-mode" : "",
+    mobileViewport.isMobile ? "mobile-viewport" : "",
+    mobileViewport.keyboardOpen ? "mobile-keyboard-open" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${openTuiMode ? "open-tui-mode" : ""}`}>
+    <main className={appClassName}>
       {openTuiMode ? (
         <OpenTuiSidebar
           targetMachineId={newMachineId}
@@ -917,6 +942,28 @@ export function App() {
         </div>
       </aside>
       )}
+      {mobileViewport.isMobile ? (
+        <>
+          <button
+            type="button"
+            className="mobile-sidebar-toggle"
+            title={sidebarCollapsed ? "Show navigation" : "Hide navigation"}
+            aria-label={sidebarCollapsed ? "Show navigation" : "Hide navigation"}
+            aria-expanded={!sidebarCollapsed}
+            onClick={() => setSidebarCollapsed((value) => !value)}
+          >
+            <PanelLeft size={16} />
+          </button>
+          {!sidebarCollapsed ? (
+            <button
+              type="button"
+              className="mobile-sidebar-backdrop"
+              aria-label="Close navigation"
+              onClick={() => setSidebarCollapsed(true)}
+            />
+          ) : null}
+        </>
+      ) : null}
       <section className="workspace">
         {openTuiMode ? (
           <OpenTuiTopbar
@@ -1092,6 +1139,42 @@ export function App() {
     </main>
   );
 }
+
+const useMobileViewportState = (): MobileViewportState => {
+  const [state, setState] = useState<MobileViewportState>(() => measureMobileViewport());
+
+  useEffect(() => {
+    const update = () => {
+      const next = measureMobileViewport();
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty("--wmux-viewport-height", `${Math.max(1, Math.floor(viewportHeight))}px`);
+      setState((current) =>
+        current.isMobile === next.isMobile && current.keyboardOpen === next.keyboardOpen ? current : next,
+      );
+    };
+    update();
+    const visualViewport = window.visualViewport;
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    visualViewport?.addEventListener("resize", update);
+    visualViewport?.addEventListener("scroll", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      visualViewport?.removeEventListener("resize", update);
+      visualViewport?.removeEventListener("scroll", update);
+    };
+  }, []);
+
+  return state;
+};
+
+const measureMobileViewport = (): MobileViewportState => {
+  const isMobile = window.matchMedia("(max-width: 800px)").matches;
+  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+  const keyboardOpen = isMobile && window.innerHeight - viewportHeight > 120;
+  return { isMobile, keyboardOpen };
+};
 
 const machineFor = (machines: MachineStatus[], machineId: string): MachineStatus | undefined =>
   machines.find((machine) => machine.id === machineId);
