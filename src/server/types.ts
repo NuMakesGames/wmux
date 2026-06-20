@@ -86,6 +86,15 @@ export interface TerminalMedia {
   createdAt: string;
 }
 
+export interface TerminalClipboard {
+  id: string;
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
+  text: string;
+  createdAt: string;
+}
+
 export interface AgentActivity {
   id: string;
   workspaceId: string;

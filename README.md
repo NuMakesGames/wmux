@@ -48,7 +48,29 @@ journalctl --user -u wmux.service -f
 
 ## Configure Machines
 
-Put machine definitions in `wmux.config.json` or `~/.wmux/config.json`. See `IMPLEMENTATION_PLAN.md` for an example.
+Put machine definitions in `wmux.config.json` or `~/.wmux/config.json`:
+
+```json
+{
+  "machines": [
+    {
+      "id": "away-team",
+      "name": "Away-Team",
+      "kind": "ssh",
+      "host": "away-team.tailnet-name.ts.net",
+      "user": "gisenberg"
+    },
+    {
+      "id": "9800x3d",
+      "name": "9800x3d",
+      "kind": "powershell",
+      "host": "9800x3d"
+    }
+  ]
+}
+```
+
+If the browser accesses wmux through a MagicDNS or reverse-proxy name that is not under `*.ts.net`, set `WMUX_ALLOWED_HOSTS` to a comma-separated allowlist.
 
 Unix-like local and SSH machines default to `"sessionBackend": "auto"`, which attaches panes to a durable `tmux` session when available, or `screen` when `tmux` is not installed. Use `"sessionBackend": "pty"` to force the original raw PTY behavior for a machine.
 
@@ -86,7 +108,7 @@ curl -fsS \
 
 Unread notifications light the workspace, tab, and pane. The browser notification button in the top bar requests browser notification permission.
 
-SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, and `wmux-media` available on hosts like Away-Team without manually copying this repo there.
+SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, and `wmux-copy` available on hosts like Away-Team without manually copying this repo there.
 
 ## Agent Events
 
@@ -124,14 +146,25 @@ The originating pane toolbar shows the latest tracked run outside the terminal c
 
 ## Browser Media
 
-Raw `cat image.png` still writes binary bytes to the terminal. To hand the browser a typed media payload, use:
+Raw `cat image.png` still writes binary bytes to the terminal. To hand wmux media in a browser-aware way, use:
 
 ```bash
 wmux-media ./image.png
 wmux-media ./sound.wav
 ```
 
-Images render in the originating pane. Audio and video render with browser-native controls, so playback starts from a user click instead of autoplay.
+Images prefer Kitty inline rendering through `kitten icat --transfer-mode=stream --passthrough=tmux --align=left --engine=builtin --stdin=no` and fall back to the wmux media shelf if `kitten` is unavailable. Audio and video render with browser-native controls, so playback starts from a user click instead of autoplay. Use `wmux-media --mode http ./image.png` to force the shelf or `wmux-media --mode kitty ./image.png` to fail instead of falling back.
+
+## Browser Clipboard
+
+Pipe text to the browser-side clipboard buffer with:
+
+```bash
+git diff | wmux-copy
+wmux-copy ./notes.txt
+```
+
+wmux asks the open browser to write the text to the OS clipboard immediately. If the browser blocks the write because it requires a user gesture, the top-bar clipboard button turns attention-colored; click it to copy the buffered text.
 
 ## Workspace Titles
 
@@ -228,3 +261,7 @@ wmux implements the cmux shortcuts that fit a browser app. Use `Cmd` on macOS an
 - `Cmd/Ctrl+Shift+U`: jump to latest unread notification
 
 Some browser or OS-reserved shortcuts may not reach wmux on every platform.
+
+## Design Direction
+
+The terminal viewport should stay visually neutral. Product styling belongs in surrounding chrome: workspace rail, tab strip, pane toolbar, settings, activity, notifications, and audit views. Current chrome uses dense cmux-inspired navigation with dark surfaces, thin borders, compact uppercase labels, clipped corners, gold focus accents, and small reachability/status indicators.

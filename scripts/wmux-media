@@ -8,10 +8,11 @@ tab_id="${WMUX_TAB_ID:-}"
 mime_type=""
 name=""
 file_path=""
+mode="${WMUX_MEDIA_MODE:-auto}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: wmux-media [--url <url>] [--pane <id>] [--workspace <id>] [--tab <id>] [--mime <type>] [--name <name>] <file>
+Usage: wmux-media [--url <url>] [--pane <id>] [--workspace <id>] [--tab <id>] [--mime <type>] [--name <name>] [--mode auto|kitty|http] <file>
 EOF
 }
 
@@ -39,6 +40,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --name)
       name="${2:?--name requires a value}"
+      shift 2
+      ;;
+    --mode)
+      mode="${2:?--mode requires a value}"
+      case "${mode}" in
+        auto|kitty|http) ;;
+        *)
+          echo "invalid --mode: ${mode}" >&2
+          usage
+          exit 2
+          ;;
+      esac
       shift 2
       ;;
     -h|--help)
@@ -72,6 +85,25 @@ if [[ -z "${mime_type}" ]]; then
 fi
 if [[ -z "${mime_type}" ]]; then
   mime_type="application/octet-stream"
+fi
+
+is_image=0
+case "${mime_type}" in
+  image/*) is_image=1 ;;
+esac
+
+if [[ "${mode}" != "http" && "${is_image}" -eq 1 ]] && command -v kitten >/dev/null 2>&1; then
+  if kitten icat --transfer-mode=stream --passthrough=tmux --align=left --engine=builtin --stdin=no "${file_path}"; then
+    exit 0
+  fi
+  if [[ "${mode}" == "kitty" ]]; then
+    exit 1
+  fi
+fi
+
+if [[ "${mode}" == "kitty" ]]; then
+  echo "wmux-media: kitten is not available or could not display ${file_path}" >&2
+  exit 1
 fi
 
 WMUX_MEDIA_FILE="${file_path}" \

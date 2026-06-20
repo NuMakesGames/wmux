@@ -26,10 +26,12 @@ For MagicDNS names or reverse-proxy hostnames, set `WMUX_ALLOWED_HOSTS` to a com
 - A pane maps to one long-lived server PTY client while the wmux service process is alive.
 - Closing or refreshing the browser disconnects the WebSocket but does not kill the pane process.
 - Restarting the wmux service restores layout metadata and reattaches local/SSH durable sessions when the target has `tmux` or `screen`. Raw PTY and PowerShell panes still cannot preserve live process state across service restart.
-- SSH panes stage `wmux-media`, `wmux-notify`, `wmux-title`, `wmux-agent-event`, and `wmux-run` into `~/.cache/wmux/bin` on the remote host and try to place shims in common user bin directories such as `~/.local/bin`, `~/.cargo/bin`, and `~/bin`.
+- SSH panes stage `wmux-media`, `wmux-copy`, `wmux-notify`, `wmux-title`, `wmux-agent-event`, and `wmux-run` into `~/.cache/wmux/bin` on the remote host and try to place shims in common user bin directories such as `~/.local/bin`, `~/.cargo/bin`, and `~/bin`.
 - Remote helper staging must run under POSIX `sh`; do not rely on zsh/bash-specific word splitting in `src/server/machines.ts`.
 - Agent events are handled by `POST /api/agent-events`; this updates auto-owned workspace titles/descriptors and creates terminal notifications for completed/failed/stopped states.
 - Run metadata is handled by `POST /api/run-events`; `scripts/wmux-run` wraps a command and records start/completion state without changing the terminal canvas renderer.
+- Browser clipboard handoff is handled by `POST /api/clipboard`; `scripts/wmux-copy` reads stdin or a file and lets the browser attempt the OS clipboard write with a top-bar fallback button.
+- Terminal-native image rendering is intentionally implemented around the terminal viewport as Kitty placeholder overlays. Keep product styling out of the terminal canvas/content area.
 - Session audit cleanup must remain limited to local `wmux_` tmux/screen sessions that the audit marks duplicate or orphan. Do not add automatic cleanup of active sessions.
 - `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Be careful to merge hooks idempotently and preserve user settings.
 - `wmux-hooks install codex` mutates `~/.codex/hooks.json` outside the repo. Codex command hooks require the user to review/trust them with `/hooks` before they run.
@@ -40,4 +42,5 @@ For MagicDNS names or reverse-proxy hostnames, set `WMUX_ALLOWED_HOSTS` to a com
 - Prefer structured JSON APIs over ad hoc message strings.
 - Use `apply_patch` for manual edits.
 - Keep remote-machine behavior explicit in `MachineConfig` instead of hiding it in UI-only state.
+- Keep durable project documentation in `README.md`, `AGENTS.md`, and `FEATURE_GAPS.md`; avoid committing one-off planning or handoff markdown unless it remains actively maintained.
 - Do not commit generated runtime output such as `dist/`, `node_modules/`, or `test-results/`.

@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { FitAddon, Terminal } from "ghostty-web";
 import { Clipboard, Columns2, Maximize2, RotateCcw, Rows2, X } from "lucide-react";
+import {
+  KittyGraphicsParser,
+  isKittyPlaceholder,
+  isKittyPlaceholderMark,
+  kittyResponse,
+  materializeKittyGraphic,
+  nextNonMarkIsPlaceholder,
+  shouldDisplayKittyGraphic,
+  shouldRespondToKitty,
+  type KittyControlOperation,
+  type KittyGraphicPayload,
+  type KittyMaterializedImage,
+  type KittyPlaceholderStripState,
+} from "./kitty-graphics";
 import { ensureGhostty } from "./terminal-loader";
 import type { MachineStatus, PaneState, SplitDirection, TerminalMedia, TerminalRun } from "./types";
 
@@ -18,6 +32,35 @@ interface Props {
   onSplit: (direction: SplitDirection, machineId: string) => void;
   onClose: () => void;
   onDismissMedia: (mediaId: string) => void;
+}
+
+interface KittyInlineImage {
+  id: string;
+  imageId: string;
+  name: string;
+  mimeType: string;
+  data: string;
+  col: number;
+  row: number;
+  cols: number;
+  rows: number;
+  createdAt: string;
+}
+
+interface KittyVirtualPlacement {
+  cols: number;
+  rows: number;
+}
+
+interface KittyPlaceholderCell {
+  imageId: string;
+  col: number;
+  row: number;
+}
+
+interface CellMetrics {
+  width: number;
+  height: number;
 }
 
 export function TerminalPane({
@@ -40,15 +83,177 @@ export function TerminalPane({
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputCarryRef = useRef("");
+  const kittyParserRef = useRef(new KittyGraphicsParser());
+  const kittyPlaceholderStripRef = useRef<KittyPlaceholderStripState>({ pendingPlaceholderMarks: false });
+  const kittyImageCacheRef = useRef(new Map<string, TerminalMedia>());
+  const kittyVirtualPlacementsRef = useRef(new Map<string, KittyVirtualPlacement>());
+  const pendingVirtualImageIdRef = useRef<string | undefined>();
   const [connected, setConnected] = useState(false);
+  const [kittyMediaItems, setKittyMediaItems] = useState<TerminalMedia[]>([]);
+  const [kittyInlineItems, setKittyInlineItems] = useState<KittyInlineImage[]>([]);
+  const [terminalMetrics, setTerminalMetrics] = useState<CellMetrics>({ width: 8, height: 16 });
+  const [viewportY, setViewportY] = useState(0);
+  const visibleMediaItems = [...kittyMediaItems, ...mediaItems];
+  const visibleInlineItems = viewportY < 1 ? kittyInlineItems.filter((item) => item.data) : [];
 
   useEffect(() => {
     let cancelled = false;
     let removed = false;
     let fitAddon: FitAddon | null = null;
     let reconnectTimer: number | undefined;
+    let scrollDisposable: { dispose: () => void } | undefined;
+    let renderDisposable: { dispose: () => void } | undefined;
     let reconnectDelayMs = 350;
     let connectCount = 0;
+    kittyParserRef.current = new KittyGraphicsParser();
+    kittyPlaceholderStripRef.current.pendingPlaceholderMarks = false;
+    kittyImageCacheRef.current.clear();
+    kittyVirtualPlacementsRef.current.clear();
+    pendingVirtualImageIdRef.current = undefined;
+    setKittyMediaItems([]);
+    setKittyInlineItems([]);
+    setViewportY(0);
+
+    const refreshMetrics = (term: Terminal) => {
+      const metrics = readCellMetrics(term);
+      if (!metrics) return;
+      setTerminalMetrics((previous) =>
+        previous.width === metrics.width && previous.height === metrics.height ? previous : metrics,
+      );
+    };
+
+    const sendKittyResponse = (imageId: string | undefined, quiet: string, status: "ok" | "error", message: string) => {
+      if (!imageId || !shouldRespondToKitty(quiet, status)) return;
+      sendInput(socketRef.current, kittyResponse(imageId, message));
+    };
+
+    const addKittyMedia = (media: TerminalMedia) => {
+      setKittyMediaItems((items) => [media, ...items.filter((item) => item.id !== media.id)].slice(0, 10));
+    };
+
+    const updateKittyInlineMedia = (imageId: string, media: TerminalMedia) => {
+      setKittyInlineItems((items) =>
+        items.map((item) =>
+          item.imageId === imageId
+            ? { ...item, name: media.name, mimeType: media.mimeType, data: media.data }
+            : item,
+        ),
+      );
+    };
+
+    const recordKittyPlaceholderCells = (cells: KittyPlaceholderCell[]) => {
+      if (cells.length === 0) return;
+
+      const grouped = new Map<string, KittyPlaceholderCell[]>();
+      for (const cell of cells) {
+        const group = grouped.get(cell.imageId);
+        if (group) {
+          group.push(cell);
+        } else {
+          grouped.set(cell.imageId, [cell]);
+        }
+      }
+
+      setKittyInlineItems((items) => {
+        let next = items;
+        for (const [imageId, imageCells] of grouped) {
+          const meta = kittyVirtualPlacementsRef.current.get(imageId);
+          const media = kittyImageCacheRef.current.get(imageId);
+          const col = Math.min(...imageCells.map((cell) => cell.col));
+          const row = Math.min(...imageCells.map((cell) => cell.row));
+          const maxCol = Math.max(...imageCells.map((cell) => cell.col));
+          const maxRow = Math.max(...imageCells.map((cell) => cell.row));
+          const inlineItem: KittyInlineImage = {
+            id: `kitty_inline_${imageId}`,
+            imageId,
+            name: media?.name ?? `kitty-${imageId}.png`,
+            mimeType: media?.mimeType ?? "image/png",
+            data: media?.data ?? "",
+            col,
+            row,
+            cols: Math.max(1, meta?.cols ?? maxCol - col + 1),
+            rows: Math.max(1, meta?.rows ?? maxRow - row + 1),
+            createdAt: new Date().toISOString(),
+          };
+          const existing = next.findIndex((item) => item.imageId === imageId);
+          next =
+            existing === -1
+              ? [inlineItem, ...next].slice(0, 20)
+              : next.map((item, index) => (index === existing ? { ...item, ...inlineItem } : item));
+        }
+        return next;
+      });
+    };
+
+    const handleKittyControl = (control: KittyControlOperation) => {
+      if (control.error) {
+        sendKittyResponse(control.imageId, control.quiet, "error", control.error);
+        return;
+      }
+      if (control.action === "p") {
+        const cached = control.imageId ? kittyImageCacheRef.current.get(control.imageId) : undefined;
+        if (!cached) {
+          sendKittyResponse(control.imageId, control.quiet, "error", "ENOENT: Kitty image id not found");
+          return;
+        }
+        const media = { ...cached, id: createLocalMediaId() };
+        addKittyMedia(media);
+        sendKittyResponse(control.imageId, control.quiet, "ok", "OK");
+        return;
+      }
+      if (control.action === "d") {
+        if (control.imageId) {
+          kittyImageCacheRef.current.delete(control.imageId);
+          kittyVirtualPlacementsRef.current.delete(control.imageId);
+          setKittyMediaItems((items) => items.filter((item) => !item.id.includes(`_${control.imageId}_`)));
+          setKittyInlineItems((items) => items.filter((item) => item.imageId !== control.imageId));
+        }
+        sendKittyResponse(control.imageId, control.quiet, "ok", "OK");
+      }
+    };
+
+    const handleKittyGraphic = (graphic: KittyGraphicPayload) => {
+      if (graphic.virtualPlacement && graphic.imageId) {
+        kittyVirtualPlacementsRef.current.set(graphic.imageId, {
+          cols: Math.max(1, graphic.displayColumns ?? 1),
+          rows: Math.max(1, graphic.displayRows ?? 1),
+        });
+        pendingVirtualImageIdRef.current = graphic.imageId;
+        setKittyInlineItems((items) => items.filter((item) => item.imageId !== graphic.imageId));
+      }
+
+      void materializeKittyGraphic(graphic)
+        .then((image) => {
+          if (cancelled || removed) return;
+          const media = kittyImageToMedia(image, pane, graphic.imageId);
+          if (graphic.action !== "q" && graphic.imageId) kittyImageCacheRef.current.set(graphic.imageId, media);
+          if (graphic.virtualPlacement && graphic.imageId) updateKittyInlineMedia(graphic.imageId, media);
+          if (shouldDisplayKittyGraphic(graphic)) addKittyMedia(media);
+          sendKittyResponse(graphic.imageId, graphic.quiet, "ok", "OK");
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : "Kitty graphics decode failed";
+          sendKittyResponse(graphic.imageId, graphic.quiet, "error", `EINVAL: ${message}`);
+        });
+    };
+
+    const handleOutput = (term: Terminal, data: string) => {
+      const parsed = kittyParserRef.current.push(data);
+      for (const event of parsed.events) {
+        if (event.kind === "text") {
+          const placeholderCells: KittyPlaceholderCell[] = [];
+          writeTerminalOutput(term, outputCarryRef, kittyPlaceholderStripRef, event.text, () => {
+            const imageId = pendingVirtualImageIdRef.current;
+            const cursor = term.wasmTerm?.getCursor();
+            if (!imageId || !cursor) return;
+            placeholderCells.push({ imageId, col: cursor.x, row: cursor.y });
+          });
+          recordKittyPlaceholderCells(placeholderCells);
+        }
+        if (event.kind === "control") handleKittyControl(event.control);
+        if (event.kind === "graphic") handleKittyGraphic(event.graphic);
+      }
+    };
 
     const scheduleReconnect = () => {
       if (cancelled || removed || reconnectTimer) return;
@@ -91,10 +296,13 @@ export function TerminalPane({
         const message = JSON.parse(event.data);
         if (message.type === "ready") {
           outputCarryRef.current = "";
-          if (shouldClearOnReady || !message.replay) term.clear();
-          if (message.replay) writeTerminalOutput(term, outputCarryRef, message.replay);
+          if (shouldClearOnReady || !message.replay) {
+            term.clear();
+            setKittyInlineItems([]);
+          }
+          if (message.replay) handleOutput(term, message.replay);
         }
-        if (message.type === "output") writeTerminalOutput(term, outputCarryRef, message.data);
+        if (message.type === "output") handleOutput(term, message.data);
         if (message.type === "exit") term.write(`\r\n[wmux] process exited with code ${message.code}\r\n`);
         if (message.type === "removed") {
           removed = true;
@@ -126,6 +334,9 @@ export function TerminalPane({
       await waitForVisibleBox(containerRef.current);
       fitAddon.fit();
       fitAddon.observeResize();
+      refreshMetrics(term);
+      scrollDisposable = term.onScroll((position) => setViewportY(position));
+      renderDisposable = term.onRender(() => refreshMetrics(term));
 
       term.attachCustomKeyEventHandler((event) => {
         if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
@@ -167,6 +378,8 @@ export function TerminalPane({
     return () => {
       cancelled = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      scrollDisposable?.dispose();
+      renderDisposable?.dispose();
       socketRef.current?.close();
       fitAddon?.dispose();
       terminalRef.current?.dispose();
@@ -182,6 +395,8 @@ export function TerminalPane({
     term.renderer.setFontSize(terminalFontSize);
     requestAnimationFrame(() => {
       fitAddonRef.current?.fit();
+      const metrics = readCellMetrics(term);
+      if (metrics) setTerminalMetrics(metrics);
     });
   }, [terminalFontSize]);
 
@@ -196,7 +411,7 @@ export function TerminalPane({
   return (
     <section
       className={`terminal-pane ${active ? "active" : ""} ${unreadCount > 0 ? "unread" : ""} ${
-        mediaItems.length > 0 ? "has-media" : ""
+        visibleMediaItems.length > 0 ? "has-media" : ""
       }`}
       onMouseDown={onActivate}
     >
@@ -237,11 +452,41 @@ export function TerminalPane({
           </button>
         </div>
       </div>
-      <div ref={containerRef} className="terminal-host" />
-      {mediaItems.length > 0 ? (
+      <div className="terminal-host-shell">
+        <div ref={containerRef} className="terminal-host" />
+        {visibleInlineItems.length > 0 ? (
+          <div className="kitty-inline-layer" aria-hidden="true">
+            {visibleInlineItems.map((item) => (
+              <img
+                key={item.id}
+                className="kitty-inline-image"
+                src={`data:${item.mimeType};base64,${item.data}`}
+                alt=""
+                style={{
+                  left: item.col * terminalMetrics.width,
+                  top: item.row * terminalMetrics.height,
+                  width: item.cols * terminalMetrics.width,
+                  height: item.rows * terminalMetrics.height,
+                }}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {visibleMediaItems.length > 0 ? (
         <div className="media-shelf">
-          {mediaItems.slice(0, 3).map((item) => (
-            <MediaPreview key={item.id} item={item} onDismiss={() => onDismissMedia(item.id)} />
+          {visibleMediaItems.slice(0, 3).map((item) => (
+            <MediaPreview
+              key={item.id}
+              item={item}
+              onDismiss={() => {
+                if (item.id.startsWith("kitty_")) {
+                  setKittyMediaItems((items) => items.filter((candidate) => candidate.id !== item.id));
+                } else {
+                  onDismissMedia(item.id);
+                }
+              }}
+            />
           ))}
         </div>
       ) : null}
@@ -287,6 +532,20 @@ const safeRows = (rows: number): number => (Number.isFinite(rows) && rows >= 1 ?
 const sendInput = (ws: WebSocket | null, data: string): void => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
 };
+
+const kittyImageToMedia = (image: KittyMaterializedImage, pane: PaneState, imageId?: string): TerminalMedia => ({
+  id: createLocalMediaId(imageId),
+  workspaceId: "",
+  tabId: "",
+  paneId: pane.id,
+  name: image.name,
+  mimeType: image.mimeType,
+  data: image.data,
+  createdAt: new Date().toISOString(),
+});
+
+const createLocalMediaId = (imageId = "image"): string =>
+  `kitty_${imageId.replace(/[^A-Za-z0-9-]/g, "_")}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 const wheelLines = (event: WheelEvent, term: Terminal): number => {
   if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return event.deltaY;
@@ -359,13 +618,68 @@ const DECSTR_SHIM = "\x1b[0m\x1b[?1l\x1b>\x1b[?6l\x1b[?7h\x1b[4l\x1b[r\x1b[?25h\
 const PARTIAL_DECSTR = /\x1b(?:\[[0-9;]*!?)?$/;
 const DECSTR = /\x1b\[[0-9;]*!p/g;
 
-const writeTerminalOutput = (term: Terminal, carryRef: MutableRefObject<string>, data: string): void => {
+const writeTerminalOutput = (
+  term: Terminal,
+  carryRef: MutableRefObject<string>,
+  kittyPlaceholderStripRef: MutableRefObject<KittyPlaceholderStripState>,
+  data: string,
+  onKittyPlaceholder?: () => void,
+): void => {
   const combined = carryRef.current + data;
   const partial = combined.match(PARTIAL_DECSTR);
   const body = partial ? combined.slice(0, -partial[0].length) : combined;
   carryRef.current = partial?.[0] ?? "";
-  const normalized = body.replace(DECSTR, DECSTR_SHIM);
-  if (normalized) term.write(normalized);
+  writeTerminalBody(term, kittyPlaceholderStripRef.current, body.replace(DECSTR, DECSTR_SHIM), onKittyPlaceholder);
+};
+
+const writeTerminalBody = (
+  term: Terminal,
+  state: KittyPlaceholderStripState,
+  data: string,
+  onKittyPlaceholder?: () => void,
+): void => {
+  let pending = "";
+  const chars = Array.from(data);
+  let previousWasPlaceholder = state.pendingPlaceholderMarks;
+  state.pendingPlaceholderMarks = false;
+
+  const flush = () => {
+    if (!pending) return;
+    term.write(pending);
+    pending = "";
+  };
+
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index];
+    if (isKittyPlaceholder(char)) {
+      flush();
+      onKittyPlaceholder?.();
+      pending += " ";
+      while (isKittyPlaceholderMark(chars[index + 1])) index += 1;
+      previousWasPlaceholder = true;
+      continue;
+    }
+    if (previousWasPlaceholder && isKittyPlaceholderMark(char)) {
+      previousWasPlaceholder = true;
+      continue;
+    }
+    if (char === "\b" && (previousWasPlaceholder || nextNonMarkIsPlaceholder(chars, index + 1))) {
+      pending += char;
+      previousWasPlaceholder = true;
+      continue;
+    }
+    pending += char;
+    previousWasPlaceholder = false;
+  }
+
+  state.pendingPlaceholderMarks = previousWasPlaceholder;
+  flush();
+};
+
+const readCellMetrics = (term: Terminal): CellMetrics | null => {
+  const metrics = term.renderer?.getMetrics?.();
+  if (!metrics || metrics.width <= 0 || metrics.height <= 0) return null;
+  return { width: metrics.width, height: metrics.height };
 };
 
 const waitForVisibleBox = (element: HTMLElement): Promise<void> =>

@@ -35,10 +35,14 @@
 
    wmux now has the state model, API contract, and Claude/Codex hook paths needed for generated workspace names. The first implementation derives titles/descriptors from hook input and the latest user/assistant transcript text. It does not yet call an agent/LLM summarizer, throttle by transcript growth, or support OpenCode transcript discovery automatically.
 
-9. Terminal-native graphics protocols are not implemented.
+9. Terminal-native graphics protocol support is partial.
 
-   wmux supports browser media through the `wmux-media` helper and `/api/media`, which renders images/audio/video in the originating pane. Raw binary output such as `cat image.png`, Sixel, Kitty graphics, and iTerm2 inline image escape sequences are not currently parsed from the PTY stream.
+   `wmux-media` now prefers `kitten icat --transfer-mode=stream --passthrough=tmux --align=left --engine=builtin --stdin=no` for image files, and falls back to `/api/media` for the browser media shelf. wmux parses the common direct Kitty graphics stream form (`ESC _G ... ; base64 ESC \`) for PNG/RGB/RGBA payloads, chunked transfers, zlib-compressed payloads, and Kitty Unicode virtual placements. Virtual placements render as active-screen overlays at the placeholder cell rectangle instead of in the media shelf. This is not yet a full Kitty graphics implementation: file/shared-memory transfer, animation frames, z-index layering, scrollback-persistent image placement, and Sixel/iTerm2 image protocols are still not implemented.
 
 10. Terminal run metadata is explicit, not automatic.
 
    wmux now stores recent command run records, shows them in the activity drawer, and surfaces the latest tracked run in pane chrome with copy/rerun controls. Capture currently requires wrapping a command with `wmux-run`. wmux does not yet automatically detect arbitrary shell command boundaries from bash/zsh/fish integration sequences or infer safe rerun commands from raw terminal input.
+
+11. Browser clipboard writes can require a user gesture.
+
+   `wmux-copy` posts clipboard text to the wmux browser event stream. The open browser attempts `navigator.clipboard.writeText` immediately and keeps the text in a top-bar fallback buffer. Some browsers block clipboard writes that are not triggered by a user gesture, especially on plain HTTP origins, so the user may need to click the fallback clipboard button.

@@ -9,6 +9,7 @@ import type {
   LayoutNode,
   MachineStatus,
   SplitDirection,
+  TerminalClipboard,
   TerminalMedia,
   TerminalNotification,
   TerminalRun,
@@ -46,6 +47,8 @@ export function App() {
   const [serviceConnection, setServiceConnection] = useState<ServiceConnection>("connecting");
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
   const [activityOpen, setActivityOpen] = useState(false);
+  const [clipboardItem, setClipboardItem] = useState<TerminalClipboard | null>(null);
+  const [clipboardStatus, setClipboardStatus] = useState<"idle" | "copied" | "blocked">("idle");
   const seenNotificationIds = useRef(new Set<string>());
   const lastSyncedPath = useRef("");
 
@@ -80,6 +83,14 @@ export function App() {
         if (message.type === "media") {
           const media = message.media as TerminalMedia;
           setMediaItems((items) => [media, ...items.filter((item) => item.id !== media.id)].slice(0, 20));
+        }
+        if (message.type === "clipboard") {
+          const clipboard = message.clipboard as TerminalClipboard;
+          setClipboardItem(clipboard);
+          setClipboardStatus("idle");
+          writeBrowserClipboard(clipboard.text)
+            .then(() => setClipboardStatus("copied"))
+            .catch(() => setClipboardStatus("blocked"));
         }
         if (message.type === "state" || message.type === "notification") {
           api.bootstrap().then(setState).catch((nextError) => setError(String(nextError)));
@@ -169,6 +180,9 @@ export function App() {
   }, []);
 
   const selectedMachine = displayMachines.find((machine) => machine.id === newMachineId) ?? displayMachines[0];
+  const clipboardTitle = clipboardItem
+    ? `${clipboardStatus === "blocked" ? "Click to copy wmux buffer" : "wmux clipboard buffer"} (${formatBytes(clipboardItem.text.length)})`
+    : "No wmux clipboard buffer";
 
   const createWorkspace = async (machineId: string) => {
     await api.createWorkspace(machineId);
@@ -188,7 +202,17 @@ export function App() {
   const copyActiveLink = async () => {
     if (!activeWorkspace || !activeTab) return;
     const url = new URL(workspaceTabPath(activeWorkspace.id, activeTab.id), window.location.origin);
-    await navigator.clipboard?.writeText(url.toString());
+    await writeBrowserClipboard(url.toString());
+  };
+
+  const copyWmuxClipboard = async () => {
+    if (!clipboardItem) return;
+    try {
+      await writeBrowserClipboard(clipboardItem.text);
+      setClipboardStatus("copied");
+    } catch {
+      setClipboardStatus("blocked");
+    }
   };
 
   const createTab = async (machineId: string) => {
@@ -411,9 +435,18 @@ export function App() {
         title: "Copy active session link",
         subtitle: activeWorkspace && activeTab ? `${activeWorkspace.name} / ${activeTab.title}` : undefined,
         section: "Actions",
-        disabled: !navigator.clipboard || !activeWorkspace || !activeTab,
+        disabled: !activeWorkspace || !activeTab,
         run: copyActiveLink,
         keywords: ["url", "share", "link"],
+      },
+      {
+        id: "copy-wmux-buffer",
+        title: "Copy wmux clipboard buffer",
+        subtitle: clipboardItem ? `${formatBytes(clipboardItem.text.length)} from wmux-copy` : undefined,
+        section: "Actions",
+        disabled: !clipboardItem,
+        run: copyWmuxClipboard,
+        keywords: ["clipboard", "copy", "pipe"],
       },
       {
         id: "toggle-sidebar",
@@ -609,6 +642,7 @@ export function App() {
   }, [
     activeTab,
     activeWorkspace,
+    clipboardItem,
     displayMachines,
     machines,
     newMachineId,
@@ -774,10 +808,17 @@ export function App() {
             </button>
             <button
               title="Copy active session link"
-              disabled={!navigator.clipboard}
               onClick={copyActiveLink}
             >
               <Link2 size={16} />
+            </button>
+            <button
+              className={clipboardStatus === "blocked" ? "attention-tool" : clipboardItem ? "active-tool" : ""}
+              title={clipboardTitle}
+              disabled={!clipboardItem}
+              onClick={copyWmuxClipboard}
+            >
+              <Clipboard size={16} />
             </button>
             <button
               title="Enable browser notifications"
@@ -933,6 +974,33 @@ const formatDuration = (startedAt: string, completedAt: string): string => {
   if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return "unknown";
   if (elapsedMs < 1000) return `${elapsedMs}ms`;
   return `${(elapsedMs / 1000).toFixed(elapsedMs < 10_000 ? 1 : 0)}s`;
+};
+
+const formatBytes = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+};
+
+const writeBrowserClipboard = async (text: string): Promise<void> => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("clipboard write blocked");
 };
 
 function CommandPalette({

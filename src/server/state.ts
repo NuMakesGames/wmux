@@ -11,6 +11,7 @@ import type {
   PersistedState,
   SurfaceTab,
   TerminalMedia,
+  TerminalClipboard,
   TerminalNotification,
   TerminalRun,
   TitleSource,
@@ -43,6 +44,10 @@ interface CreateMediaInput extends TargetInput {
   name: string;
   mimeType: string;
   data: string;
+}
+
+interface CreateClipboardInput extends TargetInput {
+  text: string;
 }
 
 interface RecordAgentEventInput extends TargetInput {
@@ -411,6 +416,20 @@ export class StateStore extends EventEmitter {
     this.save();
     this.emit("media", structuredClone(media));
     return structuredClone(media);
+  }
+
+  createClipboard(input: CreateClipboardInput): TerminalClipboard {
+    const target = this.resolveNotificationTarget(input);
+    const clipboard: TerminalClipboard = {
+      id: createId("clip"),
+      workspaceId: target.workspace.id,
+      tabId: target.tab.id,
+      paneId: target.pane.id,
+      text: input.text.slice(0, 2 * 1024 * 1024),
+      createdAt: now(),
+    };
+    this.emit("clipboard", structuredClone(clipboard));
+    return structuredClone(clipboard);
   }
 
   recordAgentEvent(input: RecordAgentEventInput): { workspace: Workspace; notification?: TerminalNotification; agentEvent: AgentActivity } {

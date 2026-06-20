@@ -198,6 +198,27 @@ export const createHttpServer = (
         return;
       }
 
+      if (url.pathname === "/api/clipboard" && request.method === "POST") {
+        const body = (await readBody(request)) as {
+          workspaceId?: string;
+          tabId?: string;
+          paneId?: string;
+          text?: string;
+        };
+        if (typeof body.text !== "string" || body.text.length === 0) {
+          sendJson(response, 400, { error: "missing_clipboard_text" });
+          return;
+        }
+        const clipboard = state.createClipboard({
+          workspaceId: body.workspaceId,
+          tabId: body.tabId,
+          paneId: body.paneId,
+          text: body.text,
+        });
+        sendJson(response, 201, { clipboard });
+        return;
+      }
+
       const readNotification = url.pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);
       if (readNotification && request.method === "POST") {
         state.markNotificationRead(readNotification[1]);
@@ -373,15 +394,20 @@ export const createHttpServer = (
         const onMedia = (media: unknown) => {
           if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "media", media }));
         };
+        const onClipboard = (clipboard: unknown) => {
+          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "clipboard", clipboard }));
+        };
         state.on("change", onChange);
         settings.on("change", onChange);
         state.on("notification", onNotification);
         state.on("media", onMedia);
+        state.on("clipboard", onClipboard);
         ws.on("close", () => {
           state.off("change", onChange);
           settings.off("change", onChange);
           state.off("notification", onNotification);
           state.off("media", onMedia);
+          state.off("clipboard", onClipboard);
         });
         ws.send(JSON.stringify({ type: "ready" }));
       });

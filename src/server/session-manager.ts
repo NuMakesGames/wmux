@@ -83,6 +83,7 @@ export class SessionManager {
       WMUX_TAB_ID: context?.tab.id ?? "",
       WMUX_TAB_TITLE: context?.tab.title ?? "",
       WMUX_PANE_ID: pane.id,
+      KITTY_WINDOW_ID: `wmux-${pane.id}`,
     });
     this.sessions.set(pane.id, session);
     this.state.updatePane(pane.id, { status: "running", exitCode: undefined, title: pane.title });

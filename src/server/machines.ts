@@ -186,6 +186,7 @@ const durableShellScript = ({
     `tmux has-session -t ${tmuxTarget} 2>/dev/null || ${tmuxCreateCommand}`,
     `tmux set-option -t ${tmuxTarget} history-limit 100000 >/dev/null 2>&1 || true`,
     `tmux set-option -t ${tmuxTarget} mouse on >/dev/null 2>&1 || true`,
+    `tmux set-option -t ${tmuxTarget} allow-passthrough on >/dev/null 2>&1 || true`,
     `exec ${tmuxAttachCommand}`,
   ].join("; ");
   const screenRc = [
@@ -272,7 +273,10 @@ __WMUX_AGENT_EVENT_HELPER__
 cat > "$wmux_helper_dir/wmux-run" <<'__WMUX_RUN_HELPER__'
 ${localHelperScript("wmux-run")}
 __WMUX_RUN_HELPER__
-chmod +x "$wmux_helper_dir/wmux-media" "$wmux_helper_dir/wmux-notify" "$wmux_helper_dir/wmux-title" "$wmux_helper_dir/wmux-agent-event" "$wmux_helper_dir/wmux-run";
+cat > "$wmux_helper_dir/wmux-copy" <<'__WMUX_COPY_HELPER__'
+${localHelperScript("wmux-copy")}
+__WMUX_COPY_HELPER__
+chmod +x "$wmux_helper_dir/wmux-media" "$wmux_helper_dir/wmux-notify" "$wmux_helper_dir/wmux-title" "$wmux_helper_dir/wmux-agent-event" "$wmux_helper_dir/wmux-run" "$wmux_helper_dir/wmux-copy";
 wmux_old_ifs="$IFS";
 IFS=":";
 wmux_candidate_path="$PATH:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/bin";
@@ -286,6 +290,7 @@ for wmux_path_dir in $wmux_candidate_path; do
         ln -sf "$wmux_helper_dir/wmux-title" "$wmux_path_dir/wmux-title" 2>/dev/null || true;
         ln -sf "$wmux_helper_dir/wmux-agent-event" "$wmux_path_dir/wmux-agent-event" 2>/dev/null || true;
         ln -sf "$wmux_helper_dir/wmux-run" "$wmux_path_dir/wmux-run" 2>/dev/null || true;
+        ln -sf "$wmux_helper_dir/wmux-copy" "$wmux_path_dir/wmux-copy" 2>/dev/null || true;
       fi;
       ;;
   esac;
@@ -307,6 +312,8 @@ import base64
 import json
 import mimetypes
 import os
+import shutil
+import subprocess
 import sys
 import urllib.request
 
@@ -317,6 +324,7 @@ parser.add_argument("--workspace", default=os.environ.get("WMUX_WORKSPACE_ID", "
 parser.add_argument("--tab", default=os.environ.get("WMUX_TAB_ID", ""))
 parser.add_argument("--mime", default="")
 parser.add_argument("--name", default="")
+parser.add_argument("--mode", choices=("auto", "kitty", "http"), default=os.environ.get("WMUX_MEDIA_MODE", "auto"))
 parser.add_argument("file")
 args = parser.parse_args()
 
@@ -326,6 +334,29 @@ if not os.path.isfile(args.file):
 
 name = args.name or os.path.basename(args.file)
 mime_type = args.mime or mimetypes.guess_type(args.file)[0] or "application/octet-stream"
+
+if args.mode != "http" and mime_type.startswith("image/") and shutil.which("kitten"):
+    result = subprocess.run(
+        [
+            "kitten",
+            "icat",
+            "--transfer-mode=stream",
+            "--passthrough=tmux",
+            "--align=left",
+            "--engine=builtin",
+            "--stdin=no",
+            args.file,
+        ]
+    )
+    if result.returncode == 0:
+        sys.exit(0)
+    if args.mode == "kitty":
+        sys.exit(result.returncode or 1)
+
+if args.mode == "kitty":
+    print(f"wmux-media: kitten is not available or could not display {args.file}", file=sys.stderr)
+    sys.exit(1)
+
 with open(args.file, "rb") as handle:
     data = base64.b64encode(handle.read()).decode("ascii")
 
