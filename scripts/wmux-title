@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+wmux_url="${WMUX_URL:-http://127.0.0.1:3478}"
+workspace_id="${WMUX_WORKSPACE_ID:-}"
+tab_id="${WMUX_TAB_ID:-}"
+title=""
+descriptor=""
+manual=0
+tab_only_if_multiple=1
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: wmux-title [--manual] [--workspace <id>] [--tab <id>] [--descriptor <text>] [--tab-always] --title <text>
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url)
+      wmux_url="${2:?--url requires a value}"
+      shift 2
+      ;;
+    --workspace)
+      workspace_id="${2:?--workspace requires a value}"
+      shift 2
+      ;;
+    --tab)
+      tab_id="${2:?--tab requires a value}"
+      shift 2
+      ;;
+    --title)
+      title="${2:?--title requires a value}"
+      shift 2
+      ;;
+    --descriptor)
+      descriptor="${2:?--descriptor requires a value}"
+      shift 2
+      ;;
+    --manual)
+      manual=1
+      shift
+      ;;
+    --tab-always)
+      tab_only_if_multiple=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -z "${title}" ]]; then
+        title="$1"
+        shift
+      else
+        echo "unknown argument: $1" >&2
+        usage
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+if [[ -z "${workspace_id}" || -z "${title}" ]]; then
+  usage
+  exit 2
+fi
+
+json_escape() {
+  node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(s)))'
+}
+
+if [[ "${manual}" -eq 1 ]]; then
+  payload="{\"title\":$(printf '%s' "$title" | json_escape)}"
+  path="/api/workspaces/${workspace_id}/title"
+else
+  payload="{\"title\":$(printf '%s' "$title" | json_escape),\"tabOnlyIfMultiple\":$([[ "${tab_only_if_multiple}" -eq 1 ]] && printf true || printf false)"
+  if [[ -n "${tab_id}" ]]; then
+    payload="${payload},\"tabId\":$(printf '%s' "$tab_id" | json_escape)"
+  fi
+  if [[ -n "${descriptor}" ]]; then
+    payload="${payload},\"descriptor\":$(printf '%s' "$descriptor" | json_escape)"
+  fi
+  payload="${payload}}"
+  path="/api/workspaces/${workspace_id}/auto-title"
+fi
+
+curl -fsS \
+  -H "content-type: application/json" \
+  -d "${payload}" \
+  "${wmux_url%/}${path}" >/dev/null

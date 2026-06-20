@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+wmux_url="${WMUX_URL:-http://127.0.0.1:3478}"
+pane_id="${WMUX_PANE_ID:-}"
+workspace_id="${WMUX_WORKSPACE_ID:-}"
+tab_id="${WMUX_TAB_ID:-}"
+mime_type=""
+name=""
+file_path=""
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: wmux-media [--url <url>] [--pane <id>] [--workspace <id>] [--tab <id>] [--mime <type>] [--name <name>] <file>
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url)
+      wmux_url="${2:?--url requires a value}"
+      shift 2
+      ;;
+    --pane)
+      pane_id="${2:?--pane requires a value}"
+      shift 2
+      ;;
+    --workspace)
+      workspace_id="${2:?--workspace requires a value}"
+      shift 2
+      ;;
+    --tab)
+      tab_id="${2:?--tab requires a value}"
+      shift 2
+      ;;
+    --mime)
+      mime_type="${2:?--mime requires a value}"
+      shift 2
+      ;;
+    --name)
+      name="${2:?--name requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ -z "${file_path}" ]]; then
+        file_path="$1"
+        shift
+      else
+        echo "unknown argument: $1" >&2
+        usage
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+if [[ -z "${file_path}" || ! -f "${file_path}" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ -z "${name}" ]]; then
+  name="$(basename "${file_path}")"
+fi
+
+if [[ -z "${mime_type}" ]]; then
+  mime_type="$(file -b --mime-type "${file_path}" 2>/dev/null || true)"
+fi
+if [[ -z "${mime_type}" ]]; then
+  mime_type="application/octet-stream"
+fi
+
+WMUX_MEDIA_FILE="${file_path}" \
+WMUX_MEDIA_NAME="${name}" \
+WMUX_MEDIA_MIME="${mime_type}" \
+WMUX_MEDIA_PANE="${pane_id}" \
+WMUX_MEDIA_WORKSPACE="${workspace_id}" \
+WMUX_MEDIA_TAB="${tab_id}" \
+node <<'NODE' | curl -fsS -H "content-type: application/json" --data-binary @- "${wmux_url%/}/api/media" >/dev/null
+const fs = require("node:fs");
+
+const payload = {
+  name: process.env.WMUX_MEDIA_NAME,
+  mimeType: process.env.WMUX_MEDIA_MIME,
+  data: fs.readFileSync(process.env.WMUX_MEDIA_FILE).toString("base64"),
+};
+if (process.env.WMUX_MEDIA_PANE) payload.paneId = process.env.WMUX_MEDIA_PANE;
+if (process.env.WMUX_MEDIA_WORKSPACE) payload.workspaceId = process.env.WMUX_MEDIA_WORKSPACE;
+if (process.env.WMUX_MEDIA_TAB) payload.tabId = process.env.WMUX_MEDIA_TAB;
+process.stdout.write(JSON.stringify(payload));
+NODE

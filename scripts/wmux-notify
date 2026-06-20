@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+wmux_url="${WMUX_URL:-http://127.0.0.1:3478}"
+title="wmux"
+subtitle=""
+body=""
+pane_id="${WMUX_PANE_ID:-}"
+workspace_id="${WMUX_WORKSPACE_ID:-}"
+tab_id="${WMUX_TAB_ID:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url)
+      wmux_url="${2:?--url requires a value}"
+      shift 2
+      ;;
+    --title)
+      title="${2:?--title requires a value}"
+      shift 2
+      ;;
+    --subtitle)
+      subtitle="${2:?--subtitle requires a value}"
+      shift 2
+      ;;
+    --body)
+      body="${2:?--body requires a value}"
+      shift 2
+      ;;
+    --pane)
+      pane_id="${2:?--pane requires a value}"
+      shift 2
+      ;;
+    --workspace)
+      workspace_id="${2:?--workspace requires a value}"
+      shift 2
+      ;;
+    --tab)
+      tab_id="${2:?--tab requires a value}"
+      shift 2
+      ;;
+    *)
+      if [[ -z "${body}" ]]; then
+        body="$1"
+        shift
+      else
+        echo "unknown argument: $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+json_escape() {
+  node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(s)))'
+}
+
+payload="{\"title\":$(printf '%s' "$title" | json_escape),\"subtitle\":$(printf '%s' "$subtitle" | json_escape),\"body\":$(printf '%s' "$body" | json_escape)"
+if [[ -n "${pane_id}" ]]; then
+  payload="${payload},\"paneId\":$(printf '%s' "$pane_id" | json_escape)"
+fi
+if [[ -n "${workspace_id}" ]]; then
+  payload="${payload},\"workspaceId\":$(printf '%s' "$workspace_id" | json_escape)"
+fi
+if [[ -n "${tab_id}" ]]; then
+  payload="${payload},\"tabId\":$(printf '%s' "$tab_id" | json_escape)"
+fi
+payload="${payload}}"
+
+curl -fsS \
+  -H "content-type: application/json" \
+  -d "${payload}" \
+  "${wmux_url%/}/api/notifications" >/dev/null
