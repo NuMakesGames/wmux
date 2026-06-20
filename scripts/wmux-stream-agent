@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+from urllib.parse import urlparse
+
+
+def clean_machine_id(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", value.strip())
+    return cleaned or "local"
+
+
+def host_from_wmux_url() -> str:
+    parsed = urlparse(os.environ.get("WMUX_URL", ""))
+    return parsed.hostname or "127.0.0.1"
+
+
+def x11_size() -> str:
+    if not shutil.which("xdpyinfo"):
+        return "1920x1080"
+    try:
+        output = subprocess.check_output(["xdpyinfo"], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return "1920x1080"
+    match = re.search(r"dimensions:\s+(\d+x\d+)", output)
+    return match.group(1) if match else "1920x1080"
+
+
+def linux_capture_args(args: argparse.Namespace) -> list[str]:
+    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY") and not args.input:
+        raise SystemExit(
+            "wmux-stream-agent: Wayland capture is not implemented by this helper yet. "
+            "Run from an X11 session, pass --input for a custom ffmpeg source, or use OBS/GStreamer WHIP."
+        )
+    display = args.input or args.display or os.environ.get("DISPLAY") or ":0"
+    size = args.size or x11_size()
+    return [
+        "-f",
+        "x11grab",
+        "-draw_mouse",
+        "1",
+        "-framerate",
+        str(args.framerate),
+        "-video_size",
+        size,
+        "-i",
+        display,
+    ]
+
+
+def macos_capture_args(args: argparse.Namespace) -> list[str]:
+    source = args.input or "Capture screen 0:none"
+    return [
+        "-f",
+        "avfoundation",
+        "-capture_cursor",
+        "1",
+        "-framerate",
+        str(args.framerate),
+        "-i",
+        source,
+    ]
+
+
+def windows_capture_args(args: argparse.Namespace) -> list[str]:
+    return [
+        "-f",
+        "gdigrab",
+        "-framerate",
+        str(args.framerate),
+        "-i",
+        args.input or "desktop",
+    ]
+
+
+def capture_args(args: argparse.Namespace) -> list[str]:
+    if args.input and args.input_format:
+        return ["-f", args.input_format, "-framerate", str(args.framerate), "-i", args.input]
+    system = platform.system().lower()
+    if system == "linux":
+        return linux_capture_args(args)
+    if system == "darwin":
+        return macos_capture_args(args)
+    if system == "windows":
+        return windows_capture_args(args)
+    raise SystemExit(f"wmux-stream-agent: unsupported platform: {platform.system()}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="wmux-stream-agent",
+        description="Capture this machine's display and publish it to the wmux MediaMTX stream server.",
+    )
+    parser.add_argument("--machine", default=os.environ.get("WMUX_MACHINE_ID", "local"))
+    parser.add_argument("--server", default=os.environ.get("WMUX_STREAM_HOST") or host_from_wmux_url())
+    parser.add_argument("--rtsp-url", default=os.environ.get("WMUX_STREAM_RTSP_URL", ""))
+    parser.add_argument("--input", default="", help="Override the platform default ffmpeg input.")
+    parser.add_argument("--input-format", default="", help="ffmpeg input format to use with --input.")
+    parser.add_argument("--display", default=os.environ.get("DISPLAY", ""))
+    parser.add_argument("--size", default="", help="X11 capture size, for example 1920x1080.")
+    parser.add_argument("--framerate", type=int, default=int(os.environ.get("WMUX_STREAM_FPS", "15")))
+    parser.add_argument("--bitrate", default=os.environ.get("WMUX_STREAM_BITRATE", "3500k"))
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        print("wmux-stream-agent: ffmpeg is required", file=sys.stderr)
+        return 127
+
+    machine_id = clean_machine_id(args.machine)
+    rtsp_url = args.rtsp_url or f"rtsp://{args.server}:8554/wmux-{machine_id}"
+    fps = max(1, min(60, args.framerate))
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        *capture_args(args),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-b:v",
+        args.bitrate,
+        "-g",
+        str(fps * 2),
+        "-rtsp_transport",
+        "tcp",
+        "-f",
+        "rtsp",
+        rtsp_url,
+    ]
+
+    if args.dry_run:
+        print(" ".join(subprocess.list2cmdline([part]) for part in command))
+        return 0
+
+    print(f"wmux-stream-agent: publishing {machine_id} to {rtsp_url}", file=sys.stderr)
+    return subprocess.call(command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

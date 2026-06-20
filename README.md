@@ -108,7 +108,7 @@ curl -fsS \
 
 Unread notifications light the workspace, tab, and pane. The browser notification button in the top bar requests browser notification permission.
 
-SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, and `wmux-copy` available on hosts like Away-Team without manually copying this repo there.
+SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, and `wmux-stream-agent` available on hosts like Away-Team without manually copying this repo there.
 
 ## Agent Events
 
@@ -165,6 +165,25 @@ wmux-copy ./notes.txt
 ```
 
 wmux asks the open browser to write the text to the OS clipboard immediately. If the browser blocks the write because it requires a user gesture, the top-bar clipboard button turns attention-colored; click it to copy the buffered text.
+
+## Machine Screen Streams
+
+wmux can show a machine-local pixel stream for the active workspace host. The media router is a user-level MediaMTX service on the wmux server:
+
+```bash
+scripts/install-stream-service.sh
+```
+
+This binds RTSP and WebRTC to the Tailscale IP and keeps the MediaMTX API on loopback. Each participating machine publishes its own screen to that server path:
+
+```bash
+wmux-stream-agent --machine local
+wmux-stream-agent --machine away-team
+```
+
+The Stream button in the top right opens the WebRTC stream for the active workspace machine on desktop viewports. New wmux panes expose `WMUX_STREAM_RTSP_URL` and `WMUX_STREAM_WHIP_URL` so the helper knows where to publish.
+
+On macOS, the terminal app that launches `wmux-stream-agent` needs Screen Recording permission: System Settings -> Privacy & Security -> Screen Recording. Enable your terminal app, SSH service wrapper, or whichever app owns the process, then restart that app/session.
 
 ## Workspace Titles
 

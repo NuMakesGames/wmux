@@ -52,6 +52,8 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - SSH panes stage `wmux-media`, `wmux-copy`, `wmux-notify`, `wmux-title`, `wmux-agent-event`, and `wmux-run` into `~/.cache/wmux/bin` on the remote host and try to place shims in common user bin directories such as `~/.local/bin`, `~/.cargo/bin`, and `~/bin`.
 - Remote helper staging must run under POSIX `sh`; do not rely on zsh/bash-specific word splitting in `src/server/machines.ts`.
 - Session audit cleanup must remain limited to local `wmux_` tmux/screen sessions that the audit marks duplicate or orphan. Never add automatic cleanup of active sessions or non-wmux multiplexer sessions.
+- Machine screen streams are machine-local captures, not browser captures. The active host publishes its own pixels to the MediaMTX service on rtx6000, and wmux viewers embed the active machine's WebRTC path. Do not replace this with `getDisplayMedia` from the viewing browser.
+- MediaMTX should bind RTSP/WebRTC only to the Tailscale/internal interface and keep its API on loopback. Use `scripts/install-stream-service.sh` for repeatable setup.
 
 ## UI And Interaction Notes
 
@@ -93,6 +95,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Terminal-native image rendering is intentionally implemented around the terminal viewport as Kitty placeholder overlays. Keep product styling out of the terminal canvas/content area.
 - `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Merge hooks idempotently and preserve user settings.
 - `wmux-hooks install codex` mutates `~/.codex/hooks.json` outside the repo. Codex command hooks require the user to review/trust them with `/hooks` before they run.
+- `wmux-stream-agent` publishes the local display with ffmpeg to the machine's `WMUX_STREAM_RTSP_URL`. It must run in the graphical login session of the machine being captured. On macOS, the owning terminal/app needs System Settings -> Privacy & Security -> Screen Recording permission.
 - Remote hooks/helpers are not auto-installed retroactively into already-running shell sessions. Start a new wmux pane or ensure the staged helper directory is on `PATH` on the remote host.
 
 ## Current Gaps To Preserve In Docs
@@ -106,6 +109,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Command run tracking is explicit through `wmux-run`; arbitrary shell command detection is not implemented.
 - Cwd preservation is best-effort outside tmux and common POSIX shells.
 - OpenTUI migration is partial and vendored.
+- Pixel streaming is helper-based. Wayland, Windows service/session capture, macOS permission automation, reconnect supervision, and a full wmux native agent remain gaps.
 - Keep `FEATURE_GAPS.md` current when a limitation is discovered or intentionally deferred.
 
 ## Code Style

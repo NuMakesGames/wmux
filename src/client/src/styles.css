@@ -485,6 +485,160 @@ button.attention-tool {
   color: #b98b80;
 }
 
+.stream-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.stream-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  width: min(1200px, calc(100vw - 56px));
+  height: min(760px, calc(var(--wmux-viewport-height, 100dvh) - 56px));
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(212, 180, 95, 0.48);
+  background: #050505;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.64);
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%);
+}
+
+.stream-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+  background: var(--panel);
+}
+
+.stream-header h2 {
+  margin: 0;
+  color: var(--gold-hot);
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.stream-status {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.stream-status.live {
+  color: var(--green);
+}
+
+.stream-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stream-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  border: 1px solid rgba(212, 180, 95, 0.22);
+  border-radius: 3px;
+  background: var(--panel-3);
+  padding: 0 9px;
+  color: var(--ivory);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stream-link:hover {
+  border-color: rgba(212, 180, 95, 0.55);
+  color: var(--gold-hot);
+}
+
+.stream-video-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #020202;
+}
+
+.stream-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #020202;
+}
+
+.stream-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.stream-empty strong {
+  color: var(--ivory);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.stream-empty span {
+  max-width: 560px;
+  color: #8b8375;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.stream-agent-hint {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 10px;
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+  background: #070706;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.stream-agent-hint span {
+  color: #7d7568;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stream-agent-hint code {
+  overflow: hidden;
+  color: var(--ivory);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .layout-view,
 .split,
 .split-child {
@@ -1512,6 +1666,7 @@ button.attention-tool {
   }
 
   .service-status,
+  .desktop-stream-button,
   .machine-picker > button[title="Enable browser notifications"],
   .machine-picker > button[title="Mark workspace notifications read"] {
     display: none;

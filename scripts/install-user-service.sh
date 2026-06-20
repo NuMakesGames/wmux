@@ -14,6 +14,12 @@ if [[ -z "${HOST}" ]]; then
 fi
 
 mkdir -p "${HOME}/.config/systemd/user"
+mkdir -p "${HOME}/.local/bin"
+
+for helper in "${ROOT_DIR}"/scripts/wmux-*; do
+  [[ -f "${helper}" && -x "${helper}" ]] || continue
+  ln -sf "${helper}" "${HOME}/.local/bin/$(basename "${helper}")"
+done
 
 sed \
   -e "s#WorkingDirectory=.*#WorkingDirectory=${ROOT_DIR}#" \
@@ -25,3 +31,4 @@ systemctl --user daemon-reload
 systemctl --user enable --now wmux.service
 
 echo "wmux.service installed and started on http://${HOST}:${PORT}"
+echo "wmux helper shims installed in ${HOME}/.local/bin"

@@ -113,6 +113,18 @@ export interface TerminalRun {
   completedAt?: string;
 }
 
+export interface StreamStatus {
+  machineId: string;
+  path: string;
+  live: boolean;
+  viewerCount: number;
+  startedAt?: string;
+  webRtcUrl: string;
+  publishRtspUrl: string;
+  publishWhipUrl: string;
+  reason?: string;
+}
+
 export interface WmuxSettings {
   terminalFontSize: number;
   machineAliases: Record<string, string>;
@@ -126,6 +138,7 @@ export interface BootstrapPayload {
   agentEvents: AgentActivity[];
   runs: TerminalRun[];
   settings: WmuxSettings;
+  streams: StreamStatus[];
 }
 
 export interface DurableSessionAuditRow {

@@ -58,3 +58,7 @@
 14. The OpenTUI web UI migration is vendored, experimental, and partial.
 
    `rbbydotdev/opentui-web` currently describes itself as a proof of concept, its `opentui-browser` package is private/unpublished, and the repository has no license file. wmux vendors a local snapshot under `vendor/opentui-browser` with provenance in `vendor/opentui-browser/UPSTREAM.md`. The default sidebar now renders through the vendored `CanvasPainter` cell-grid path, while the topbar, command palette, and activity drawer still use wmux's earlier canvas implementation. `?legacy=1` remains available for the older React chrome. Settings remains a DOM form because it has editable controls and session-audit actions. Wider migration needs either a published/licensed upstream API or a deliberate decision to keep maintaining the vendored snapshot.
+
+15. Machine pixel streams are helper-based, not a full wmux native agent yet.
+
+   rtx6000 now runs a local MediaMTX WebRTC/RTSP router, and wmux can show per-machine stream paths from the Stream button. `wmux-stream-agent` publishes the local display with ffmpeg, but this is still a helper process that must run in the graphical login session of each participating machine. macOS requires Screen Recording permission for the app/process that owns capture, Windows capture needs a validated service/session strategy, and Wayland capture is not implemented. A complete per-platform wmux agent should manage capture startup, permissions, reconnects, status, and platform-specific display APIs.

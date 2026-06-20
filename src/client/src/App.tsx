@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, Link2, PanelLeft, Plus, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
+import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, Link2, PanelLeft, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "./api";
 import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
 import { LayoutView } from "./LayoutView";
@@ -9,6 +9,7 @@ import { OpenTuiCommandPalette } from "./OpenTuiCommandPalette";
 import { OpenTuiSidebar } from "./OpenTuiSidebar";
 import type { OpenTuiSidebarMachine, OpenTuiSidebarWorkspace } from "./OpenTuiSidebar";
 import { OpenTuiTopbar } from "./OpenTuiTopbar";
+import { ScreenStreamViewer } from "./ScreenStream";
 import type {
   AgentActivity,
   BootstrapPayload,
@@ -61,6 +62,7 @@ export function App() {
   const [serviceConnection, setServiceConnection] = useState<ServiceConnection>("connecting");
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
   const [activityOpen, setActivityOpen] = useState(false);
+  const [streamOpen, setStreamOpen] = useState(false);
   const [clipboardItem, setClipboardItem] = useState<TerminalClipboard | null>(null);
   const [clipboardStatus, setClipboardStatus] = useState<"idle" | "copied" | "blocked">("idle");
   const seenNotificationIds = useRef(new Set<string>());
@@ -133,6 +135,25 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!state) return;
+    let closed = false;
+    const refreshStreams = async () => {
+      try {
+        const response = await api.streams();
+        if (!closed) setState((current) => (current ? { ...current, streams: response.streams } : current));
+      } catch {
+        // Stream status is advisory; terminal service status is tracked separately.
+      }
+    };
+    const interval = window.setInterval(refreshStreams, 5000);
+    void refreshStreams();
+    return () => {
+      closed = true;
+      window.clearInterval(interval);
+    };
+  }, [state?.machines.length]);
+
   const activeWorkspace = useMemo(
     () => state?.workspaces.find((workspace) => workspace.id === state.activeWorkspaceId) ?? state?.workspaces[0],
     [state],
@@ -151,6 +172,7 @@ export function App() {
   const mediaByPaneId = useMemo(() => groupMediaByPane(mediaItems), [mediaItems]);
   const agentEvents = state?.agentEvents ?? [];
   const runs = state?.runs ?? [];
+  const streams = state?.streams ?? [];
   const latestAgentByWorkspaceId = useMemo(() => latestAgentByWorkspace(agentEvents), [agentEvents]);
   const latestRunByPaneId = useMemo(() => latestRunByPane(runs), [runs]);
   const visibleWorkspaces = useMemo(
@@ -312,6 +334,10 @@ export function App() {
   }, []);
 
   const selectedMachine = displayMachines.find((machine) => machine.id === newMachineId) ?? displayMachines[0];
+  const activeStreamMachineId = activeWorkspace?.machineId ?? selectedMachine?.id ?? newMachineId;
+  const activeStreamMachine = machineFor(displayMachines, activeStreamMachineId);
+  const activeStream = streams.find((stream) => stream.machineId === activeStreamMachineId);
+  const canOpenStream = !mobileViewport.isMobile && Boolean(activeStream);
   const clipboardTitle = clipboardItem
     ? `${clipboardStatus === "blocked" ? "Click to copy wmux buffer" : "wmux clipboard buffer"} (${formatBytes(clipboardItem.text.length)})`
     : "No wmux clipboard buffer";
@@ -581,6 +607,15 @@ export function App() {
         keywords: ["timeline", "agent", "runs", "history"],
       },
       {
+        id: "open-stream",
+        title: `Open stream: ${activeStreamMachine?.name ?? activeStreamMachineId}`,
+        subtitle: activeStream?.live ? `${activeStream.viewerCount} viewers` : "Waiting for wmux-stream-agent",
+        section: "View",
+        disabled: !canOpenStream,
+        run: () => setStreamOpen(true),
+        keywords: ["screen", "display", "webrtc", "pixels"],
+      },
+      {
         id: "switch-chrome-mode",
         title: openTuiMode ? "Use legacy browser chrome" : "Use OpenTUI chrome",
         subtitle: openTuiMode ? "Reload with the original React controls" : "Reload with the canvas TUI chrome",
@@ -807,6 +842,10 @@ export function App() {
     machines,
     newMachineId,
     openTuiMode,
+    activeStream,
+    activeStreamMachine,
+    activeStreamMachineId,
+    canOpenStream,
     selectedMachine,
     sidebarCollapsed,
     state,
@@ -981,6 +1020,9 @@ export function App() {
             canCopyLink={Boolean(activeWorkspace && activeTab)}
             canCopyClipboard={Boolean(clipboardItem)}
             clipboardAttention={clipboardStatus === "blocked"}
+            canOpenStream={canOpenStream}
+            streamLive={Boolean(activeStream?.live)}
+            streamViewerCount={activeStream?.viewerCount ?? 0}
             unreadNotifications={unreadNotifications.length}
             canMarkRead={Boolean(activeWorkspace && (unreadByWorkspaceId.get(activeWorkspace.id) ?? 0) > 0)}
             canEnableNotifications={"Notification" in window && Notification.permission === "default"}
@@ -990,6 +1032,7 @@ export function App() {
             onOpenCommandPalette={openCommandPalette}
             onOpenSettings={() => setSettingsOpen(true)}
             onToggleActivity={() => setActivityOpen((value) => !value)}
+            onOpenStream={() => setStreamOpen(true)}
             onCopyLink={copyActiveLink}
             onCopyClipboard={copyWmuxClipboard}
             onEnableNotifications={enableBrowserNotifications}
@@ -1044,6 +1087,14 @@ export function App() {
               onClick={() => setActivityOpen((value) => !value)}
             >
               <Activity size={16} />
+            </button>
+            <button
+              className={`desktop-stream-button ${activeStream?.live ? "active-tool" : ""}`}
+              title={`${activeStreamMachine?.name ?? activeStreamMachineId} screen stream`}
+              disabled={!canOpenStream}
+              onClick={() => setStreamOpen(true)}
+            >
+              <ScreenShare size={16} />
             </button>
             <button
               title="Copy active session link"
@@ -1109,6 +1160,13 @@ export function App() {
             onClose={() => setActivityOpen(false)}
           />
         )
+      ) : null}
+      {streamOpen ? (
+        <ScreenStreamViewer
+          machine={activeStreamMachine}
+          stream={activeStream}
+          onClose={() => setStreamOpen(false)}
+        />
       ) : null}
       {settingsOpen ? (
         <SettingsModal

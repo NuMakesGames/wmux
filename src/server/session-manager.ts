@@ -3,6 +3,7 @@ import type { MachineConfig, PaneState } from "./types.js";
 import { PtySession } from "./pty-session.js";
 import type { StateStore } from "./state.js";
 import { disposeDurableSession } from "./machines.js";
+import { streamPathForMachine } from "./streams.js";
 
 type ClientMessage =
   | { type: "input"; data: string }
@@ -97,6 +98,8 @@ export class SessionManager {
     const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
     if (!machine) throw new Error(`machine ${pane.machineId} not found`);
     const context = this.state.findPaneContext(pane.id);
+    const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
+    const streamPath = streamPathForMachine(machine.id);
     const session = new PtySession(pane, machine, cols, rows, {
       WMUX_URL: process.env.WMUX_PUBLIC_URL ?? `http://${process.env.WMUX_HOST ?? "127.0.0.1"}:${process.env.WMUX_PORT ?? "3478"}`,
       WMUX_WORKSPACE_ID: context?.workspace.id ?? "",
@@ -105,6 +108,10 @@ export class SessionManager {
       WMUX_TAB_TITLE: context?.tab.title ?? "",
       WMUX_PANE_ID: pane.id,
       WMUX_START_CWD: pane.cwd ?? "",
+      WMUX_STREAM_HOST: streamHost,
+      WMUX_STREAM_PATH: streamPath,
+      WMUX_STREAM_RTSP_URL: `rtsp://${streamHost}:8554/${streamPath}`,
+      WMUX_STREAM_WHIP_URL: `${process.env.WMUX_MEDIAMTX_WEBRTC_ORIGIN ?? `http://${streamHost}:8889`}/${streamPath}/whip`,
       KITTY_WINDOW_ID: `wmux-${pane.id}`,
     });
     this.sessions.set(pane.id, session);

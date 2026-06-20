@@ -6,6 +6,7 @@ import { WebSocketServer } from "ws";
 import { isAllowedOrigin, isAllowedRequestHost } from "./bind.js";
 import { readDurableSessionCwd, resolveMachineStatuses } from "./machines.js";
 import { auditDurableSessions, cleanupDurableSession } from "./session-audit.js";
+import { resolveStreamStatuses } from "./streams.js";
 import type { MachineConfig, PaneState } from "./types.js";
 import type { StateStore } from "./state.js";
 import type { SessionManager } from "./session-manager.js";
@@ -46,6 +47,7 @@ export const createHttpServer = (
       agentEvents: snapshot.agentEvents,
       runs: snapshot.runs,
       settings: settings.snapshot(),
+      streams: await resolveStreamStatuses(machines, bindHost),
     };
   };
 
@@ -67,6 +69,11 @@ export const createHttpServer = (
 
       if (url.pathname === "/api/session-audit" && request.method === "GET") {
         sendJson(response, 200, auditDurableSessions());
+        return;
+      }
+
+      if (url.pathname === "/api/streams" && request.method === "GET") {
+        sendJson(response, 200, { streams: await resolveStreamStatuses(machines, bindHost) });
         return;
       }
 
