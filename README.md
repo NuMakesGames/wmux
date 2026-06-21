@@ -79,6 +79,8 @@ Use `kind: "powershell-ssh"` for Windows hosts reachable from a non-Windows wmux
 
 Legacy `kind: "powershell"` still uses `Enter-PSSession -ComputerName`, which uses WSMan remoting. Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts, so an Ubuntu wmux server such as rtx6000 cannot reliably drive a Windows host that way even if `pwsh` is installed and WinRM answers on TCP 5985. PowerShell panes are currently non-durable; they do not survive a wmux service restart the way local/SSH `tmux` or `screen` panes do. Durable Windows process persistence needs a Windows-side wmux agent/service.
 
+For the full Windows registration checklist, see [docs/WINDOWS_NODE_REGISTRATION.md](docs/WINDOWS_NODE_REGISTRATION.md).
+
 ## Settings
 
 The settings modal writes to `~/.wmux/settings.json` on the wmux server. Current settings cover terminal font size and host display aliases, so aliases follow you across browsers without changing the underlying machine IDs used for connections.

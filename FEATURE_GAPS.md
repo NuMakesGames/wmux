@@ -8,7 +8,7 @@
 
 2. PowerShell-over-SSH is scaffolded but not yet validated end to end on 9800x3d.
 
-   `kind: "powershell-ssh"` starts local `pwsh` with `Enter-PSSession -HostName`, which is the intended cross-platform route from an Ubuntu wmux host to a Windows host once OpenSSH Server and the PowerShell SSH subsystem are configured on the target. `kind: "powershell"` remains the legacy WSMan path through `Enter-PSSession -ComputerName`; Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts. The 9800x3d config now uses the SSH transport, but the Windows-side OpenSSH setup, key/password authentication, and rtx6000-to-9800x3d remote PowerShell validation still need to be completed outside this repo.
+   `kind: "powershell-ssh"` starts local `pwsh` with `Enter-PSSession -HostName`, which is the intended cross-platform route from an Ubuntu wmux host to a Windows host once OpenSSH Server and the PowerShell SSH subsystem are configured on the target. `kind: "powershell"` remains the legacy WSMan path through `Enter-PSSession -ComputerName`; Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts. The 9800x3d config now uses the SSH transport and rtx6000-to-9800x3d network connectivity has been confirmed, but PowerShell SSH subsystem validation and wmux pane validation still need to be completed outside this repo.
 
 3. PowerShell session process checkpointing does not survive service restart.
 
