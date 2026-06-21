@@ -51,7 +51,8 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Multiple browsers may attach to the same pane. Only one socket at a time owns PTY resize for that pane; passive viewers do not resize it. Input from a passive viewer promotes that viewer to resize owner and applies that viewer's latest dimensions.
 - Browser reconnect replay is bounded in memory. After service restart, durable sessions redraw from `tmux`/`screen`; wmux does not persist a full terminal transcript.
 - SSH panes stage `wmux-media`, `wmux-copy`, `wmux-notify`, `wmux-title`, `wmux-agent-event`, and `wmux-run` into `~/.cache/wmux/bin` on the remote host and try to place shims in common user bin directories such as `~/.local/bin`, `~/.cargo/bin`, and `~/bin`.
-- Remote helper staging must run under POSIX `sh`; do not rely on zsh/bash-specific word splitting in `src/server/machines.ts`.
+- Windows `powershell-ssh` panes fetch helper scripts from `/api/helpers/windows/:machineId`, stage them into `%LOCALAPPDATA%\wmux\bin`, prepend that directory to `PATH`, and install a temporary PowerShell prompt function for OSC 7 cwd reporting.
+- POSIX SSH helper staging must run under POSIX `sh`; do not rely on zsh/bash-specific word splitting in `src/server/machines.ts`.
 - Session audit cleanup must remain limited to local `wmux_` tmux/screen sessions that the audit marks duplicate or orphan. Never add automatic cleanup of active sessions or non-wmux multiplexer sessions.
 - Machine screen streams are machine-local captures, not browser captures. The active host publishes its own pixels to the MediaMTX service on rtx6000, and wmux viewers embed the active machine's WebRTC path. Do not replace this with `getDisplayMedia` from the viewing browser.
 - Stream capture should remain on-demand. The browser requests/releases a short stream lease through the existing `/ws/events` socket, while `wmux-stream-agent` polls the wmux lease endpoint and only runs `screencapture`/ffmpeg while a lease is active.
@@ -94,6 +95,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Run metadata is handled by `POST /api/run-events`; `scripts/wmux-run` wraps a command and records start/completion state without changing terminal canvas output.
 - Browser clipboard handoff is handled by `POST /api/clipboard`; `scripts/wmux-copy` reads stdin or a file and lets the browser attempt the OS clipboard write with a top-bar fallback button.
 - Browser media handoff is handled by `wmux-media`. Images prefer `kitten icat --transfer-mode=stream --passthrough=tmux --align=left --engine=builtin --stdin=no`; audio/video render in browser media controls; `--mode http` forces the media shelf and `--mode kitty` fails instead of falling back.
+- Windows helper scripts live under `scripts/windows` and are served as a Base64 helper bundle instead of being embedded in the SSH command line. Keep the launch command small; Windows OpenSSH rejects large encoded commands.
 - Terminal-native image rendering is intentionally implemented around the terminal viewport as Kitty placeholder overlays. Keep product styling out of the terminal canvas/content area.
 - `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Merge hooks idempotently and preserve user settings.
 - `wmux-hooks install codex` mutates `~/.codex/hooks.json` outside the repo. Codex command hooks require the user to review/trust them with `/hooks` before they run.
@@ -109,7 +111,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Full cmux-style transcript auto-naming is heuristic. Claude and Codex hook paths exist; OpenCode installation is not implemented.
 - Kitty graphics support is partial. File/shared-memory transfer, animation frames, z-index layering, scrollback-persistent placement, Sixel, and iTerm2 image protocols are not complete.
 - Command run tracking is explicit through `wmux-run`; arbitrary shell command detection is not implemented.
-- Cwd preservation is best-effort outside tmux and common POSIX shells.
+- Cwd preservation is best-effort outside tmux and wmux-managed shell bootstraps.
 - OpenTUI migration is partial and vendored.
 - Pixel streaming is helper-based. Wayland, Windows service/session capture, macOS permission automation, reconnect supervision, and a full wmux native agent remain gaps.
 - Keep `FEATURE_GAPS.md` current when a limitation is discovered or intentionally deferred.

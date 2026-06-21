@@ -1,0 +1,243 @@
+import fs from "node:fs";
+import path from "node:path";
+import { streamPathForMachine } from "./streams.js";
+import type { MachineConfig } from "./types.js";
+
+const psSingleQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+const windowsBootstrapEnvKeys = new Set([
+  "WMUX_WORKSPACE_ID",
+  "WMUX_WORKSPACE_NAME",
+  "WMUX_TAB_ID",
+  "WMUX_TAB_TITLE",
+  "WMUX_PANE_ID",
+  "KITTY_WINDOW_ID",
+]);
+
+export const encodePowerShellCommand = (script: string): string =>
+  Buffer.from(script, "utf16le").toString("base64");
+
+export interface WindowsHelperBundle {
+  files: Array<{ name: string; dataBase64: string }>;
+  streamConfig: Record<string, unknown>;
+}
+
+export const buildWindowsHelperBundle = (machine: MachineConfig, bindHost = "127.0.0.1"): WindowsHelperBundle => ({
+  files: windowsHelperFiles().map(({ name, content }) => ({
+    name,
+    dataBase64: Buffer.from(content, "utf8").toString("base64"),
+  })),
+  streamConfig: windowsStreamConfig(machine, bindHost),
+});
+
+export const buildWindowsPowerShellBootstrapUrl = (
+  machine: MachineConfig,
+  startCwd: string | undefined,
+  extraEnv: Record<string, string>,
+): string => {
+  const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
+  const wmuxPort = process.env.WMUX_PORT ?? "3478";
+  const wmuxUrl = process.env.WMUX_PUBLIC_URL ?? process.env.WMUX_URL ?? `http://${streamHost}:${wmuxPort}`;
+  const url = new URL(`${wmuxUrl.replace(/\/+$/, "")}/api/helpers/windows/${encodeURIComponent(machine.id)}/bootstrap`);
+  if (startCwd) url.searchParams.set("WMUX_START_CWD", startCwd);
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (value && windowsBootstrapEnvKeys.has(key)) url.searchParams.set(key, value);
+  }
+  return url.toString();
+};
+
+export const buildWindowsPowerShellBootstrap = (
+  machine: MachineConfig,
+  startCwd: string | undefined,
+  extraEnv: Record<string, string>,
+): string => {
+  const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
+  const wmuxPort = process.env.WMUX_PORT ?? "3478";
+  const wmuxUrl = process.env.WMUX_PUBLIC_URL ?? process.env.WMUX_URL ?? `http://${streamHost}:${wmuxPort}`;
+  const streamPath = streamPathForMachine(machine.id);
+  const remoteEnv = {
+    TERM: "xterm-256color",
+    COLORTERM: "truecolor",
+    WMUX_MACHINE_ID: machine.id,
+    WMUX_MACHINE_NAME: machine.name,
+    WMUX_START_CWD: startCwd ?? "",
+    WMUX_URL: wmuxUrl,
+    WMUX_STREAM_HOST: streamHost,
+    WMUX_STREAM_PATH: streamPath,
+    WMUX_STREAM_RTSP_URL: `rtsp://${streamHost}:8554/${streamPath}`,
+    WMUX_STREAM_WHIP_URL: `${process.env.WMUX_MEDIAMTX_WEBRTC_ORIGIN ?? `http://${streamHost}:8889`}/${streamPath}/whip`,
+    ...extraEnv,
+  };
+  const envLines = Object.entries(remoteEnv)
+    .filter(([, value]) => value)
+    .map(([key, value]) => `$env:${key} = ${psSingleQuote(value)}`)
+    .join("\n");
+  const bundleUrl = `${wmuxUrl.replace(/\/+$/, "")}/api/helpers/windows/${encodeURIComponent(machine.id)}`;
+
+  return `
+$ErrorActionPreference = 'Continue'
+${envLines}
+
+$LocalAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\\Local' }
+$HelperDir = Join-Path $LocalAppData 'wmux\\bin'
+$StateDir = Join-Path $HOME '.wmux'
+$LogDir = Join-Path $StateDir 'logs'
+New-Item -ItemType Directory -Force -Path $HelperDir, $StateDir, $LogDir | Out-Null
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+$BundleUrl = ${psSingleQuote(bundleUrl)}
+try {
+  $Bundle = Invoke-RestMethod -Method Get -Uri $BundleUrl -TimeoutSec 20
+  foreach ($File in @($Bundle.files)) {
+    $Target = Join-Path $HelperDir ([string]$File.name)
+    [System.IO.File]::WriteAllBytes($Target, [Convert]::FromBase64String([string]$File.dataBase64))
+  }
+  $StreamDefaultsPath = Join-Path $StateDir 'stream-agent.defaults.json'
+  [System.IO.File]::WriteAllText($StreamDefaultsPath, (($Bundle.streamConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine), $Utf8NoBom)
+} catch {
+  Write-Warning "wmux helper staging failed from \${BundleUrl}: $($_.Exception.Message)"
+}
+
+$StreamConfigPath = Join-Path $StateDir 'stream-agent.json'
+if ((Test-Path -LiteralPath $StreamDefaultsPath) -and -not (Test-Path -LiteralPath $StreamConfigPath)) {
+  Copy-Item -LiteralPath $StreamDefaultsPath -Destination $StreamConfigPath -Force
+} elseif (Test-Path -LiteralPath $StreamDefaultsPath) {
+  try {
+    $ExistingConfig = Get-Content -LiteralPath $StreamConfigPath -Raw | ConvertFrom-Json -AsHashtable
+    if ($null -eq $ExistingConfig) { $ExistingConfig = @{} }
+  } catch {
+    $ExistingConfig = @{}
+  }
+  $DefaultConfig = Get-Content -LiteralPath $StreamDefaultsPath -Raw | ConvertFrom-Json -AsHashtable
+  $ChangedConfig = $false
+  foreach ($Key in @('machine', 'server', 'wmuxUrl', 'rtspUrl', 'onDemand', 'pollInterval')) {
+    if (-not $ExistingConfig.ContainsKey($Key)) {
+      $ExistingConfig[$Key] = $DefaultConfig[$Key]
+      $ChangedConfig = $true
+    }
+  }
+  if ($ChangedConfig) {
+    [System.IO.File]::WriteAllText($StreamConfigPath, (($ExistingConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine), $Utf8NoBom)
+  }
+}
+
+if (($env:PATH -split ';') -notcontains $HelperDir) {
+  $env:PATH = "$HelperDir;$env:PATH"
+}
+$env:WMUX_HELPER_DIR = $HelperDir
+
+function global:__wmuxNormalizeStartCwd([string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue)) { return '' }
+  if ($PathValue -match '^/[A-Za-z]:[\\\\/]') { return $PathValue.Substring(1) }
+  return $PathValue
+}
+
+function global:__wmuxFileUriPath([string]$PathValue) {
+  $Normalized = $PathValue -replace '\\\\', '/'
+  if ($Normalized -match '^[A-Za-z]:') {
+    $Normalized = '/' + $Normalized
+  }
+  $Segments = $Normalized.Split([char]'/', [System.StringSplitOptions]::None)
+  return (($Segments | ForEach-Object { [System.Uri]::EscapeDataString($_) }) -join '/')
+}
+
+function global:__wmuxEmitCwd {
+  try {
+    if ($PWD.Provider.Name -ne 'FileSystem') { return }
+    $HostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'windows' }
+    $PathPart = __wmuxFileUriPath $PWD.ProviderPath
+    [Console]::Write("$([char]27)]7;file://$HostName$PathPart$([char]7)")
+  } catch {}
+}
+
+function global:prompt {
+  __wmuxEmitCwd
+  "PS $($executionContext.SessionState.Path.CurrentLocation)> "
+}
+
+$StartCwd = __wmuxNormalizeStartCwd $env:WMUX_START_CWD
+if ($StartCwd) {
+  Set-Location -LiteralPath $StartCwd -ErrorAction SilentlyContinue
+}
+__wmuxEmitCwd
+`;
+};
+
+const windowsPowerShellHelperNames = (): string[] => [
+  "wmux-agent-event",
+  "wmux-copy",
+  "wmux-hooks",
+  "wmux-media",
+  "wmux-notify",
+  "wmux-run",
+  "wmux-stream-agent-service",
+  "wmux-title",
+];
+
+const windowsHelperFiles = (): Array<{ name: string; content: string }> => [
+  ...windowsPowerShellHelperNames().map((name) => ({
+    name: `${name}.ps1`,
+    content: localWindowsHelperScript(`${name}.ps1`),
+  })),
+  ...windowsPowerShellHelperNames().map((name) => ({
+    name: `${name}.cmd`,
+    content: powerShellCmdShim(`${name}.ps1`),
+  })),
+  {
+    name: "wmux-stream-agent.py",
+    content: localScript("wmux-stream-agent"),
+  },
+  {
+    name: "wmux-stream-agent.cmd",
+    content: pythonCmdShim("wmux-stream-agent.py"),
+  },
+];
+
+const windowsStreamConfig = (machine: MachineConfig, bindHost: string): Record<string, unknown> => {
+  const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? bindHost;
+  const wmuxPort = process.env.WMUX_PORT ?? "3478";
+  const wmuxUrl = process.env.WMUX_PUBLIC_URL ?? process.env.WMUX_URL ?? `http://${streamHost}:${wmuxPort}`;
+  const streamPath = streamPathForMachine(machine.id);
+  return {
+    machine: machine.id,
+    server: streamHost,
+    wmuxUrl,
+    rtspUrl: `rtsp://${streamHost}:8554/${streamPath}`,
+    onDemand: true,
+    pollInterval: 2,
+    backend: "auto",
+    framerate: 15,
+    maxWidth: 1920,
+    bitrate: "3500k",
+  };
+};
+
+const localWindowsHelperScript = (name: string): string => {
+  try {
+    return fs.readFileSync(path.join(process.cwd(), "scripts", "windows", name), "utf8");
+  } catch {
+    return `Write-Error '${name} is unavailable on this host'\nexit 127\n`;
+  }
+};
+
+const localScript = (name: string): string => {
+  try {
+    return fs.readFileSync(path.join(process.cwd(), "scripts", name), "utf8");
+  } catch {
+    return `#!/usr/bin/env python3\nimport sys\nprint('${name} is unavailable on this host', file=sys.stderr)\nsys.exit(127)\n`;
+  }
+};
+
+const powerShellCmdShim = (target: string): string => `@echo off
+pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0${target}" %*
+exit /b %ERRORLEVEL%
+`;
+
+const pythonCmdShim = (target: string): string => `@echo off
+where py >nul 2>nul
+if %ERRORLEVEL%==0 (
+  py -3 "%~dp0${target}" %*
+  exit /b %ERRORLEVEL%
+)
+python "%~dp0${target}" %*
+exit /b %ERRORLEVEL%
+`;

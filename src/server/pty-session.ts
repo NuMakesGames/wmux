@@ -138,7 +138,10 @@ const cwdFromFileUri = (value: string): string | undefined => {
   } catch {
     decoded = pathPart;
   }
-  if (!decoded.startsWith("/") || decoded.length > 4096) return undefined;
+  if (/^\/[A-Za-z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
+  if (decoded.length > 4096) return undefined;
   if (/[\x00-\x1f\x7f]/.test(decoded)) return undefined;
+  if (/^[A-Za-z]:[\\/]/.test(decoded)) return decoded;
+  if (!decoded.startsWith("/")) return undefined;
   return decoded;
 };

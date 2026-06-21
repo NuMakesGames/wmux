@@ -117,6 +117,8 @@ Unread notifications light the workspace, tab, and pane. The browser notificatio
 
 SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, and `wmux-stream-agent` available on hosts like Away-Team without manually copying this repo there.
 
+Windows `powershell-ssh` panes fetch a helper bundle from wmux when the pane starts and stage PowerShell/CMD shims into `%LOCALAPPDATA%\wmux\bin`. New Windows panes get the same helper command names plus `wmux-hooks` and `wmux-stream-agent-service`.
+
 ## Agent Events
 
 wmux can update workspace names/descriptors and send completion notifications from agent hooks:
@@ -201,6 +203,8 @@ wmux-stream-agent-service status
 wmux-stream-agent-service logs
 ```
 
+On Windows hosts, `wmux-stream-agent-service install` creates a per-user Scheduled Task at logon. It still requires host-side validation of `ffmpeg`/Python availability and desktop capture behavior in the logged-in user session.
+
 ## Workspace Titles
 
 wmux has cmux-inspired generated title support. Generated titles are tracked separately from user-owned titles, so an auto update cannot overwrite a workspace or tab you manually named.
@@ -231,7 +235,7 @@ The link button in the top bar copies the active workspace/tab URL when the brow
 
 ## Current Directory Preservation
 
-When you create a new workspace, tab, or split on the same host as the source pane, wmux starts the new pane in that source pane's current working directory. With the default durable backend this is resolved from tmux's live `pane_current_path`, so it follows normal `cd` usage without requiring a shell helper. If tmux is unavailable, wmux falls back to the last cwd reported by OSC 7. Local and SSH panes launched through wmux install a temporary zsh/bash prompt hook for this when the backend passes OSC 7 through.
+When you create a new workspace, tab, or split on the same host as the source pane, wmux starts the new pane in that source pane's current working directory. With the default durable backend this is resolved from tmux's live `pane_current_path`, so it follows normal `cd` usage without requiring a shell helper. If tmux is unavailable, wmux falls back to the last cwd reported by OSC 7. Local and SSH panes launched through wmux install a temporary zsh/bash prompt hook for this when the backend passes OSC 7 through. Windows `powershell-ssh` panes install a temporary PowerShell prompt function that emits OSC 7 for filesystem locations.
 
 ## Command Palette
 

@@ -46,9 +46,9 @@
 
    `wmux-copy` posts clipboard text to the wmux browser event stream. The open browser attempts `navigator.clipboard.writeText` immediately and keeps the text in a top-bar fallback buffer. Some browsers block clipboard writes that are not triggered by a user gesture, especially on plain HTTP origins, so the user may need to click the fallback clipboard button.
 
-12. Cwd preservation is best-effort outside tmux and common POSIX shells.
+12. Cwd preservation is best-effort outside tmux and wmux-managed shell bootstraps.
 
-   Same-machine workspaces, tabs, and splits preserve cwd by querying tmux `pane_current_path` for the source pane. When tmux is unavailable, wmux-launched zsh and bash panes emit OSC 7 cwd reports through temporary prompt hooks, but some backends such as macOS screen may not pass those sequences through. PowerShell, fish, custom command machines, and shells launched outside wmux can only preserve cwd if they emit OSC 7 themselves or if a stored/configured cwd is available.
+   Same-machine workspaces, tabs, and splits preserve cwd by querying tmux `pane_current_path` for the source pane. When tmux is unavailable, wmux-launched zsh/bash panes and Windows `powershell-ssh` panes emit OSC 7 cwd reports through temporary prompt hooks. Some backends such as macOS screen may not pass those sequences through. Fish, custom command machines, and shells launched outside wmux can only preserve cwd if they emit OSC 7 themselves or if a stored/configured cwd is available.
 
 13. The empty-state shader is not a native ghostty-web shader.
 
@@ -60,4 +60,4 @@
 
 15. Machine pixel streams are helper-based, not a full wmux native agent yet.
 
-   rtx6000 now runs a local MediaMTX WebRTC/RTSP router, and wmux can show per-machine stream paths from the Stream button. `wmux-stream-agent` can run as a long-lived helper and only starts capture while wmux has an active stream-viewer lease, but this is still a helper process that must run in the graphical login session of each participating machine. macOS requires Screen Recording permission for the app/process that owns capture, Windows capture needs a validated service/session strategy, and Wayland capture is not implemented. A complete per-platform wmux agent should manage permissions, richer reconnect/status reporting, and platform-specific display APIs.
+   rtx6000 now runs a local MediaMTX WebRTC/RTSP router, and wmux can show per-machine stream paths from the Stream button. `wmux-stream-agent` can run as a long-lived helper and only starts capture while wmux has an active stream-viewer lease, but this is still a helper process that must run in the graphical login session of each participating machine. macOS requires Screen Recording permission for the app/process that owns capture, Windows has a Scheduled Task installer path but still needs host-side validation of Python/ffmpeg availability and desktop capture behavior, and Wayland capture is not implemented. A complete per-platform wmux agent should manage permissions, richer reconnect/status reporting, and platform-specific display APIs.

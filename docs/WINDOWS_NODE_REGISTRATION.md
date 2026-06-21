@@ -210,9 +210,11 @@ The node is registered correctly when wmux reports:
 - `wmux.config.json` uses `kind: "powershell-ssh"`, not legacy `kind: "powershell"`.
 - `/api/bootstrap` reports `9800x3d` as reachable.
 - Creating a wmux workspace on `9800x3d` opens an interactive PowerShell session.
+- New Windows panes stage helper scripts into `%LOCALAPPDATA%\wmux\bin`.
+- `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, `wmux-hooks`, and `wmux-stream-agent-service` resolve inside new Windows panes.
 
 ## Known Limits
 
-- PowerShell-over-SSH panes are not durable yet. They are killed when `wmux.service` restarts.
-- Remote helper staging is POSIX-shell-specific and does not run for `powershell-ssh` panes yet.
-- Windows screen streaming still needs a Windows-side stream-agent service/session strategy.
+- Windows SSH PowerShell panes are not durable yet. They are killed when `wmux.service` restarts.
+- Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
+- Windows screen streaming has a per-user Scheduled Task installer path, but desktop capture still needs host-side validation.

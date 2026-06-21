@@ -1,0 +1,160 @@
+$ErrorActionPreference = 'Stop'
+
+function Clean-Text([string]$Value, [int]$Limit) {
+  if (-not $Value) { return '' }
+  $Cleaned = ($Value -replace '\s+', ' ').Trim()
+  if ($Cleaned.Length -gt $Limit) { return $Cleaned.Substring(0, $Limit) }
+  return $Cleaned
+}
+
+function Get-ContentText($Content) {
+  if ($null -eq $Content) { return '' }
+  if ($Content -is [string]) { return $Content }
+  if ($Content -is [System.Collections.IEnumerable]) {
+    $Parts = @()
+    foreach ($Item in $Content) {
+      if ($Item -is [string]) {
+        $Parts += $Item
+      } elseif ($Item.type -in @('text', 'input_text', 'output_text')) {
+        $Parts += [string]$Item.text
+      }
+    }
+    return ($Parts -join "`n")
+  }
+  if ($Content.text) { return [string]$Content.text }
+  if ($Content.content) { return Get-ContentText $Content.content }
+  return ''
+}
+
+function Get-TitleFromPrompt([string]$Prompt) {
+  $Prompt = Clean-Text $Prompt 300
+  $Prompt = ($Prompt -replace '^(please|can you|could you|let''?s|we need to|i want to)\s+', '').TrimEnd('.?!:; ')
+  if (-not $Prompt) { return '' }
+  $Words = $Prompt -split '\s+'
+  return Clean-Text (($Words | Select-Object -First 8) -join ' ') 50
+}
+
+function Get-SummaryFromOutput([string]$Output) {
+  $Output = Clean-Text $Output 600
+  if (-not $Output) { return '' }
+  $First = ($Output -split '(?<=[.!?])\s+|\n+', 2)[0]
+  return Clean-Text $First 120
+}
+
+function Read-HookInput {
+  $Raw = $env:HOOK_INPUT
+  if (-not $Raw -and [Console]::IsInputRedirected) {
+    $Raw = [Console]::In.ReadToEnd()
+  }
+  if (-not $Raw) { return $null }
+  try {
+    return $Raw | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Read-TranscriptSummary([string]$PathValue) {
+  $Result = @{ title = ''; summary = '' }
+  if (-not $PathValue -or -not (Test-Path -LiteralPath $PathValue -PathType Leaf)) { return $Result }
+  $LastUser = ''
+  $LastAssistant = ''
+  Get-Content -LiteralPath $PathValue -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $Entry = $_ | ConvertFrom-Json
+    } catch {
+      return
+    }
+    $Message = if ($Entry.message) { $Entry.message } elseif ($Entry.item) { $Entry.item } else { $Entry }
+    $Role = $Message.role
+    if (-not $Role -and $Message.type -eq 'user_message') { $Role = 'user' }
+    if (-not $Role -and $Message.type -eq 'assistant_message') { $Role = 'assistant' }
+    $Text = Get-ContentText $Message.content
+    if (-not $Text) { $Text = Get-ContentText $Message.text }
+    if ($Role -eq 'user' -and $Text) { $LastUser = $Text }
+    if ($Role -eq 'assistant' -and $Text) { $LastAssistant = $Text }
+  }
+  $Result.title = Get-TitleFromPrompt $LastUser
+  $Result.summary = Get-SummaryFromOutput $LastAssistant
+  return $Result
+}
+
+$WmuxUrl = $env:WMUX_URL
+if (-not $WmuxUrl) { $WmuxUrl = 'http://127.0.0.1:3478' }
+$Agent = $env:WMUX_AGENT_NAME
+if (-not $Agent) { $Agent = 'agent' }
+$Status = 'completed'
+$Title = ''
+$Summary = ''
+$Body = ''
+$PaneId = $env:WMUX_PANE_ID
+$WorkspaceId = $env:WMUX_WORKSPACE_ID
+$TabId = $env:WMUX_TAB_ID
+$Transcript = ''
+$ClaudeHook = $false
+$CodexHook = $false
+$Force = $false
+
+for ($Index = 0; $Index -lt $args.Count; $Index++) {
+  $Arg = [string]$args[$Index]
+  switch ($Arg) {
+    '--url' { $Index++; $WmuxUrl = [string]$args[$Index]; continue }
+    '--agent' { $Index++; $Agent = [string]$args[$Index]; continue }
+    '--status' { $Index++; $Status = [string]$args[$Index]; continue }
+    '--title' { $Index++; $Title = [string]$args[$Index]; continue }
+    '--summary' { $Index++; $Summary = [string]$args[$Index]; continue }
+    '--body' { $Index++; $Body = [string]$args[$Index]; continue }
+    '--pane' { $Index++; $PaneId = [string]$args[$Index]; continue }
+    '--workspace' { $Index++; $WorkspaceId = [string]$args[$Index]; continue }
+    '--tab' { $Index++; $TabId = [string]$args[$Index]; continue }
+    '--transcript' { $Index++; $Transcript = [string]$args[$Index]; continue }
+    '--claude-hook' { $ClaudeHook = $true; continue }
+    '--codex-hook' { $CodexHook = $true; continue }
+    '--force' { $Force = $true; continue }
+    default { throw "unknown argument: $Arg" }
+  }
+}
+
+$HookInput = if ($ClaudeHook -or $CodexHook) { Read-HookInput } else { $null }
+if ($HookInput) {
+  if (-not $Transcript) {
+    $Transcript = if ($HookInput.transcript_path) { [string]$HookInput.transcript_path } else { [string]$HookInput.agent_transcript_path }
+  }
+  if (-not $Title -and $HookInput.prompt) { $Title = Get-TitleFromPrompt ([string]$HookInput.prompt) }
+  if (-not $Summary -and $HookInput.last_assistant_message) { $Summary = Get-SummaryFromOutput ([string]$HookInput.last_assistant_message) }
+}
+$TranscriptResult = Read-TranscriptSummary $Transcript
+if (-not $Title) { $Title = $TranscriptResult.title }
+if (-not $Summary) { $Summary = if ($Body) { $Body } else { $TranscriptResult.summary } }
+
+if ($ClaudeHook) {
+  $Status = 'completed'
+}
+if ($CodexHook -and $HookInput) {
+  $HookEvent = [string]$HookInput.hook_event_name
+  if ($HookEvent -eq 'UserPromptSubmit') {
+    $Status = 'running'
+    if (-not $Summary) { $Summary = 'codex running' }
+  } elseif ($HookEvent) {
+    $Status = 'completed'
+    if (-not $Summary) { $Summary = 'codex completed' }
+  }
+}
+
+if (-not $Force -and -not $PaneId -and -not $WorkspaceId) {
+  exit 0
+}
+
+$Payload = [ordered]@{
+  agent = Clean-Text $Agent 50
+  status = Clean-Text $Status 50
+  title = Clean-Text $Title 80
+  summary = Clean-Text $Summary 500
+  body = Clean-Text $Body 500
+}
+if ($PaneId) { $Payload.paneId = $PaneId }
+if ($WorkspaceId) { $Payload.workspaceId = $WorkspaceId }
+if ($TabId) { $Payload.tabId = $TabId }
+
+$Json = $Payload | ConvertTo-Json -Depth 8 -Compress
+Invoke-RestMethod -Method Post -Uri ($WmuxUrl.TrimEnd('/') + '/api/agent-events') -ContentType 'application/json' -Body $Json | Out-Null

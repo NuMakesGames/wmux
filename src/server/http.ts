@@ -8,6 +8,7 @@ import { readDurableSessionCwd, resolveMachineStatuses } from "./machines.js";
 import { auditDurableSessions, cleanupDurableSession } from "./session-audit.js";
 import { resolveStreamStatuses, StreamRequestStore } from "./streams.js";
 import type { MachineConfig, PaneState } from "./types.js";
+import { buildWindowsHelperBundle, buildWindowsPowerShellBootstrap } from "./windows-helpers.js";
 import type { StateStore } from "./state.js";
 import type { SessionManager } from "./session-manager.js";
 import type { SettingsStore } from "./settings.js";
@@ -75,6 +76,48 @@ export const createHttpServer = (
 
       if (url.pathname === "/api/streams" && request.method === "GET") {
         sendJson(response, 200, { streams: await resolveStreamStatuses(machines, bindHost, streamRequests) });
+        return;
+      }
+
+      const windowsBootstrap = url.pathname.match(/^\/api\/helpers\/windows\/([^/]+)\/bootstrap$/);
+      if (windowsBootstrap && request.method === "GET") {
+        const machineId = decodeURIComponent(windowsBootstrap[1]);
+        const machine = machines.find((candidate) => candidate.id === machineId);
+        if (!machine) {
+          sendJson(response, 404, { error: "unknown_machine" });
+          return;
+        }
+        if (machine.kind !== "powershell-ssh") {
+          sendJson(response, 400, { error: "not_windows_machine" });
+          return;
+        }
+        const startCwd = url.searchParams.get("WMUX_START_CWD") ?? undefined;
+        const extraEnv: Record<string, string> = {};
+        for (const key of windowsBootstrapEnvKeys) {
+          const value = url.searchParams.get(key);
+          if (value) extraEnv[key] = value;
+        }
+        response.writeHead(200, {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        });
+        response.end(buildWindowsPowerShellBootstrap(machine, startCwd, extraEnv));
+        return;
+      }
+
+      const windowsHelpers = url.pathname.match(/^\/api\/helpers\/windows\/([^/]+)$/);
+      if (windowsHelpers && request.method === "GET") {
+        const machineId = decodeURIComponent(windowsHelpers[1]);
+        const machine = machines.find((candidate) => candidate.id === machineId);
+        if (!machine) {
+          sendJson(response, 404, { error: "unknown_machine" });
+          return;
+        }
+        if (machine.kind !== "powershell-ssh") {
+          sendJson(response, 400, { error: "not_windows_machine" });
+          return;
+        }
+        sendJson(response, 200, buildWindowsHelperBundle(machine, bindHost));
         return;
       }
 
@@ -543,6 +586,15 @@ const contentType = (filePath: string): string => {
 
 const machineExists = (machines: MachineConfig[], machineId: string): boolean =>
   machines.some((machine) => machine.id === machineId);
+
+const windowsBootstrapEnvKeys = [
+  "WMUX_WORKSPACE_ID",
+  "WMUX_WORKSPACE_NAME",
+  "WMUX_TAB_ID",
+  "WMUX_TAB_TITLE",
+  "WMUX_PANE_ID",
+  "KITTY_WINDOW_ID",
+];
 
 const cryptoRandomId = (): string =>
   `stream-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;

@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { streamPathForMachine } from "./streams.js";
 import type { MachineConfig, MachineStatus, PtySpawnSpec, SessionBackend } from "./types.js";
+import { buildWindowsPowerShellBootstrapUrl, encodePowerShellCommand } from "./windows-helpers.js";
 
 const DEFAULT_TERM = "xterm-256color";
 const remotePathBootstrap = (): string => `export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"`;
@@ -103,7 +104,19 @@ export const buildSpawnSpec = (
     const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
     const args = ["-tt"];
     if (machine.port) args.push("-p", String(machine.port));
-    args.push(target, machine.shell ?? "pwsh", "-NoLogo", "-NoProfile");
+    const bootstrapUrl = buildWindowsPowerShellBootstrapUrl(machine, startCwd, extraEnv);
+    const bootstrapCommand = `iex (irm ${powershellQuote(bootstrapUrl)})`;
+    args.push(
+      target,
+      machine.shell ?? "pwsh",
+      "-NoLogo",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-NoExit",
+      "-EncodedCommand",
+      encodePowerShellCommand(bootstrapCommand),
+    );
     return { file: "ssh", args, cwd: os.homedir(), env, title: machine.name, trackProcessTitle: false };
   }
 
@@ -147,6 +160,7 @@ export const buildSpawnSpec = (
 };
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+const powershellQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 
 const durableSessionName = (paneId?: string): string => `wmux_${(paneId || "unknown").replace(/[^A-Za-z0-9_-]/g, "_")}`;
 
