@@ -2,11 +2,12 @@
 
 This runbook is for registering a Windows machine, such as `9800x3d`, as a wmux node from the rtx6000 Ubuntu wmux server.
 
-wmux should use `kind: "powershell-ssh"` for Windows nodes reached from non-Windows servers. This transport starts local `pwsh` on the wmux server and runs `Enter-PSSession -HostName ... -UserName ...`, which uses PowerShell remoting over SSH. Do not use the legacy `kind: "powershell"` WSMan transport from rtx6000.
+wmux should use `kind: "powershell-ssh"` for Windows nodes reached from non-Windows servers. This transport starts local `ssh -tt` on the wmux server and launches `pwsh -NoLogo -NoProfile` on the Windows host. Do not use the legacy `kind: "powershell"` WSMan transport from rtx6000.
+
+For parallel host-local validation work, see [WINDOWS_HOST_HANDOFF.md](../WINDOWS_HOST_HANDOFF.md).
 
 References:
 
-- Microsoft PowerShell remoting over SSH: https://learn.microsoft.com/en-us/powershell/scripting/security/remoting/ssh-remoting-in-powershell
 - Microsoft OpenSSH Server setup for Windows: https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse
 - Microsoft OpenSSH Server configuration for Windows: https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration
 - Microsoft OpenSSH key management for Windows: https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_keymanagement
@@ -36,14 +37,11 @@ tailscale ping --timeout=3s --c 1 100.68.206.111
 timeout 3 bash -lc '</dev/tcp/100.68.206.111/22' && echo 'ssh reachable'
 ```
 
-2. Confirm PowerShell 7 exists locally. `kind: "powershell-ssh"` is marked offline when this is missing:
+2. Confirm the local SSH client exists. `kind: "powershell-ssh"` is marked offline when this is missing:
 
 ```bash
-command -v pwsh
-pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion'
+command -v ssh
 ```
-
-If `pwsh` is missing, install PowerShell 7 on rtx6000 using Microsoft’s Ubuntu instructions before registering the node.
 
 3. Confirm the SSH key that wmux should use:
 
@@ -93,29 +91,28 @@ New-NetFirewallRule `
   -Action Allow
 ```
 
-4. Configure the PowerShell SSH subsystem in `C:\ProgramData\ssh\sshd_config`.
+4. Ensure public-key authentication is enabled in `C:\ProgramData\ssh\sshd_config`.
 
-Prefer a no-spaces symlink target so the subsystem path is stable:
-
-```powershell
-New-Item `
-  -ItemType SymbolicLink `
-  -Path 'C:\ProgramData\ssh\pwsh.exe' `
-  -Target (Get-Command pwsh.exe).Source `
-  -Force
-```
-
-Ensure these lines exist in `C:\ProgramData\ssh\sshd_config`:
+These lines should exist:
 
 ```text
 PubkeyAuthentication yes
 PasswordAuthentication yes
-Subsystem powershell C:/ProgramData/ssh/pwsh.exe -sshs -NoLogo -NoProfile
 ```
 
 `PasswordAuthentication yes` is acceptable for initial validation. Prefer disabling it after key authentication works.
 
-5. Install the rtx6000 public key for the Windows user.
+5. Ensure `pwsh.exe` is available to SSH login sessions.
+
+For the current user, this should return a path:
+
+```powershell
+Get-Command pwsh.exe
+```
+
+If `pwsh.exe` is not on the login-session `PATH`, add the PowerShell 7 install directory to the system PATH or set `"shell"` in the wmux machine config to a command path that OpenSSH can execute.
+
+6. Install the rtx6000 public key for the Windows user.
 
 For a non-administrator user, append the public key from rtx6000 to:
 
@@ -135,7 +132,7 @@ Then lock down the administrator key file permissions:
 icacls.exe 'C:\ProgramData\ssh\administrators_authorized_keys' /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F'
 ```
 
-6. Restart SSH:
+7. Restart SSH:
 
 ```powershell
 Restart-Service sshd
@@ -157,14 +154,10 @@ ssh gisen@100.68.206.111 hostname
 ssh gisen@100.68.206.111 pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion'
 ```
 
-3. Validate PowerShell remoting over SSH:
+3. Validate an interactive PowerShell session through forced-PTY SSH:
 
 ```bash
-pwsh -NoLogo -NoProfile -Command '
-$session = New-PSSession -HostName 100.68.206.111 -UserName gisen
-Invoke-Command -Session $session -ScriptBlock { hostname; $PSVersionTable.PSVersion.ToString() }
-Remove-PSSession $session
-'
+ssh -tt gisen@100.68.206.111 pwsh -NoLogo -NoProfile
 ```
 
 If this prompts for a password, complete the first validation interactively, then fix key authentication before expecting wmux to open panes without manual prompts.
@@ -211,9 +204,8 @@ The node is registered correctly when wmux reports:
 
 ## Definition Of Done
 
-- rtx6000 has local `pwsh`.
 - rtx6000 can SSH to the Windows user on `100.68.206.111:22` without a password prompt.
-- `New-PSSession -HostName 100.68.206.111 -UserName gisen` works from rtx6000.
+- `ssh -tt gisen@100.68.206.111 pwsh -NoLogo -NoProfile` opens an interactive prompt from rtx6000.
 - Windows firewall exposes SSH only to Tailscale/internal clients.
 - `wmux.config.json` uses `kind: "powershell-ssh"`, not legacy `kind: "powershell"`.
 - `/api/bootstrap` reports `9800x3d` as reachable.

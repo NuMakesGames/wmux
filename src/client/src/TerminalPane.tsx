@@ -242,12 +242,21 @@ export function TerminalPane({
       for (const event of parsed.events) {
         if (event.kind === "text") {
           const placeholderCells: KittyPlaceholderCell[] = [];
-          writeTerminalOutput(term, outputCarryRef, kittyPlaceholderStripRef, event.text, () => {
-            const imageId = pendingVirtualImageIdRef.current;
-            const cursor = term.wasmTerm?.getCursor();
-            if (!imageId || !cursor) return;
-            placeholderCells.push({ imageId, col: cursor.x, row: cursor.y });
-          });
+          writeTerminalOutput(
+            term,
+            outputCarryRef,
+            kittyPlaceholderStripRef,
+            event.text,
+            () => {
+              const imageId = pendingVirtualImageIdRef.current;
+              const cursor = term.wasmTerm?.getCursor();
+              if (!imageId || !cursor) return;
+              placeholderCells.push({ imageId, col: cursor.x, row: cursor.y });
+            },
+            (privateMode) => {
+              sendInput(socketRef.current, cursorPositionResponse(term, privateMode));
+            },
+          );
           recordKittyPlaceholderCells(placeholderCells);
         }
         if (event.kind === "control") handleKittyControl(event.control);
@@ -637,7 +646,7 @@ const formatDuration = (startedAt: string, completedAt: string): string => {
 };
 
 const DECSTR_SHIM = "\x1b[0m\x1b[?1l\x1b>\x1b[?6l\x1b[?7h\x1b[4l\x1b[r\x1b[?25h\x1b(B";
-const PARTIAL_DECSTR = /\x1b(?:\[[0-9;]*!?)?$/;
+const PARTIAL_DECSTR = /\x1b(?:\[[?0-9;]*!?)?$/;
 const DECSTR = /\x1b\[[0-9;]*!p/g;
 
 const writeTerminalOutput = (
@@ -646,12 +655,19 @@ const writeTerminalOutput = (
   kittyPlaceholderStripRef: MutableRefObject<KittyPlaceholderStripState>,
   data: string,
   onKittyPlaceholder?: () => void,
+  onCursorPositionReportRequest?: (privateMode: boolean) => void,
 ): void => {
   const combined = carryRef.current + data;
   const partial = combined.match(PARTIAL_DECSTR);
   const body = partial ? combined.slice(0, -partial[0].length) : combined;
   carryRef.current = partial?.[0] ?? "";
-  writeTerminalBody(term, kittyPlaceholderStripRef.current, body.replace(DECSTR, DECSTR_SHIM), onKittyPlaceholder);
+  writeTerminalBody(
+    term,
+    kittyPlaceholderStripRef.current,
+    body.replace(DECSTR, DECSTR_SHIM),
+    onKittyPlaceholder,
+    onCursorPositionReportRequest,
+  );
 };
 
 const writeTerminalBody = (
@@ -659,6 +675,7 @@ const writeTerminalBody = (
   state: KittyPlaceholderStripState,
   data: string,
   onKittyPlaceholder?: () => void,
+  onCursorPositionReportRequest?: (privateMode: boolean) => void,
 ): void => {
   let pending = "";
   const chars = Array.from(data);
@@ -671,8 +688,29 @@ const writeTerminalBody = (
     pending = "";
   };
 
+  const flushCursorPositionReport = (privateMode: boolean) => {
+    flush();
+    onCursorPositionReportRequest?.(privateMode);
+  };
+
   for (let index = 0; index < chars.length; index += 1) {
     const char = chars[index];
+    if (char === "\x1b" && chars[index + 1] === "[" && chars[index + 2] === "6" && chars[index + 3] === "n") {
+      flushCursorPositionReport(false);
+      index += 3;
+      continue;
+    }
+    if (
+      char === "\x1b" &&
+      chars[index + 1] === "[" &&
+      chars[index + 2] === "?" &&
+      chars[index + 3] === "6" &&
+      chars[index + 4] === "n"
+    ) {
+      flushCursorPositionReport(true);
+      index += 4;
+      continue;
+    }
     if (isKittyPlaceholder(char)) {
       flush();
       onKittyPlaceholder?.();
@@ -696,6 +734,13 @@ const writeTerminalBody = (
 
   state.pendingPlaceholderMarks = previousWasPlaceholder;
   flush();
+};
+
+const cursorPositionResponse = (term: Terminal, privateMode: boolean): string => {
+  const cursor = term.wasmTerm?.getCursor();
+  const row = clamp((cursor?.y ?? 0) + 1, 1, safeRows(term.rows));
+  const col = clamp((cursor?.x ?? 0) + 1, 1, safeCols(term.cols));
+  return privateMode ? `\x1b[?${row};${col}R` : `\x1b[${row};${col}R`;
 };
 
 const readCellMetrics = (term: Terminal): CellMetrics | null => {

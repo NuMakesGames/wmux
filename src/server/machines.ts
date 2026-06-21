@@ -100,12 +100,11 @@ export const buildSpawnSpec = (
 
   if (machine.kind === "powershell-ssh") {
     if (!machine.host) throw new Error(`Machine ${machine.id} is missing host`);
-    const shell = machine.shell ?? "pwsh";
-    const commandParts = ["Enter-PSSession", "-HostName", powershellQuote(machine.host)];
-    if (machine.user) commandParts.push("-UserName", powershellQuote(machine.user));
-    if (machine.port) commandParts.push("-Port", String(machine.port));
-    const args = ["-NoLogo", "-NoProfile", "-Command", commandParts.join(" ")];
-    return { file: shell, args, cwd: configuredCwd, env, title: machine.name, trackProcessTitle: true };
+    const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
+    const args = ["-tt"];
+    if (machine.port) args.push("-p", String(machine.port));
+    args.push(target, machine.shell ?? "pwsh", "-NoLogo", "-NoProfile");
+    return { file: "ssh", args, cwd: os.homedir(), env, title: machine.name, trackProcessTitle: false };
   }
 
   if (machine.kind === "service") {
@@ -148,7 +147,6 @@ export const buildSpawnSpec = (
 };
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
-const powershellQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 
 const durableSessionName = (paneId?: string): string => `wmux_${(paneId || "unknown").replace(/[^A-Za-z0-9_-]/g, "_")}`;
 
@@ -700,21 +698,20 @@ export const resolveMachineStatuses = async (
         };
       }
       if (machine.kind === "powershell-ssh") {
-        const shell = machine.shell ?? "pwsh";
-        const hasPwsh = commandExists(shell);
+        const hasSsh = commandExists("ssh");
         const port = machine.port ?? 22;
-        const reachable = hasPwsh ? await probeTcp(machine.host, port, 900) : false;
+        const reachable = hasSsh ? await probeTcp(machine.host, port, 900) : false;
         return {
           ...machine,
           reachable,
           checkedAt,
           endpoint: `${machine.host}:${port}`,
           backendDetail: backendDetail(machine),
-          reason: hasPwsh
+          reason: hasSsh
             ? reachable
               ? undefined
               : `no TCP response on ${machine.host}:${port}`
-            : `local PowerShell client is not installed or not executable: ${shell}`,
+            : "local ssh client is not installed or not executable",
         };
       }
       const port = machine.port ?? (machine.kind === "ssh" ? 22 : machine.kind === "powershell" ? 5985 : 3478);
@@ -743,7 +740,7 @@ const backendDetail = (machine: MachineConfig): string => {
   const backend = machine.sessionBackend ?? "auto";
   if (machine.kind === "ssh") return `SSH client; ${backend} durable backend on attach`;
   if (machine.kind === "powershell") return "PowerShell remoting; no durable backend";
-  if (machine.kind === "powershell-ssh") return "PowerShell over SSH; no durable backend";
+  if (machine.kind === "powershell-ssh") return "SSH-launched PowerShell; no durable backend";
   if (machine.kind === "service") return "wmux remote service probe";
   return localBackendDetail(machine);
 };

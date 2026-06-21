@@ -44,7 +44,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Machine definitions are read from `./wmux.config.json` first, then `~/.wmux/config.json`.
 - Keep remote-machine behavior explicit in `MachineConfig`; do not hide durable/session behavior in UI-only state.
 - The `local` and SSH machines default to durable `tmux`/`screen` sessions via `sessionBackend: "auto"`.
-- Use `kind: "powershell-ssh"` for Windows hosts reached from non-Windows wmux servers. Follow [docs/WINDOWS_NODE_REGISTRATION.md](docs/WINDOWS_NODE_REGISTRATION.md) for setup and validation. Legacy `kind: "powershell"` means WSMan `Enter-PSSession -ComputerName`; do not mark it online from a non-Windows wmux host by TCP probe alone.
+- Use `kind: "powershell-ssh"` for Windows hosts reached from non-Windows wmux servers. It uses local `ssh -tt` to launch remote `pwsh`; follow [docs/WINDOWS_NODE_REGISTRATION.md](docs/WINDOWS_NODE_REGISTRATION.md) for setup and validation. Legacy `kind: "powershell"` means WSMan `Enter-PSSession -ComputerName`; do not mark it online from a non-Windows wmux host by TCP probe alone.
 - Same-machine workspace/tab/split creation should preserve the source pane cwd. The primary source is tmux `#{pane_current_path}`; OSC 7 cwd reports from wmux-managed zsh/bash prompt hooks are the fallback state update path.
 - A pane maps to one long-lived server PTY client while the wmux service process is alive. Closing or refreshing the browser disconnects the WebSocket but does not kill the pane process.
 - Restarting the wmux service restores layout metadata and reattaches local/SSH durable sessions when the target has `tmux` or `screen`. Raw PTY and PowerShell panes still cannot preserve live process state across service restart.
@@ -102,8 +102,8 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 
 ## Current Gaps To Preserve In Docs
 
-- Remote per-platform wmux agents are not implemented; remote panes currently run through local `ssh` or PowerShell client processes.
-- PowerShell remoting is scaffolded but not validated and does not have durable restart persistence.
+- Remote per-platform wmux agents are not implemented; remote panes currently run through local client processes such as `ssh`.
+- Windows SSH PowerShell is validated on 9800x3d but does not have durable restart persistence.
 - Machine management is file-based; there is no in-app editor.
 - There is no login/token gate beyond private-network assumptions and request validation.
 - Full cmux-style transcript auto-naming is heuristic. Claude and Codex hook paths exist; OpenCode installation is not implemented.
