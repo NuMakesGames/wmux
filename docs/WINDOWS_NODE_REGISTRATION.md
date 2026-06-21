@@ -221,6 +221,8 @@ wmux-windows-setup persist-path
 wmux-windows-setup install-deps
 wmux-windows-setup install-stream
 wmux-windows-setup stream-status
+wmux-windows-setup install-agent
+wmux-windows-setup agent-status
 ```
 
 Notes:
@@ -229,6 +231,7 @@ Notes:
 - `persist-path` adds `%LOCALAPPDATA%\wmux\bin` to the persistent user PATH for future non-wmux shells.
 - `install-deps` uses `winget` to install `Gyan.FFmpeg` and `Python.Python.3.12` when missing.
 - `install-stream` installs and starts the per-user `wmux-stream-agent` Scheduled Task.
+- `install-agent` installs and starts the per-user `wmux-windows-agent` Scheduled Task for experimental restart-durable sessions.
 
 If you are running setup from plain SSH before the helper directory is on PATH, invoke the staged script by path:
 
@@ -278,6 +281,57 @@ Release the smoke lease when done:
 curl -fsS -X DELETE http://100.107.241.79:3478/api/streams/9800x3d/request/windows-smoke
 ```
 
+## 7. Validate The Windows Session Agent
+
+The experimental session agent listens on the configured Tailscale/internal host, defaulting to port `3481`:
+
+```bash
+curl -fsS http://100.68.206.111:3481/health | jq .
+```
+
+Expected:
+
+```json
+{
+  "ok": true,
+  "version": "0.1",
+  "machine": "9800x3d",
+  "backend": "stdio"
+}
+```
+
+Run a direct lifecycle smoke test:
+
+```bash
+session="windows-agent-smoke"
+curl -fsS -X POST "http://100.68.206.111:3481/sessions/$session" \
+  -H 'content-type: application/json' \
+  -d '{"cols":120,"rows":30,"cwd":"C:\\Users\\gisen"}'
+curl -fsS -X POST "http://100.68.206.111:3481/sessions/$session/input" \
+  -H 'content-type: application/json' \
+  -d '{"dataBase64":"V3JpdGUtT3V0cHV0ICJoZWxsby1mcm9tLWFnZW50Ig0="}'
+curl -fsS "http://100.68.206.111:3481/sessions/$session/output?cursor=0&timeoutMs=1000" |
+  jq -r '.dataBase64' | base64 -d
+curl -fsS -X DELETE "http://100.68.206.111:3481/sessions/$session"
+```
+
+To make wmux use the agent for new panes, opt in explicitly:
+
+```json
+{
+  "id": "9800x3d",
+  "name": "9800x3d",
+  "kind": "powershell-ssh",
+  "host": "100.68.206.111",
+  "user": "gisen",
+  "port": 22,
+  "sessionBackend": "agent",
+  "agentPort": 3481
+}
+```
+
+Keep the legacy `powershell-ssh` path available until the agent has a native ConPTY backend.
+
 ## Definition Of Done
 
 - rtx6000 can SSH to the Windows user on `100.68.206.111:22` without a password prompt.
@@ -290,9 +344,13 @@ curl -fsS -X DELETE http://100.107.241.79:3478/api/streams/9800x3d/request/windo
 - `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, `wmux-hooks`, `wmux-stream-agent-service`, and `wmux-windows-setup` resolve inside new Windows panes.
 - `wmux-windows-setup validate` reports `wmuxApi.reachable: true`, helper scripts present, FFmpeg/Python available, and the stream task running.
 - A short `/api/streams/9800x3d/request` lease causes the Windows stream agent to publish `wmux-9800x3d`, then return idle after release.
+- `wmux-windows-setup validate` reports the `wmux-windows-agent` helper and agent config present.
+- `curl http://100.68.206.111:3481/health` reports the Windows session agent as healthy.
+- A direct `/sessions/:id` create/input/output/delete smoke test returns command output.
 
 ## Known Limits
 
-- Windows SSH PowerShell panes are not durable yet. They are killed when `wmux.service` restarts.
+- Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent` and can survive `wmux.service` restarts.
 - Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
 - Windows screen streaming is validated on 9800x3d through FFmpeg/gdigrab and the per-user Scheduled Task. Locked/logged-out behavior, reconnect supervision, and a native Windows wmux agent are still not implemented.
+- The first Windows session agent backend uses redirected stdio PowerShell, not ConPTY. It is restart-durable for simple shell workflows but does not yet have full terminal fidelity.

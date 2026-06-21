@@ -2,17 +2,17 @@
 
 ## Current Gaps
 
-1. Remote per-platform agents are not implemented.
+1. Remote per-platform agents are only partially implemented.
 
-   The first implementation supports machine affinity by spawning a local PTY for this box or by launching client processes such as `ssh` from this box. It does not yet install a wmux agent on Linux, macOS, or Windows hosts and proxy PTY streams back over a machine-local service.
+   The default implementation supports machine affinity by spawning a local PTY for this box or by launching client processes such as `ssh` from this box. Windows now has an experimental machine-local session agent, but Linux/macOS agents are not implemented and the Windows agent still needs a native ConPTY backend before it can replace the legacy SSH PowerShell path for all terminal workflows.
 
-2. Windows SSH PowerShell is validated on 9800x3d but remains non-durable.
+2. Windows SSH PowerShell is validated on 9800x3d; the Windows agent is experimental.
 
-   `kind: "powershell-ssh"` now starts local `ssh -tt` and launches `pwsh -NoLogo -NoProfile` on the Windows host. This avoids the `Enter-PSSession -HostName` interactive hang seen from wmux's PTY path and does not require the PowerShell SSH remoting subsystem. `kind: "powershell"` remains the legacy WSMan path through `Enter-PSSession -ComputerName`; Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts.
+   `kind: "powershell-ssh"` now starts local `ssh -tt` and launches `pwsh -NoLogo -NoProfile` on the Windows host. This avoids the `Enter-PSSession -HostName` interactive hang seen from wmux's PTY path and does not require the PowerShell SSH remoting subsystem. `sessionBackend: "agent"` opts into the Windows-side agent, which owns processes and replay buffers across wmux server restarts. The first agent backend uses redirected PowerShell stdio, not ConPTY, so it is suitable for simple shell workflows but not full terminal fidelity yet. `kind: "powershell"` remains the legacy WSMan path through `Enter-PSSession -ComputerName`; Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts.
 
-3. PowerShell session process checkpointing does not survive service restart.
+3. Full Windows terminal fidelity still needs a native ConPTY backend.
 
-   Layout, tabs, pane metadata, and machine affinity are persisted. Local and SSH panes can now survive wmux service restarts when the target has `tmux` or `screen`, because wmux reattaches to a durable per-pane multiplexer session. Windows PowerShell panes launched through SSH are killed with the wmux service. Durable Windows process persistence still needs a Windows-side wmux agent/service or a validated Windows multiplexer strategy.
+   Layout, tabs, pane metadata, and machine affinity are persisted. Local and SSH panes can survive wmux service restarts when the target has `tmux` or `screen`, because wmux reattaches to a durable per-pane multiplexer session. Windows panes launched through the experimental agent can survive wmux server restarts, but the stdio backend does not provide true terminal resize semantics, rich line editing, full-screen TUI behavior, or ConPTY-compatible control handling. A native ConPTY backend should replace the stdio process adapter behind the same agent API.
 
 4. Machine management is file-based.
 

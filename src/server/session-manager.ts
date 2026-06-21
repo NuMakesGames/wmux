@@ -4,6 +4,7 @@ import { PtySession } from "./pty-session.js";
 import type { StateStore } from "./state.js";
 import { disposeDurableSession } from "./machines.js";
 import { streamPathForMachine } from "./streams.js";
+import { shouldUseWindowsAgent, WindowsAgentSession } from "./windows-agent.js";
 
 type ClientMessage =
   | { type: "input"; data: string }
@@ -15,8 +16,10 @@ interface SocketState {
   rows: number;
 }
 
+type ManagedSession = PtySession | WindowsAgentSession;
+
 export class SessionManager {
-  private sessions = new Map<string, PtySession>();
+  private sessions = new Map<string, ManagedSession>();
   private sockets = new Map<string, Set<WebSocket>>();
   private resizeOwners = new Map<string, WebSocket>();
   private socketState = new Map<WebSocket, SocketState>();
@@ -92,7 +95,7 @@ export class SessionManager {
     return paneIds.length > 0;
   }
 
-  private ensureSession(pane: PaneState, cols: number, rows: number): PtySession {
+  private ensureSession(pane: PaneState, cols: number, rows: number): ManagedSession {
     const existing = this.sessions.get(pane.id);
     if (existing && !existing.isExited) return existing;
     const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
@@ -100,7 +103,7 @@ export class SessionManager {
     const context = this.state.findPaneContext(pane.id);
     const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
     const streamPath = streamPathForMachine(machine.id);
-    const session = new PtySession(pane, machine, cols, rows, {
+    const sessionEnv = {
       WMUX_URL: process.env.WMUX_PUBLIC_URL ?? `http://${process.env.WMUX_HOST ?? "127.0.0.1"}:${process.env.WMUX_PORT ?? "3478"}`,
       WMUX_WORKSPACE_ID: context?.workspace.id ?? "",
       WMUX_WORKSPACE_NAME: context?.workspace.name ?? "",
@@ -113,7 +116,10 @@ export class SessionManager {
       WMUX_STREAM_RTSP_URL: `rtsp://${streamHost}:8554/${streamPath}`,
       WMUX_STREAM_WHIP_URL: `${process.env.WMUX_MEDIAMTX_WEBRTC_ORIGIN ?? `http://${streamHost}:8889`}/${streamPath}/whip`,
       KITTY_WINDOW_ID: `wmux-${pane.id}`,
-    });
+    };
+    const session = shouldUseWindowsAgent(machine)
+      ? new WindowsAgentSession(pane, machine, cols, rows, sessionEnv)
+      : new PtySession(pane, machine, cols, rows, sessionEnv);
     this.sessions.set(pane.id, session);
     this.state.updatePane(pane.id, { status: "running", exitCode: undefined, title: pane.title });
 
@@ -152,7 +158,7 @@ export class SessionManager {
   private ensureResizeOwner(
     paneId: string,
     socket: WebSocket,
-    session: PtySession,
+    session: ManagedSession,
     size: { cols: number; rows: number },
   ): boolean {
     const owner = this.resizeOwners.get(paneId);
@@ -165,7 +171,7 @@ export class SessionManager {
     return true;
   }
 
-  private promoteResizeOwner(paneId: string, socket: WebSocket, session: PtySession): void {
+  private promoteResizeOwner(paneId: string, socket: WebSocket, session: ManagedSession): void {
     if (this.resizeOwners.get(paneId) === socket) return;
     const state = this.socketState.get(socket);
     if (!state) return;
@@ -173,7 +179,7 @@ export class SessionManager {
     session.resize(state.cols, state.rows);
   }
 
-  private reassignResizeOwner(paneId: string, closedSocket: WebSocket, session: PtySession): void {
+  private reassignResizeOwner(paneId: string, closedSocket: WebSocket, session: ManagedSession): void {
     if (this.resizeOwners.get(paneId) !== closedSocket) {
       this.deleteEmptySocketSet(paneId);
       return;

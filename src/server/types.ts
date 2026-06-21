@@ -1,5 +1,5 @@
 export type MachineKind = "local" | "ssh" | "powershell" | "powershell-ssh" | "service";
-export type SessionBackend = "auto" | "pty" | "tmux" | "screen";
+export type SessionBackend = "auto" | "pty" | "tmux" | "screen" | "agent";
 
 export interface MachineConfig {
   id: string;
@@ -12,6 +12,9 @@ export interface MachineConfig {
   cwd?: string;
   command?: string[];
   sessionBackend?: SessionBackend;
+  agentUrl?: string;
+  agentPort?: number;
+  agentToken?: string;
 }
 
 export interface MachineStatus extends MachineConfig {

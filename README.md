@@ -126,9 +126,10 @@ wmux-windows-setup validate
 wmux-windows-setup persist-path
 wmux-windows-setup install-deps
 wmux-windows-setup install-stream
+wmux-windows-setup install-agent
 ```
 
-`install-deps` uses `winget` to install FFmpeg and Python when missing. `install-stream` creates the per-user Scheduled Task that runs the on-demand screen stream agent.
+`install-deps` uses `winget` to install FFmpeg and Python when missing. `install-stream` creates the per-user Scheduled Task that runs the on-demand screen stream agent. `install-agent` creates a per-user Scheduled Task for the experimental Windows session agent.
 
 ## Agent Events
 
@@ -215,6 +216,30 @@ wmux-stream-agent-service logs
 ```
 
 On Windows hosts, `wmux-stream-agent-service install` creates a per-user Scheduled Task at logon. `wmux-windows-setup install-deps` can install FFmpeg and Python with `winget`, and `wmux-stream-agent --probe-capture` can test a direct one-frame FFmpeg capture. Direct SSH capture may fail with Windows desktop access errors; the scheduled task is the intended path because it runs in the logged-in interactive user context.
+
+## Experimental Windows Session Agent
+
+Windows hosts can run `wmux-windows-agent` as a per-user Scheduled Task:
+
+```powershell
+wmux-windows-setup install-agent
+wmux-windows-setup agent-status
+```
+
+The agent listens on the configured Tailscale/internal host and owns pane processes outside the wmux server process. To opt a Windows machine into it, set:
+
+```json
+{
+  "id": "9800x3d",
+  "kind": "powershell-ssh",
+  "host": "100.68.206.111",
+  "user": "gisen",
+  "sessionBackend": "agent",
+  "agentPort": 3481
+}
+```
+
+This first backend uses redirected PowerShell stdio, so it is restart-durable for simple shell workflows but is not a full ConPTY terminal yet. Full-screen terminal apps, rich line editing, and resize fidelity still need a native ConPTY backend.
 
 ## Workspace Titles
 

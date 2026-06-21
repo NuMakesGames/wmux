@@ -55,6 +55,7 @@ function Get-WindowsWmuxReport {
     'wmux-run',
     'wmux-stream-agent-service',
     'wmux-title',
+    'wmux-windows-agent-service',
     'wmux-windows-setup'
   )
   $Helpers = [ordered]@{}
@@ -66,8 +67,11 @@ function Get-WindowsWmuxReport {
     }
   }
   $ConfigPath = Join-Path $HOME '.wmux\stream-agent.json'
+  $AgentConfigPath = Join-Path $HOME '.wmux\windows-agent.json'
   $Task = Get-ScheduledTask -TaskName 'wmux-stream-agent' -ErrorAction SilentlyContinue
   $TaskInfo = if ($Task) { Get-ScheduledTaskInfo -TaskName 'wmux-stream-agent' -ErrorAction SilentlyContinue } else { $null }
+  $AgentTask = Get-ScheduledTask -TaskName 'wmux-windows-agent' -ErrorAction SilentlyContinue
+  $AgentTaskInfo = if ($AgentTask) { Get-ScheduledTaskInfo -TaskName 'wmux-windows-agent' -ErrorAction SilentlyContinue } else { $null }
   [ordered]@{
     computerName = $env:COMPUTERNAME
     userName = $env:USERNAME
@@ -84,6 +88,11 @@ function Get-WindowsWmuxReport {
     streamTaskState = if ($Task) { [string]$Task.State } else { 'missing' }
     streamTaskLastRunTime = if ($TaskInfo) { $TaskInfo.LastRunTime.ToString('o') } else { $null }
     streamTaskLastTaskResult = if ($TaskInfo) { $TaskInfo.LastTaskResult } else { $null }
+    agentConfigPath = $AgentConfigPath
+    agentConfigExists = Test-Path -LiteralPath $AgentConfigPath -PathType Leaf
+    agentTaskState = if ($AgentTask) { [string]$AgentTask.State } else { 'missing' }
+    agentTaskLastRunTime = if ($AgentTaskInfo) { $AgentTaskInfo.LastRunTime.ToString('o') } else { $null }
+    agentTaskLastTaskResult = if ($AgentTaskInfo) { $AgentTaskInfo.LastTaskResult } else { $null }
     commands = [ordered]@{
       ffmpeg = Get-CommandPath 'ffmpeg.exe'
       python = Get-CommandPath 'python.exe'
@@ -133,13 +142,16 @@ function Install-WmuxDependencies {
 
 function Show-Usage {
   Write-Error @'
-usage: wmux-windows-setup [validate|persist-path|install-deps|install-stream|stream-status|install-hooks|status]
+usage: wmux-windows-setup [validate|persist-path|install-deps|install-stream|stream-status|install-agent|agent-status|agent-logs|install-hooks|status]
 
 validate       Print a JSON report for Windows wmux prerequisites and helper state.
 persist-path   Add %LOCALAPPDATA%\wmux\bin to the persistent user PATH.
 install-deps   Install ffmpeg and Python with winget when missing.
 install-stream Install/start the per-user wmux stream-agent Scheduled Task.
 stream-status  Show the wmux stream-agent Scheduled Task status.
+install-agent  Install/start the per-user wmux Windows session agent Scheduled Task.
+agent-status   Show the wmux Windows session agent Scheduled Task status.
+agent-logs     Show the wmux Windows session agent logs.
 install-hooks  Install Claude and Codex hooks using wmux-hooks.
 status         Alias for validate.
 '@
@@ -165,6 +177,15 @@ switch ($Action) {
   }
   'stream-status' {
     Invoke-WmuxHelper 'wmux-stream-agent-service' @('status')
+  }
+  'install-agent' {
+    Invoke-WmuxHelper 'wmux-windows-agent-service' @('install')
+  }
+  'agent-status' {
+    Invoke-WmuxHelper 'wmux-windows-agent-service' @('status')
+  }
+  'agent-logs' {
+    Invoke-WmuxHelper 'wmux-windows-agent-service' @('logs')
   }
   'install-hooks' {
     Invoke-WmuxHelper 'wmux-hooks' @('install', 'claude')

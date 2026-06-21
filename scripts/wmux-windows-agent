@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
+
+
+VERSION = "0.1"
+DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
+
+
+def load_config(path: str) -> dict[str, Any]:
+    expanded = os.path.expanduser(path)
+    if not os.path.isfile(expanded):
+        return {}
+    with open(expanded, "r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise SystemExit(f"wmux-windows-agent: config must be a JSON object: {expanded}")
+    return value
+
+
+def config_string(config: dict[str, Any], key: str, fallback: str = "") -> str:
+    value = config.get(key)
+    return value if isinstance(value, str) else fallback
+
+
+def config_int(config: dict[str, Any], key: str, fallback: int) -> int:
+    value = config.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def is_private_bind_host(host: str) -> bool:
+    if host in ("localhost", "::1") or host.startswith("127."):
+        return True
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$", host)
+    if not match:
+        return False
+    first, second = int(match.group(1)), int(match.group(2))
+    if first == 10 or first == 192 and second == 168:
+        return True
+    if first == 172 and 16 <= second <= 31:
+        return True
+    return first == 100 and 64 <= second <= 127
+
+
+def powershell_bootstrap(cwd: str) -> str:
+    escaped_cwd = cwd.replace("'", "''")
+    return f"""
+$ErrorActionPreference = 'Continue'
+function global:__wmuxFileUriPath([string]$PathValue) {{
+  $Normalized = $PathValue -replace '\\\\', '/'
+  if ($Normalized -match '^[A-Za-z]:') {{ $Normalized = '/' + $Normalized }}
+  $Segments = $Normalized.Split([char]'/', [System.StringSplitOptions]::None)
+  return (($Segments | ForEach-Object {{ [System.Uri]::EscapeDataString($_) }}) -join '/')
+}}
+function global:__wmuxEmitCwd {{
+  try {{
+    if ($PWD.Provider.Name -ne 'FileSystem') {{ return }}
+    $HostName = if ($env:COMPUTERNAME) {{ $env:COMPUTERNAME }} else {{ 'windows' }}
+    $PathPart = __wmuxFileUriPath $PWD.ProviderPath
+    [Console]::Write("$([char]27)]7;file://$HostName$PathPart$([char]7)")
+  }} catch {{}}
+}}
+function global:prompt {{
+  __wmuxEmitCwd
+  "PS $($executionContext.SessionState.Path.CurrentLocation)> "
+}}
+if ('{escaped_cwd}') {{
+  Set-Location -LiteralPath '{escaped_cwd}' -ErrorAction SilentlyContinue
+}}
+__wmuxEmitCwd
+"""
+
+
+def powershell_command(shell: str, cwd: str) -> list[str]:
+    executable = shell or "pwsh"
+    return [
+        executable,
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-NoExit",
+        "-Command",
+        powershell_bootstrap(cwd),
+    ]
+
+
+class Session:
+    def __init__(self, session_id: str, config: dict[str, Any], payload: dict[str, Any]):
+        self.id = session_id
+        self.config = config
+        self.cwd = str(payload.get("cwd") or config_string(config, "cwd") or os.path.expanduser("~"))
+        self.max_replay = max(65536, config_int(config, "maxReplayBytes", DEFAULT_REPLAY_BYTES))
+        self.buffer = bytearray()
+        self.base = 0
+        self.condition = threading.Condition()
+        self.exited = False
+        self.exit_code: int | None = None
+        self.process = self._spawn(payload)
+        self.reader = threading.Thread(target=self._read_output, name=f"wmux-agent-reader-{session_id}", daemon=True)
+        self.reader.start()
+
+    @property
+    def cursor(self) -> int:
+        return self.base + len(self.buffer)
+
+    @property
+    def pid(self) -> int:
+        return int(self.process.pid or 0)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "pid": self.pid,
+            "status": "exited" if self.exited else "running",
+            "exitCode": self.exit_code,
+            "cwd": self.cwd,
+            "base": self.base,
+            "cursor": self.cursor,
+        }
+
+    def write(self, data: bytes) -> None:
+        if self.exited or not self.process.stdin:
+            return
+        data = data.replace(b"\r", b"\n")
+        self.process.stdin.write(data)
+        self.process.stdin.flush()
+
+    def resize(self, _cols: int, _rows: int) -> None:
+        # The first backend uses redirected stdio. A later ConPTY backend should resize here.
+        return
+
+    def terminate(self) -> None:
+        if self.exited:
+            return
+        try:
+            if os.name == "nt":
+                self.process.send_signal(signal.CTRL_BREAK_EVENT)
+                time.sleep(0.2)
+            self.process.terminate()
+        except Exception:
+            pass
+
+    def read_from(self, cursor: int, timeout_ms: int) -> dict[str, Any]:
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000
+        with self.condition:
+            while cursor >= self.cursor and not self.exited:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.condition.wait(remaining)
+            cursor = max(cursor, self.base)
+            offset = cursor - self.base
+            data = bytes(self.buffer[offset:])
+            return {
+                "base": self.base,
+                "cursor": self.cursor,
+                "dataBase64": base64.b64encode(data).decode("ascii") if data else "",
+                "exited": self.exited,
+                "exitCode": self.exit_code,
+                "cwd": self.cwd,
+            }
+
+    def _spawn(self, payload: dict[str, Any]) -> subprocess.Popen[bytes]:
+        env = os.environ.copy()
+        helper_dir = os.path.expandvars(config_string(self.config, "helperDir"))
+        if helper_dir:
+            env["PATH"] = helper_dir + os.pathsep + env.get("PATH", "")
+            env["WMUX_HELPER_DIR"] = helper_dir
+        payload_env = payload.get("env")
+        if isinstance(payload_env, dict):
+            for key, value in payload_env.items():
+                if isinstance(key, str) and isinstance(value, str):
+                    env[key] = value
+        shell = str(payload.get("shell") or config_string(self.config, "shell", "pwsh"))
+        lower_shell = os.path.basename(shell).lower()
+        if lower_shell in ("pwsh", "pwsh.exe", "powershell", "powershell.exe"):
+            command = powershell_command(shell, self.cwd)
+        else:
+            command = shell
+        return subprocess.Popen(
+            command,
+            cwd=self.cwd if os.path.isdir(self.cwd) else None,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+
+    def _read_output(self) -> None:
+        try:
+            while True:
+                chunk = os.read(self.process.stdout.fileno(), 4096) if self.process.stdout else b""
+                if not chunk:
+                    break
+                self._append(chunk)
+        finally:
+            self.exit_code = self.process.poll()
+            self.exited = True
+            self._append(f"\r\n[wmux-agent] process exited with code {self.exit_code}\r\n".encode("utf-8"))
+            with self.condition:
+                self.condition.notify_all()
+
+    def _append(self, data: bytes) -> None:
+        with self.condition:
+            self.buffer.extend(data)
+            if len(self.buffer) > self.max_replay:
+                overflow = len(self.buffer) - self.max_replay
+                del self.buffer[:overflow]
+                self.base += overflow
+            self.condition.notify_all()
+
+
+class AgentState:
+    def __init__(self, config: dict[str, Any]):
+        self.config = config
+        self.sessions: dict[str, Session] = {}
+        self.lock = threading.Lock()
+
+    def get_or_create(self, session_id: str, payload: dict[str, Any]) -> Session:
+        with self.lock:
+            existing = self.sessions.get(session_id)
+            if existing and not existing.exited:
+                return existing
+            session = Session(session_id, self.config, payload)
+            self.sessions[session_id] = session
+            return session
+
+    def get(self, session_id: str) -> Session | None:
+        with self.lock:
+            return self.sessions.get(session_id)
+
+    def delete(self, session_id: str) -> bool:
+        with self.lock:
+            session = self.sessions.pop(session_id, None)
+        if not session:
+            return False
+        session.terminate()
+        return True
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [session.snapshot() for session in self.sessions.values()]
+
+
+class Handler(BaseHTTPRequestHandler):
+    state: AgentState
+
+    def log_message(self, message: str, *args: Any) -> None:
+        print(f"wmux-windows-agent: {self.address_string()} {message % args}", file=sys.stderr)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if parts == ["health"]:
+            self.send_json(
+                {
+                    "ok": True,
+                    "version": VERSION,
+                    "machine": config_string(self.state.config, "machine", "windows"),
+                    "pid": os.getpid(),
+                    "sessions": len(self.state.sessions),
+                    "backend": "stdio",
+                }
+            )
+            return
+        if parts == ["sessions"]:
+            self.send_json({"sessions": self.state.list_sessions()})
+            return
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "output":
+            session = self.require_session(parts[1])
+            if not session:
+                return
+            query = parse_qs(parsed.query)
+            cursor = int(query.get("cursor", ["0"])[0] or "0")
+            timeout_ms = min(30000, int(query.get("timeoutMs", ["15000"])[0] or "15000"))
+            self.send_json(session.read_from(cursor, timeout_ms))
+            return
+        self.send_json({"error": "not_found"}, status=404)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if len(parts) == 2 and parts[0] == "sessions":
+            session = self.state.get_or_create(parts[1], self.read_json())
+            self.send_json(session.snapshot())
+            return
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "input":
+            session = self.require_session(parts[1])
+            if not session:
+                return
+            body = self.read_json()
+            data = base64.b64decode(str(body.get("dataBase64") or ""))
+            session.write(data)
+            self.send_json({"ok": True})
+            return
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "resize":
+            session = self.require_session(parts[1])
+            if not session:
+                return
+            body = self.read_json()
+            session.resize(int(body.get("cols") or 80), int(body.get("rows") or 24))
+            self.send_json({"ok": True})
+            return
+        self.send_json({"error": "not_found"}, status=404)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if len(parts) == 2 and parts[0] == "sessions":
+            self.send_json({"removed": self.state.delete(parts[1])})
+            return
+        self.send_json({"error": "not_found"}, status=404)
+
+    def read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("content-length") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(min(length, 2 * 1024 * 1024)).decode("utf-8")
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+
+    def require_session(self, session_id: str) -> Session | None:
+        session = self.state.get(session_id)
+        if session:
+            return session
+        self.send_json({"error": "unknown_session"}, status=404)
+        return None
+
+    def send_json(self, payload: Any, status: int = 200) -> None:
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="wmux-windows-agent")
+    parser.add_argument("--config", default=os.environ.get("WMUX_WINDOWS_AGENT_CONFIG", "~/.wmux/windows-agent.json"))
+    parser.add_argument("--host", default="")
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--allow-public-bind", action="store_true")
+    args = parser.parse_args()
+    config = load_config(args.config)
+    host = args.host or config_string(config, "host", "127.0.0.1")
+    port = args.port or config_int(config, "port", 3481)
+    if not args.allow_public_bind and not is_private_bind_host(host):
+        raise SystemExit(f"wmux-windows-agent: refusing to bind non-private host {host}")
+    Handler.state = AgentState(config)
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"wmux-windows-agent: listening on http://{host}:{port}", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

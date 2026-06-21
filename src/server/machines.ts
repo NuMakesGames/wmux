@@ -10,6 +10,7 @@ import {
   buildWindowsPowerShellBootstrapUrl,
   encodePowerShellCommand,
 } from "./windows-helpers.js";
+import { probeWindowsAgent, shouldUseWindowsAgent } from "./windows-agent.js";
 
 const DEFAULT_TERM = "xterm-256color";
 const remotePathBootstrap = (): string => `export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"`;
@@ -241,7 +242,7 @@ esac
 
 export const readDurableSessionCwd = (machine: MachineConfig, paneId: string): string | undefined => {
   const backend = machine.sessionBackend ?? "auto";
-  if (backend === "screen" || backend === "pty" || machine.command?.length) return undefined;
+  if (backend === "screen" || backend === "pty" || backend === "agent" || machine.command?.length) return undefined;
   if (machine.kind !== "local" && machine.kind !== "ssh") return undefined;
   const sessionName = durableSessionName(paneId);
   const query =
@@ -372,7 +373,7 @@ const localScopeScript = (sessionName: string, innerScript: string): string => {
 
 export const disposeDurableSession = (machine: MachineConfig, paneId: string): void => {
   const backend = machine.sessionBackend ?? "auto";
-  if (backend === "pty" || machine.command?.length) return;
+  if (backend === "pty" || backend === "agent" || machine.command?.length) return;
   if (machine.kind !== "local" && machine.kind !== "ssh") return;
   const sessionName = durableSessionName(paneId);
   const killScript = [
@@ -767,12 +768,13 @@ const windowsBackendDetail = (health: Record<string, unknown>): string => {
   const version = typeof health.powerShellVersion === "string" ? `pwsh ${health.powerShellVersion}` : "pwsh";
   const helpers = health.helpersReady === true ? "helpers ready" : `helpers ${health.helperCount ?? 0}/${health.helperTotal ?? "?"}`;
   const streamTask = typeof health.streamTaskState === "string" ? `stream task ${health.streamTaskState}` : "stream task unknown";
+  const agentTask = typeof health.agentTaskState === "string" ? `agent task ${health.agentTaskState}` : "agent task unknown";
   const captureTools = [
     health.ffmpeg === true ? "ffmpeg" : "",
     health.python === true || health.py === true ? "python" : "",
   ].filter(Boolean);
   const tools = captureTools.length ? captureTools.join("+") : "capture tools missing";
-  return `SSH-launched PowerShell; ${version}; ${helpers}; ${streamTask}; ${tools}`;
+  return `SSH-launched PowerShell; ${version}; ${helpers}; ${streamTask}; ${agentTask}; ${tools}`;
 };
 
 const trimProbeError = (stderr: string): string => {
@@ -841,14 +843,26 @@ export const resolveMachineStatuses = async (
               reachable: false,
               reason: hasSsh ? `no TCP response on ${machine.host}:${port}` : "local ssh client is not installed or not executable",
             };
+        const agent = shouldUseWindowsAgent(machine) ? await probeWindowsAgent(machine) : undefined;
+        const agentUnavailable = shouldUseWindowsAgent(machine) && agent?.reachable !== true;
         return {
           ...machine,
-          reachable: health.reachable,
+          reachable: health.reachable && !agentUnavailable,
           checkedAt,
           endpoint: `${machine.host}:${port}`,
-          backendDetail: health.backendDetail ?? backendDetail(machine),
-          reason: health.reason,
-          health: health.health,
+          backendDetail: windowsStatusDetail(health.backendDetail ?? backendDetail(machine), agent),
+          reason: agentUnavailable ? `Windows agent unavailable: ${agent?.reason ?? "unknown error"}` : health.reason,
+          health: {
+            ...(health.health ?? {}),
+            ...(agent
+              ? {
+                  agentReachable: agent.reachable,
+                  agentUrl: agent.url,
+                  agentHealth: agent.health,
+                  agentReason: agent.reason,
+                }
+              : {}),
+          },
         };
       }
       const port = machine.port ?? (machine.kind === "ssh" ? 22 : machine.kind === "powershell" ? 5985 : 3478);
@@ -877,7 +891,19 @@ const backendDetail = (machine: MachineConfig): string => {
   const backend = machine.sessionBackend ?? "auto";
   if (machine.kind === "ssh") return `SSH client; ${backend} durable backend on attach`;
   if (machine.kind === "powershell") return "PowerShell remoting; no durable backend";
+  if (machine.kind === "powershell-ssh" && backend === "agent") return "Windows agent backend";
   if (machine.kind === "powershell-ssh") return "SSH-launched PowerShell; no durable backend";
   if (machine.kind === "service") return "wmux remote service probe";
   return localBackendDetail(machine);
+};
+
+const windowsStatusDetail = (
+  detail: string,
+  agent: Awaited<ReturnType<typeof probeWindowsAgent>> | undefined,
+): string => {
+  if (!agent) return detail;
+  const agentDetail = agent.reachable
+    ? `agent ${agent.health?.version ?? "ready"} at ${agent.url}`
+    : `agent unavailable at ${agent.url ?? "unknown URL"}`;
+  return `${detail}; ${agentDetail}`;
 };

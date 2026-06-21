@@ -15,7 +15,10 @@ const machineSchema = z.object({
   shell: z.string().optional(),
   cwd: z.string().optional(),
   command: z.array(z.string()).min(1).optional(),
-  sessionBackend: z.enum(["auto", "pty", "tmux", "screen"]).optional(),
+  sessionBackend: z.enum(["auto", "pty", "tmux", "screen", "agent"]).optional(),
+  agentUrl: z.string().url().optional(),
+  agentPort: z.number().int().positive().optional(),
+  agentToken: z.string().optional(),
 });
 
 const configSchema = z.object({

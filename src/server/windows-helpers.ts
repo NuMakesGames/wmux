@@ -21,6 +21,7 @@ const windowsRequiredHelperNames = [
   "wmux-run",
   "wmux-stream-agent-service",
   "wmux-title",
+  "wmux-windows-agent-service",
   "wmux-windows-setup",
 ];
 
@@ -30,6 +31,7 @@ export const encodePowerShellCommand = (script: string): string =>
 export interface WindowsHelperBundle {
   files: Array<{ name: string; dataBase64: string }>;
   streamConfig: Record<string, unknown>;
+  agentConfig: Record<string, unknown>;
 }
 
 export const buildWindowsHelperBundle = (machine: MachineConfig, bindHost = "127.0.0.1"): WindowsHelperBundle => ({
@@ -38,6 +40,7 @@ export const buildWindowsHelperBundle = (machine: MachineConfig, bindHost = "127
     dataBase64: Buffer.from(content, "utf8").toString("base64"),
   })),
   streamConfig: windowsStreamConfig(machine, bindHost),
+  agentConfig: windowsAgentConfig(machine),
 });
 
 export const buildWindowsPowerShellBootstrapUrl = (
@@ -104,6 +107,8 @@ try {
   }
   $StreamDefaultsPath = Join-Path $StateDir 'stream-agent.defaults.json'
   [System.IO.File]::WriteAllText($StreamDefaultsPath, (($Bundle.streamConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine), $Utf8NoBom)
+  $AgentDefaultsPath = Join-Path $StateDir 'windows-agent.defaults.json'
+  [System.IO.File]::WriteAllText($AgentDefaultsPath, (($Bundle.agentConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine), $Utf8NoBom)
 } catch {
   Write-Warning "wmux helper staging failed from \${BundleUrl}: $($_.Exception.Message)"
 }
@@ -128,6 +133,29 @@ if ((Test-Path -LiteralPath $StreamDefaultsPath) -and -not (Test-Path -LiteralPa
   }
   if ($ChangedConfig) {
     [System.IO.File]::WriteAllText($StreamConfigPath, (($ExistingConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine), $Utf8NoBom)
+  }
+}
+
+$AgentConfigPath = Join-Path $StateDir 'windows-agent.json'
+if ((Test-Path -LiteralPath $AgentDefaultsPath) -and -not (Test-Path -LiteralPath $AgentConfigPath)) {
+  Copy-Item -LiteralPath $AgentDefaultsPath -Destination $AgentConfigPath -Force
+} elseif (Test-Path -LiteralPath $AgentDefaultsPath) {
+  try {
+    $ExistingAgentConfig = Get-Content -LiteralPath $AgentConfigPath -Raw | ConvertFrom-Json -AsHashtable
+    if ($null -eq $ExistingAgentConfig) { $ExistingAgentConfig = @{} }
+  } catch {
+    $ExistingAgentConfig = @{}
+  }
+  $DefaultAgentConfig = Get-Content -LiteralPath $AgentDefaultsPath -Raw | ConvertFrom-Json -AsHashtable
+  $ChangedAgentConfig = $false
+  foreach ($Key in @('machine', 'host', 'port', 'shell', 'cwd', 'helperDir', 'maxReplayBytes')) {
+    if (-not $ExistingAgentConfig.ContainsKey($Key)) {
+      $ExistingAgentConfig[$Key] = $DefaultAgentConfig[$Key]
+      $ChangedAgentConfig = $true
+    }
+  }
+  if ($ChangedAgentConfig) {
+    [System.IO.File]::WriteAllText($AgentConfigPath, (($ExistingAgentConfig | ConvertTo-Json -Depth 8) + [Environment]::NewLine), $Utf8NoBom)
   }
 }
 
@@ -192,6 +220,8 @@ if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
 }
 $Task = Get-ScheduledTask -TaskName 'wmux-stream-agent' -ErrorAction SilentlyContinue
 $TaskInfo = if ($Task) { Get-ScheduledTaskInfo -TaskName 'wmux-stream-agent' -ErrorAction SilentlyContinue } else { $null }
+$AgentTask = Get-ScheduledTask -TaskName 'wmux-windows-agent' -ErrorAction SilentlyContinue
+$AgentTaskInfo = if ($AgentTask) { Get-ScheduledTaskInfo -TaskName 'wmux-windows-agent' -ErrorAction SilentlyContinue } else { $null }
 $WmuxReachable = $false
 try {
   $Response = Invoke-WebRequest -UseBasicParsing -Method Get -Uri ${psSingleQuote(`${wmuxUrl.replace(/\/+$/, "")}/api/health`)} -TimeoutSec 3
@@ -216,6 +246,10 @@ try {
   streamTaskState = $(if ($Task) { [string]$Task.State } else { 'missing' })
   streamTaskLastRunTime = $(if ($TaskInfo) { $TaskInfo.LastRunTime.ToString('o') } else { $null })
   streamTaskLastTaskResult = $(if ($TaskInfo) { $TaskInfo.LastTaskResult } else { $null })
+  agentConfigExists = [bool](Test-Path -LiteralPath (Join-Path $HOME '.wmux\\windows-agent.json') -PathType Leaf)
+  agentTaskState = $(if ($AgentTask) { [string]$AgentTask.State } else { 'missing' })
+  agentTaskLastRunTime = $(if ($AgentTaskInfo) { $AgentTaskInfo.LastRunTime.ToString('o') } else { $null })
+  agentTaskLastTaskResult = $(if ($AgentTaskInfo) { $AgentTaskInfo.LastTaskResult } else { $null })
 } | ConvertTo-Json -Depth 8 -Compress
 `;
 
@@ -238,6 +272,14 @@ const windowsHelperFiles = (): Array<{ name: string; content: string }> => [
     name: "wmux-stream-agent.cmd",
     content: pythonCmdShim("wmux-stream-agent.py"),
   },
+  {
+    name: "wmux-windows-agent.py",
+    content: localScript("wmux-windows-agent"),
+  },
+  {
+    name: "wmux-windows-agent.cmd",
+    content: pythonCmdShim("wmux-windows-agent.py"),
+  },
 ];
 
 const windowsStreamConfig = (machine: MachineConfig, bindHost: string): Record<string, unknown> => {
@@ -258,6 +300,16 @@ const windowsStreamConfig = (machine: MachineConfig, bindHost: string): Record<s
     bitrate: "3500k",
   };
 };
+
+const windowsAgentConfig = (machine: MachineConfig): Record<string, unknown> => ({
+  machine: machine.id,
+  host: machine.host ?? "127.0.0.1",
+  port: machine.agentPort ?? 3481,
+  shell: machine.shell ?? "pwsh",
+  cwd: machine.cwd ?? "",
+  helperDir: "%LOCALAPPDATA%\\wmux\\bin",
+  maxReplayBytes: 2 * 1024 * 1024,
+});
 
 const localWindowsHelperScript = (name: string): string => {
   try {

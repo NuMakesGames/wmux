@@ -46,6 +46,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - The `local` and SSH machines default to durable `tmux`/`screen` sessions via `sessionBackend: "auto"`.
 - Use `kind: "powershell-ssh"` for Windows hosts reached from non-Windows wmux servers. It uses local `ssh -tt` to launch remote `pwsh`; follow [docs/WINDOWS_NODE_REGISTRATION.md](docs/WINDOWS_NODE_REGISTRATION.md) for setup and validation. Legacy `kind: "powershell"` means WSMan `Enter-PSSession -ComputerName`; do not mark it online from a non-Windows wmux host by TCP probe alone.
 - `powershell-ssh` host status runs a short encoded PowerShell health probe over SSH, cached for about 15 seconds. It reports helper readiness, wmux reachability through `/api/health`, FFmpeg/Python availability, and the `wmux-stream-agent` Scheduled Task state.
+- `sessionBackend: "agent"` on a `powershell-ssh` machine opts into the experimental Windows session agent at `agentUrl` or `http://host:agentPort`. This is restart-durable across wmux server restarts because the Windows agent owns the pane process and replay buffer. The current backend is redirected stdio PowerShell, not ConPTY, so preserve the legacy SSH path as fallback until a native ConPTY backend lands.
 - Same-machine workspace/tab/split creation should preserve the source pane cwd. The primary source is tmux `#{pane_current_path}`; OSC 7 cwd reports from wmux-managed zsh/bash prompt hooks are the fallback state update path.
 - A pane maps to one long-lived server PTY client while the wmux service process is alive. Closing or refreshing the browser disconnects the WebSocket but does not kill the pane process.
 - Restarting the wmux service restores layout metadata and reattaches local/SSH durable sessions when the target has `tmux` or `screen`. Raw PTY and PowerShell panes still cannot preserve live process state across service restart.
@@ -97,7 +98,8 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Browser clipboard handoff is handled by `POST /api/clipboard`; `scripts/wmux-copy` reads stdin or a file and lets the browser attempt the OS clipboard write with a top-bar fallback button.
 - Browser media handoff is handled by `wmux-media`. Images prefer `kitten icat --transfer-mode=stream --passthrough=tmux --align=left --engine=builtin --stdin=no`; audio/video render in browser media controls; `--mode http` forces the media shelf and `--mode kitty` fails instead of falling back.
 - Windows helper scripts live under `scripts/windows` and are served as a Base64 helper bundle instead of being embedded in the SSH command line. Keep the launch command small; Windows OpenSSH rejects large encoded commands.
-- `wmux-windows-setup` is the Windows self-check/setup entry point. It validates helper state, can persist the helper directory to the user PATH, can install FFmpeg/Python with `winget`, and can install/status the per-user stream Scheduled Task. It must work both inside a bootstrapped wmux pane and from plain SSH where `%LOCALAPPDATA%\wmux\bin` is not yet on `PATH`.
+- `wmux-windows-setup` is the Windows self-check/setup entry point. It validates helper state, can persist the helper directory to the user PATH, can install FFmpeg/Python with `winget`, and can install/status the per-user stream and session-agent Scheduled Tasks. It must work both inside a bootstrapped wmux pane and from plain SSH where `%LOCALAPPDATA%\wmux\bin` is not yet on `PATH`.
+- `wmux-windows-agent` is served as `wmux-windows-agent.py` plus a CMD shim. Its HTTP API owns sessions keyed by wmux pane id: create/attach, input, resize placeholder, output long-poll, list, health, and delete. It must bind only loopback, Tailscale, or RFC1918/internal hosts.
 - Terminal-native image rendering is intentionally implemented around the terminal viewport as Kitty placeholder overlays. Keep product styling out of the terminal canvas/content area.
 - `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Merge hooks idempotently and preserve user settings.
 - `wmux-hooks install codex` mutates `~/.codex/hooks.json` outside the repo. Codex command hooks require the user to review/trust them with `/hooks` before they run.
@@ -106,8 +108,8 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 
 ## Current Gaps To Preserve In Docs
 
-- Remote per-platform wmux agents are not implemented; remote panes currently run through local client processes such as `ssh`.
-- Windows SSH PowerShell is validated on 9800x3d but does not have durable restart persistence.
+- Remote per-platform wmux agents are partial. Windows has an experimental stdio session agent; Linux/macOS agents and native Windows ConPTY are not implemented.
+- Windows SSH PowerShell is validated on 9800x3d. The experimental Windows session agent has restart-durable stdio sessions, but full ConPTY terminal fidelity is still pending.
 - Machine management is file-based; there is no in-app editor.
 - There is no login/token gate beyond private-network assumptions and request validation.
 - Full cmux-style transcript auto-naming is heuristic. Claude and Codex hook paths exist; OpenCode installation is not implemented.
