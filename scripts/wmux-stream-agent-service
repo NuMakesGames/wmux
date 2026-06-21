@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "wmux-stream-agent-service currently installs a macOS LaunchAgent only" >&2
+  exit 2
+fi
+
+action="${1:-install}"
+label="${WMUX_STREAM_AGENT_LABEL:-dev.wmux.stream-agent}"
+uid="$(id -u)"
+domain="gui/${uid}"
+launch_agents_dir="${HOME}/Library/LaunchAgents"
+state_dir="${HOME}/.wmux"
+log_dir="${state_dir}/logs"
+app_dir="${state_dir}/WmuxStreamAgent.app"
+app_executable="${app_dir}/Contents/MacOS/WmuxStreamAgent"
+plist="${launch_agents_dir}/${label}.plist"
+config="${WMUX_STREAM_AGENT_CONFIG:-${state_dir}/stream-agent.json}"
+
+helper="${WMUX_STREAM_AGENT_BIN:-}"
+if [[ -z "${helper}" ]]; then
+  helper="$(command -v wmux-stream-agent || true)"
+fi
+if [[ -z "${helper}" && -x "${HOME}/.cache/wmux/bin/wmux-stream-agent" ]]; then
+  helper="${HOME}/.cache/wmux/bin/wmux-stream-agent"
+fi
+if [[ -z "${helper}" && -x "${HOME}/.local/bin/wmux-stream-agent" ]]; then
+  helper="${HOME}/.local/bin/wmux-stream-agent"
+fi
+if [[ -z "${helper}" ]]; then
+  echo "wmux-stream-agent was not found on PATH or in ~/.cache/wmux/bin" >&2
+  exit 127
+fi
+
+xml_escape() {
+  sed \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' \
+    -e "s/'/\&apos;/g"
+}
+
+escaped() {
+  printf '%s' "$1" | xml_escape
+}
+
+write_plist() {
+  mkdir -p "${launch_agents_dir}" "${log_dir}" "${app_dir}/Contents/MacOS" "${app_dir}/Contents/Resources"
+  cat > "${app_dir}/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.wmux.StreamAgent</string>
+  <key>CFBundleName</key>
+  <string>Wmux Stream Agent</string>
+  <key>CFBundleDisplayName</key>
+  <string>Wmux Stream Agent</string>
+  <key>CFBundleExecutable</key>
+  <string>WmuxStreamAgent</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
+EOF
+  cat > "${app_executable}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.local/bin:${HOME}/.cargo/bin"
+exec "${helper}" "\$@"
+EOF
+  chmod +x "${app_executable}"
+
+  cat > "${plist}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(escaped "${label}")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(escaped "${app_executable}")</string>
+    <string>--config</string>
+    <string>$(escaped "${config}")</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$(escaped "${HOME}")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.local/bin:${HOME}/.cargo/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>$(escaped "${log_dir}/stream-agent.out.log")</string>
+  <key>StandardErrorPath</key>
+  <string>$(escaped "${log_dir}/stream-agent.err.log")</string>
+</dict>
+</plist>
+EOF
+}
+
+bootout() {
+  launchctl bootout "${domain}" "${plist}" >/dev/null 2>&1 || true
+}
+
+case "${action}" in
+  install)
+    write_plist
+    bootout
+    launchctl bootstrap "${domain}" "${plist}"
+    launchctl enable "${domain}/${label}"
+    launchctl kickstart -k "${domain}/${label}"
+    echo "Installed ${label}"
+    echo "Screen Recording permission target:"
+    echo "  ${app_dir}"
+    echo "Logs:"
+    echo "  ${log_dir}/stream-agent.out.log"
+    echo "  ${log_dir}/stream-agent.err.log"
+    ;;
+  restart)
+    launchctl kickstart -k "${domain}/${label}"
+    ;;
+  stop)
+    launchctl bootout "${domain}" "${plist}"
+    ;;
+  uninstall)
+    bootout
+    rm -f "${plist}"
+    echo "Uninstalled ${label}"
+    ;;
+  status)
+    launchctl print "${domain}/${label}"
+    ;;
+  logs)
+    tail -n "${WMUX_STREAM_AGENT_LOG_LINES:-120}" "${log_dir}/stream-agent.out.log" "${log_dir}/stream-agent.err.log" 2>/dev/null || true
+    ;;
+  diagnose)
+    echo "domain=${domain}"
+    echo "helper=${helper}"
+    echo "app=${app_dir}"
+    echo "config=${config}"
+    echo "plist=${plist}"
+    echo "--- launchctl ---"
+    launchctl print "${domain}/${label}" 2>&1 | sed -n '1,120p' || true
+    echo "--- process ---"
+    ps auxww | grep -E 'wmux-stream-agent|screencapture|ffmpeg' | grep -v grep || true
+    echo "--- capture probe ---"
+    probe="${log_dir}/stream-agent-probe.jpg"
+    rm -f "${probe}"
+    /usr/sbin/screencapture -x -t jpg "${probe}" 2>&1 || true
+    if [[ -s "${probe}" ]]; then
+      ls -lh "${probe}"
+    else
+      echo "probe did not create an image"
+    fi
+    echo "--- logs ---"
+    "${BASH_SOURCE[0]}" logs
+    ;;
+  open-permissions)
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    open -R "${app_dir}" 2>/dev/null || true
+    echo "Grant Screen Recording permission to: ${app_dir}"
+    ;;
+  *)
+    echo "usage: wmux-stream-agent-service [install|restart|stop|uninstall|status|logs|diagnose|open-permissions]" >&2
+    exit 2
+    ;;
+esac

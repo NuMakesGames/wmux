@@ -6,7 +6,7 @@ import { WebSocketServer } from "ws";
 import { isAllowedOrigin, isAllowedRequestHost } from "./bind.js";
 import { readDurableSessionCwd, resolveMachineStatuses } from "./machines.js";
 import { auditDurableSessions, cleanupDurableSession } from "./session-audit.js";
-import { resolveStreamStatuses } from "./streams.js";
+import { resolveStreamStatuses, StreamRequestStore } from "./streams.js";
 import type { MachineConfig, PaneState } from "./types.js";
 import type { StateStore } from "./state.js";
 import type { SessionManager } from "./session-manager.js";
@@ -37,6 +37,7 @@ export const createHttpServer = (
   settings: SettingsStore,
 ): http.Server => {
   const root = clientRoot();
+  const streamRequests = new StreamRequestStore();
   const bootstrap = async () => {
     const snapshot = state.snapshot();
     return {
@@ -47,7 +48,7 @@ export const createHttpServer = (
       agentEvents: snapshot.agentEvents,
       runs: snapshot.runs,
       settings: settings.snapshot(),
-      streams: await resolveStreamStatuses(machines, bindHost),
+      streams: await resolveStreamStatuses(machines, bindHost, streamRequests),
     };
   };
 
@@ -73,7 +74,50 @@ export const createHttpServer = (
       }
 
       if (url.pathname === "/api/streams" && request.method === "GET") {
-        sendJson(response, 200, { streams: await resolveStreamStatuses(machines, bindHost) });
+        sendJson(response, 200, { streams: await resolveStreamStatuses(machines, bindHost, streamRequests) });
+        return;
+      }
+
+      const streamRequestStatus = url.pathname.match(/^\/api\/streams\/([^/]+)\/request$/);
+      if (streamRequestStatus && request.method === "GET") {
+        const machineId = decodeURIComponent(streamRequestStatus[1]);
+        if (!machineExists(machines, machineId)) {
+          sendJson(response, 404, { error: "unknown_machine" });
+          return;
+        }
+        sendJson(response, 200, streamRequests.snapshot(machineId));
+        return;
+      }
+
+      if (streamRequestStatus && request.method === "POST") {
+        const machineId = decodeURIComponent(streamRequestStatus[1]);
+        if (!machineExists(machines, machineId)) {
+          sendJson(response, 404, { error: "unknown_machine" });
+          return;
+        }
+        const body = (await readBody(request)) as { requestId?: string; ttlMs?: number };
+        const requestId = body.requestId?.trim() || cryptoRandomId();
+        const requestStatus = streamRequests.touch(machineId, requestId, body.ttlMs);
+        sendJson(response, 200, {
+          requestId,
+          ...requestStatus,
+          streams: await resolveStreamStatuses(machines, bindHost, streamRequests),
+        });
+        return;
+      }
+
+      const streamRequestRelease = url.pathname.match(/^\/api\/streams\/([^/]+)\/request\/([^/]+)$/);
+      if (streamRequestRelease && request.method === "DELETE") {
+        const machineId = decodeURIComponent(streamRequestRelease[1]);
+        if (!machineExists(machines, machineId)) {
+          sendJson(response, 404, { error: "unknown_machine" });
+          return;
+        }
+        const requestStatus = streamRequests.release(machineId, decodeURIComponent(streamRequestRelease[2]));
+        sendJson(response, 200, {
+          ...requestStatus,
+          streams: await resolveStreamStatuses(machines, bindHost, streamRequests),
+        });
         return;
       }
 
@@ -427,12 +471,24 @@ export const createHttpServer = (
         state.on("notification", onNotification);
         state.on("media", onMedia);
         state.on("clipboard", onClipboard);
+        streamRequests.on("change", onChange);
+        ws.on("message", (raw) => {
+          const message = parseSocketMessage(raw.toString());
+          if (!message) return;
+          if (message.type === "stream-request" && machineExists(machines, message.machineId)) {
+            streamRequests.touch(message.machineId, message.requestId, message.ttlMs);
+          }
+          if (message.type === "stream-release" && machineExists(machines, message.machineId)) {
+            streamRequests.release(message.machineId, message.requestId);
+          }
+        });
         ws.on("close", () => {
           state.off("change", onChange);
           settings.off("change", onChange);
           state.off("notification", onNotification);
           state.off("media", onMedia);
           state.off("clipboard", onClipboard);
+          streamRequests.off("change", onChange);
         });
         ws.send(JSON.stringify({ type: "ready" }));
       });
@@ -483,4 +539,38 @@ const contentType = (filePath: string): string => {
   if (filePath.endsWith(".css")) return "text/css";
   if (filePath.endsWith(".wasm")) return "application/wasm";
   return "application/octet-stream";
+};
+
+const machineExists = (machines: MachineConfig[], machineId: string): boolean =>
+  machines.some((machine) => machine.id === machineId);
+
+const cryptoRandomId = (): string =>
+  `stream-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+interface StreamSocketMessage {
+  type: "stream-request" | "stream-release";
+  machineId: string;
+  requestId: string;
+  ttlMs?: number;
+}
+
+const parseSocketMessage = (raw: string): StreamSocketMessage | null => {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const message = value as Partial<StreamSocketMessage>;
+  if (message.type !== "stream-request" && message.type !== "stream-release") return null;
+  if (typeof message.machineId !== "string" || typeof message.requestId !== "string") return null;
+  if (!message.machineId.trim() || !message.requestId.trim()) return null;
+  if (message.ttlMs !== undefined && typeof message.ttlMs !== "number") return null;
+  return {
+    type: message.type,
+    machineId: message.machineId.trim(),
+    requestId: message.requestId.trim(),
+    ttlMs: message.ttlMs,
+  };
 };

@@ -74,6 +74,8 @@ If the browser accesses wmux through a MagicDNS or reverse-proxy name that is no
 
 Unix-like local and SSH machines default to `"sessionBackend": "auto"`, which attaches panes to a durable `tmux` session when available, or `screen` when `tmux` is not installed. Use `"sessionBackend": "pty"` to force the original raw PTY behavior for a machine.
 
+PowerShell machines are launched from the wmux server with the local `pwsh` client and `Enter-PSSession`. For a Windows host such as `9800x3d` to show online, the wmux server needs `pwsh` installed, the target host needs WinRM enabled on the configured Tailscale/internal address and port, and remoting authentication must work from the wmux service user. wmux currently treats PowerShell panes as non-durable; they do not survive a wmux service restart the way local/SSH `tmux` or `screen` panes do.
+
 ## Settings
 
 The settings modal writes to `~/.wmux/settings.json` on the wmux server. Current settings cover terminal font size and host display aliases, so aliases follow you across browsers without changing the underlying machine IDs used for connections.
@@ -174,16 +176,25 @@ wmux can show a machine-local pixel stream for the active workspace host. The me
 scripts/install-stream-service.sh
 ```
 
-This binds RTSP and WebRTC to the Tailscale IP and keeps the MediaMTX API on loopback. Each participating machine publishes its own screen to that server path:
+This binds RTSP and WebRTC to the Tailscale IP and keeps the MediaMTX API on loopback. Each participating machine runs a lightweight stream agent for its own screen:
 
 ```bash
-wmux-stream-agent --machine local
-wmux-stream-agent --machine away-team
+wmux-stream-agent-service install
+wmux-stream-agent-service status
 ```
 
-The Stream button in the top right opens the WebRTC stream for the active workspace machine on desktop viewports. New wmux panes expose `WMUX_STREAM_RTSP_URL` and `WMUX_STREAM_WHIP_URL` so the helper knows where to publish.
+The Stream button in the top right opens the WebRTC stream for the active workspace machine on desktop viewports. Opening the dialog requests a short-lived stream lease over the wmux WebSocket; closing it releases the lease. `wmux-stream-agent` polls that lease endpoint and starts `screencapture`/ffmpeg only while at least one browser is actively requesting the stream.
+
+New wmux panes expose `WMUX_STREAM_RTSP_URL` and `WMUX_STREAM_WHIP_URL` so custom publishers know where to publish. The default `~/.wmux/stream-agent.json` also includes `wmuxUrl`, `onDemand: true`, and `pollInterval`.
 
 On macOS, the terminal app that launches `wmux-stream-agent` needs Screen Recording permission: System Settings -> Privacy & Security -> Screen Recording. Enable your terminal app, SSH service wrapper, or whichever app owns the process, then restart that app/session.
+
+For macOS hosts, prefer running the capture helper as a GUI LaunchAgent so it can access the active WindowServer display:
+
+```bash
+wmux-stream-agent-service status
+wmux-stream-agent-service logs
+```
 
 ## Workspace Titles
 

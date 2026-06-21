@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import platform
 import re
 import shutil
+import tempfile
+import time
 import subprocess
 import sys
-from urllib.parse import urlparse
+import urllib.request
+from urllib.parse import quote, urlparse
 
 
 def clean_machine_id(value: str) -> str:
@@ -19,6 +23,46 @@ def host_from_wmux_url() -> str:
     return parsed.hostname or "127.0.0.1"
 
 
+def load_config(path: str) -> dict:
+    expanded = os.path.expanduser(path)
+    if not os.path.isfile(expanded):
+        return {}
+    try:
+        with open(expanded, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except Exception as error:
+        raise SystemExit(f"wmux-stream-agent: could not read {expanded}: {error}")
+    if not isinstance(value, dict):
+        raise SystemExit(f"wmux-stream-agent: config must be a JSON object: {expanded}")
+    return value
+
+
+def config_string(config: dict, key: str, fallback: str = "") -> str:
+    value = config.get(key)
+    return value if isinstance(value, str) else fallback
+
+
+def config_int(config: dict, key: str, fallback: int) -> int:
+    value = config.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def config_bool(config: dict, key: str, fallback: bool) -> bool:
+    value = config.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return fallback
+
+
 def x11_size() -> str:
     if not shutil.which("xdpyinfo"):
         return "1920x1080"
@@ -28,6 +72,44 @@ def x11_size() -> str:
         return "1920x1080"
     match = re.search(r"dimensions:\s+(\d+x\d+)", output)
     return match.group(1) if match else "1920x1080"
+
+
+def macos_avfoundation_devices() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return ""
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return ""
+    return result.stdout
+
+
+def macos_screen_source(preferred: str) -> str:
+    source = preferred.strip()
+    if source and not source.startswith("Capture screen"):
+        return source
+    devices = macos_avfoundation_devices()
+    target_name = source.split(":", 1)[0] if source else "Capture screen 0"
+    screen_index = ""
+    fallback_index = ""
+    for line in devices.splitlines():
+        match = re.search(r"\[(\d+)\]\s+(Capture screen \d+)", line)
+        if not match:
+            continue
+        fallback_index = fallback_index or match.group(1)
+        if match.group(2) == target_name:
+            screen_index = match.group(1)
+            break
+    if screen_index or fallback_index:
+        return f"{screen_index or fallback_index}:none"
+    return source or "0:none"
 
 
 def linux_capture_args(args: argparse.Namespace) -> list[str]:
@@ -53,17 +135,16 @@ def linux_capture_args(args: argparse.Namespace) -> list[str]:
 
 
 def macos_capture_args(args: argparse.Namespace) -> list[str]:
-    source = args.input or "Capture screen 0:none"
-    return [
-        "-f",
-        "avfoundation",
-        "-capture_cursor",
-        "1",
-        "-framerate",
-        str(args.framerate),
-        "-i",
-        source,
-    ]
+    source = macos_screen_source(args.input or "Capture screen 0:none")
+    command = ["-f", "avfoundation"]
+    if args.capture_cursor:
+        command.extend(["-capture_cursor", "1"])
+    if args.input_pixel_format:
+        command.extend(["-pixel_format", args.input_pixel_format])
+    if args.input_framerate:
+        command.extend(["-framerate", str(args.input_framerate)])
+    command.extend(["-i", source])
+    return command
 
 
 def windows_capture_args(args: argparse.Namespace) -> list[str]:
@@ -90,50 +171,44 @@ def capture_args(args: argparse.Namespace) -> list[str]:
     raise SystemExit(f"wmux-stream-agent: unsupported platform: {platform.system()}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        prog="wmux-stream-agent",
-        description="Capture this machine's display and publish it to the wmux MediaMTX stream server.",
-    )
-    parser.add_argument("--machine", default=os.environ.get("WMUX_MACHINE_ID", "local"))
-    parser.add_argument("--server", default=os.environ.get("WMUX_STREAM_HOST") or host_from_wmux_url())
-    parser.add_argument("--rtsp-url", default=os.environ.get("WMUX_STREAM_RTSP_URL", ""))
-    parser.add_argument("--input", default="", help="Override the platform default ffmpeg input.")
-    parser.add_argument("--input-format", default="", help="ffmpeg input format to use with --input.")
-    parser.add_argument("--display", default=os.environ.get("DISPLAY", ""))
-    parser.add_argument("--size", default="", help="X11 capture size, for example 1920x1080.")
-    parser.add_argument("--framerate", type=int, default=int(os.environ.get("WMUX_STREAM_FPS", "15")))
-    parser.add_argument("--bitrate", default=os.environ.get("WMUX_STREAM_BITRATE", "3500k"))
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+def effective_backend(args: argparse.Namespace) -> str:
+    if args.backend != "auto":
+        return args.backend
+    if platform.system().lower() == "darwin":
+        return "screencapture"
+    return "ffmpeg"
 
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        print("wmux-stream-agent: ffmpeg is required", file=sys.stderr)
-        return 127
 
-    machine_id = clean_machine_id(args.machine)
-    rtsp_url = args.rtsp_url or f"rtsp://{args.server}:8554/wmux-{machine_id}"
-    fps = max(1, min(60, args.framerate))
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        *capture_args(args),
+def output_video_args(args: argparse.Namespace, fps: int) -> list[str]:
+    filter_parts = [f"fps={fps}"]
+    if args.max_width:
+        filter_parts.append(f"scale='min({args.max_width},iw)':-2")
+    filter_parts.append("format=yuv420p")
+    return [
         "-an",
+        "-vf",
+        ",".join(filter_parts),
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-tune",
         "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
         "-b:v",
         args.bitrate,
         "-g",
         str(fps * 2),
+    ]
+
+
+def ffmpeg_publish_args(ffmpeg: str, input_args: list[str], output_args: list[str], rtsp_url: str) -> list[str]:
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        *input_args,
+        *output_args,
         "-rtsp_transport",
         "tcp",
         "-f",
@@ -141,12 +216,251 @@ def main() -> int:
         rtsp_url,
     ]
 
+
+def run_screencapture_publisher(
+    ffmpeg: str,
+    args: argparse.Namespace,
+    machine_id: str,
+    rtsp_url: str,
+    fps: int,
+    should_continue=None,
+) -> int:
+    screencapture = shutil.which("screencapture") or "/usr/sbin/screencapture"
+    interval = 1 / max(1, min(10, fps))
+    command = ffmpeg_publish_args(
+        ffmpeg,
+        ["-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", str(max(1, min(10, fps))), "-i", "-"],
+        output_video_args(args, fps),
+        rtsp_url,
+    )
+    if args.dry_run:
+        print(f"{screencapture} -x -t jpg <temp-frame.jpg> | " + " ".join(subprocess.list2cmdline([part]) for part in command))
+        return 0
+
+    print(f"wmux-stream-agent: publishing {machine_id} to {rtsp_url} with screencapture", file=sys.stderr)
+    process = subprocess.Popen(command, stdin=subprocess.PIPE)
+    stopped_by_request = False
+    try:
+        with tempfile.TemporaryDirectory(prefix="wmux-stream-") as tmpdir:
+            frame_path = os.path.join(tmpdir, "frame.jpg")
+            while process.poll() is None:
+                if should_continue and not should_continue():
+                    stopped_by_request = True
+                    break
+                started = time.monotonic()
+                capture = subprocess.run(
+                    [screencapture, "-x", "-t", "jpg", frame_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                )
+                if capture.returncode != 0:
+                    error = capture.stderr.decode("utf-8", "replace").strip()
+                    print(f"wmux-stream-agent: screencapture failed: {error or capture.returncode}", file=sys.stderr)
+                    time.sleep(1)
+                    continue
+                try:
+                    with open(frame_path, "rb") as handle:
+                        frame = handle.read()
+                except OSError as error:
+                    print(f"wmux-stream-agent: could not read captured frame: {error}", file=sys.stderr)
+                    time.sleep(1)
+                    continue
+                if not frame:
+                    print("wmux-stream-agent: captured frame was empty", file=sys.stderr)
+                    time.sleep(1)
+                    continue
+                try:
+                    process.stdin.write(frame)
+                    process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    break
+                elapsed = time.monotonic() - started
+                if elapsed < interval:
+                    time.sleep(interval - elapsed)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if process.stdin:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    return 0 if stopped_by_request else process.returncode or 0
+
+
+def request_status_url(args: argparse.Namespace, machine_id: str) -> str:
+    return args.wmux_url.rstrip("/") + f"/api/streams/{quote(machine_id, safe='')}/request"
+
+
+def stream_requested(args: argparse.Namespace, machine_id: str) -> bool:
+    request = urllib.request.Request(request_status_url(args, machine_id), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=max(2, min(10, args.poll_interval + 2))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return False
+    return bool(isinstance(payload, dict) and payload.get("requested"))
+
+
+def make_request_checker(args: argparse.Namespace, machine_id: str):
+    next_check = 0.0
+    requested = True
+
+    def should_continue() -> bool:
+        nonlocal next_check, requested
+        now = time.monotonic()
+        if now < next_check:
+            return requested
+        next_check = now + max(1, args.poll_interval)
+        requested = stream_requested(args, machine_id)
+        return requested
+
+    return should_continue
+
+
+def run_ffmpeg_publisher(command: list[str], machine_id: str, rtsp_url: str, should_continue=None) -> int:
+    print(f"wmux-stream-agent: publishing {machine_id} to {rtsp_url}", file=sys.stderr)
+    if should_continue is None:
+        return subprocess.call(command)
+
+    process = subprocess.Popen(command)
+    stopped_by_request = False
+    try:
+        while process.poll() is None:
+            if not should_continue():
+                stopped_by_request = True
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+    return 0 if stopped_by_request else process.returncode or 0
+
+
+def run_publisher(
+    ffmpeg: str,
+    args: argparse.Namespace,
+    machine_id: str,
+    rtsp_url: str,
+    fps: int,
+    backend: str,
+    should_continue=None,
+) -> int:
+    if backend == "screencapture":
+        return run_screencapture_publisher(ffmpeg, args, machine_id, rtsp_url, fps, should_continue)
+
+    command = ffmpeg_publish_args(ffmpeg, capture_args(args), output_video_args(args, fps), rtsp_url)
     if args.dry_run:
         print(" ".join(subprocess.list2cmdline([part]) for part in command))
         return 0
+    return run_ffmpeg_publisher(command, machine_id, rtsp_url, should_continue)
 
-    print(f"wmux-stream-agent: publishing {machine_id} to {rtsp_url}", file=sys.stderr)
-    return subprocess.call(command)
+
+def run_on_demand(ffmpeg: str, args: argparse.Namespace, machine_id: str, rtsp_url: str, fps: int, backend: str) -> int:
+    print(
+        f"wmux-stream-agent: waiting for wmux stream requests at {request_status_url(args, machine_id)}",
+        file=sys.stderr,
+    )
+    while True:
+        try:
+            if not stream_requested(args, machine_id):
+                time.sleep(max(1, args.poll_interval))
+                continue
+            print(f"wmux-stream-agent: stream requested for {machine_id}", file=sys.stderr)
+            result = run_publisher(
+                ffmpeg,
+                args,
+                machine_id,
+                rtsp_url,
+                fps,
+                backend,
+                make_request_checker(args, machine_id),
+            )
+            if result not in (0, None):
+                print(f"wmux-stream-agent: publisher exited with code {result}", file=sys.stderr)
+            print(f"wmux-stream-agent: stream idle for {machine_id}", file=sys.stderr)
+            time.sleep(max(1, args.poll_interval))
+        except KeyboardInterrupt:
+            return 0
+
+
+def main() -> int:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--config",
+        default=os.environ.get("WMUX_STREAM_AGENT_CONFIG", "~/.wmux/stream-agent.json"),
+    )
+    pre_args, _ = pre_parser.parse_known_args()
+    config = load_config(pre_args.config)
+    system = platform.system().lower()
+    default_input_pixel_format = ""
+
+    parser = argparse.ArgumentParser(
+        prog="wmux-stream-agent",
+        description="Capture this machine's display and publish it to the wmux MediaMTX stream server.",
+        parents=[pre_parser],
+    )
+    parser.add_argument("--machine", default=os.environ.get("WMUX_MACHINE_ID") or config_string(config, "machine", "local"))
+    parser.add_argument("--server", default=os.environ.get("WMUX_STREAM_HOST") or config_string(config, "server") or host_from_wmux_url())
+    parser.add_argument("--rtsp-url", default=os.environ.get("WMUX_STREAM_RTSP_URL") or config_string(config, "rtspUrl"))
+    parser.add_argument("--wmux-url", default=os.environ.get("WMUX_URL") or config_string(config, "wmuxUrl"))
+    parser.add_argument("--input", default=config_string(config, "input"), help="Override the platform default ffmpeg input.")
+    parser.add_argument("--input-format", default=config_string(config, "inputFormat"), help="ffmpeg input format to use with --input.")
+    parser.add_argument("--backend", choices=("auto", "ffmpeg", "avfoundation", "screencapture"), default=config_string(config, "backend", "auto"))
+    parser.add_argument("--input-pixel-format", default=config_string(config, "inputPixelFormat", default_input_pixel_format), help="Input pixel format for avfoundation, for example nv12.")
+    parser.add_argument("--input-framerate", type=int, default=config_int(config, "inputFramerate", 0), help="Input capture framerate. On macOS, 0 lets AVFoundation choose.")
+    parser.add_argument("--capture-cursor", action="store_true", default=bool(config.get("captureCursor", False)), help="Ask the macOS AVFoundation screen source to capture the cursor.")
+    parser.add_argument("--display", default=os.environ.get("DISPLAY") or config_string(config, "display"))
+    parser.add_argument("--size", default=config_string(config, "size"), help="X11 capture size, for example 1920x1080.")
+    parser.add_argument("--framerate", type=int, default=int(os.environ.get("WMUX_STREAM_FPS") or config_int(config, "framerate", 15)))
+    parser.add_argument("--bitrate", default=os.environ.get("WMUX_STREAM_BITRATE") or config_string(config, "bitrate", "3500k"))
+    parser.add_argument("--max-width", type=int, default=config_int(config, "maxWidth", 1920), help="Downscale wider captures before encoding; 0 disables scaling.")
+    parser.add_argument("--poll-interval", type=int, default=config_int(config, "pollInterval", 2), help="Seconds between wmux request checks in on-demand mode.")
+    demand_group = parser.add_mutually_exclusive_group()
+    demand_group.add_argument("--on-demand", dest="on_demand", action="store_true", help="Only capture while wmux has an active stream viewer request.")
+    demand_group.add_argument("--no-on-demand", dest="on_demand", action="store_false", help="Publish continuously instead of waiting for viewer requests.")
+    parser.set_defaults(on_demand=config_bool(config, "onDemand", False))
+    parser.add_argument("--list-devices", action="store_true", help="List ffmpeg capture devices and exit.")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    args.poll_interval = max(1, min(60, args.poll_interval))
+    if not args.wmux_url:
+        args.wmux_url = f"http://{args.server}:{os.environ.get('WMUX_PORT', '3478')}"
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        print("wmux-stream-agent: ffmpeg is required", file=sys.stderr)
+        return 127
+
+    if args.list_devices:
+        if system == "darwin":
+            return subprocess.call([ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        print("wmux-stream-agent: --list-devices is currently implemented for macOS avfoundation only", file=sys.stderr)
+        return 2
+
+    machine_id = clean_machine_id(args.machine)
+    rtsp_url = args.rtsp_url or f"rtsp://{args.server}:8554/wmux-{machine_id}"
+    fps = max(1, min(60, args.framerate))
+    backend = effective_backend(args)
+    if args.dry_run and args.on_demand:
+        print(f"on-demand request URL: {request_status_url(args, machine_id)}")
+    if args.on_demand and not args.dry_run:
+        return run_on_demand(ffmpeg, args, machine_id, rtsp_url, fps, backend)
+
+    return run_publisher(ffmpeg, args, machine_id, rtsp_url, fps, backend)
 
 
 if __name__ == "__main__":

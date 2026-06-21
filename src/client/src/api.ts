@@ -15,6 +15,16 @@ const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
 export const api = {
   bootstrap: () => json<BootstrapPayload>("/api/bootstrap"),
   streams: () => json<{ streams: BootstrapPayload["streams"] }>("/api/streams"),
+  requestStream: (machineId: string, requestId: string, ttlMs: number) =>
+    json<{ streams: BootstrapPayload["streams"] }>(`/api/streams/${encodeURIComponent(machineId)}/request`, {
+      method: "POST",
+      body: JSON.stringify({ requestId, ttlMs }),
+    }),
+  releaseStream: (machineId: string, requestId: string) =>
+    json<{ streams: BootstrapPayload["streams"] }>(
+      `/api/streams/${encodeURIComponent(machineId)}/request/${encodeURIComponent(requestId)}`,
+      { method: "DELETE" },
+    ),
   auditSessions: () => json<DurableSessionAudit>("/api/session-audit"),
   cleanupSession: (backend: "tmux" | "screen", name: string) =>
     json<DurableSessionAudit>(`/api/session-audit/${backend}/${encodeURIComponent(name)}`, { method: "DELETE" }),

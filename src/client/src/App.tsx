@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, Link2, PanelLeft, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "./api";
 import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
@@ -65,6 +65,7 @@ export function App() {
   const [streamOpen, setStreamOpen] = useState(false);
   const [clipboardItem, setClipboardItem] = useState<TerminalClipboard | null>(null);
   const [clipboardStatus, setClipboardStatus] = useState<"idle" | "copied" | "blocked">("idle");
+  const eventsSocketRef = useRef<WebSocket | null>(null);
   const seenNotificationIds = useRef(new Set<string>());
   const lastSyncedPath = useRef("");
   const previousMobileViewport = useRef(mobileViewport.isMobile);
@@ -95,6 +96,7 @@ export function App() {
       setServiceConnection("connecting");
       const ws = new WebSocket(`${protocol}//${window.location.host}/ws/events`);
       socket = ws;
+      eventsSocketRef.current = ws;
       ws.onopen = () => setServiceConnection("online");
       ws.onmessage = (event) => {
         const message = JSON.parse(event.data);
@@ -120,6 +122,7 @@ export function App() {
         }
       };
       ws.onclose = () => {
+        if (eventsSocketRef.current === ws) eventsSocketRef.current = null;
         if (!closed) {
           setServiceConnection("offline");
           reconnectTimer = window.setTimeout(connect, 1500);
@@ -131,6 +134,7 @@ export function App() {
     return () => {
       closed = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (eventsSocketRef.current === socket) eventsSocketRef.current = null;
       socket?.close();
     };
   }, []);
@@ -576,6 +580,41 @@ export function App() {
     setCommandPaletteQuery("");
     setCommandPaletteOpen(true);
   };
+
+  const sendEventSocketMessage = useCallback((message: unknown): boolean => {
+    const socket = eventsSocketRef.current;
+    if (socket?.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(message));
+    return true;
+  }, []);
+
+  const requestStream = useCallback(
+    (machineId: string, requestId: string, ttlMs: number) => {
+      const sent = sendEventSocketMessage({ type: "stream-request", machineId, requestId, ttlMs });
+      if (sent) return;
+      api
+        .requestStream(machineId, requestId, ttlMs)
+        .then((response) =>
+          setState((current) => (current ? { ...current, streams: response.streams } : current)),
+        )
+        .catch(() => undefined);
+    },
+    [sendEventSocketMessage],
+  );
+
+  const releaseStream = useCallback(
+    (machineId: string, requestId: string) => {
+      const sent = sendEventSocketMessage({ type: "stream-release", machineId, requestId });
+      if (sent) return;
+      api
+        .releaseStream(machineId, requestId)
+        .then((response) =>
+          setState((current) => (current ? { ...current, streams: response.streams } : current)),
+        )
+        .catch(() => undefined);
+    },
+    [sendEventSocketMessage],
+  );
 
   const commands = useMemo<PaletteCommand[]>(() => {
     const activePane = activeTab?.panes.find((pane) => pane.id === activeTab.activePaneId);
@@ -1165,6 +1204,8 @@ export function App() {
         <ScreenStreamViewer
           machine={activeStreamMachine}
           stream={activeStream}
+          onRequest={requestStream}
+          onRelease={releaseStream}
           onClose={() => setStreamOpen(false)}
         />
       ) : null}

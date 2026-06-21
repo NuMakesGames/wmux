@@ -117,6 +117,9 @@ export interface StreamStatus {
   machineId: string;
   path: string;
   live: boolean;
+  requested: boolean;
+  requestCount: number;
+  requestedUntil?: string;
   viewerCount: number;
   startedAt?: string;
   webRtcUrl: string;

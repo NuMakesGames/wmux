@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { streamPathForMachine } from "./streams.js";
 import type { MachineConfig, MachineStatus, PtySpawnSpec, SessionBackend } from "./types.js";
 
 const DEFAULT_TERM = "xterm-256color";
@@ -69,7 +70,7 @@ export const buildSpawnSpec = (
     const sessionName = durableSessionName(extraEnv.WMUX_PANE_ID);
     const remotePathExport = remotePathBootstrap();
     const remoteCommand =
-      `${remotePathExport}; ${installRemoteHelpersScript()} ` +
+      `${remotePathExport}; ${installRemoteHelpersScript(machine)} ` +
       durableShellScript({
         backend: machine.sessionBackend ?? "auto",
         sessionName,
@@ -358,9 +359,64 @@ export const disposeDurableSession = (machine: MachineConfig, paneId: string): v
 
 const remoteHelperDir = (): string => "${XDG_CACHE_HOME:-$HOME/.cache}/wmux/bin";
 
-const installRemoteHelpersScript = (): string => `
+const installRemoteHelpersScript = (machine: MachineConfig): string => {
+  const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
+  const wmuxPort = process.env.WMUX_PORT ?? "3478";
+  const wmuxUrl = process.env.WMUX_PUBLIC_URL ?? process.env.WMUX_URL ?? `http://${streamHost}:${wmuxPort}`;
+  const streamPath = streamPathForMachine(machine.id);
+  const streamConfig = JSON.stringify(
+    {
+      machine: machine.id,
+      server: streamHost,
+      wmuxUrl,
+      rtspUrl: `rtsp://${streamHost}:8554/${streamPath}`,
+      onDemand: true,
+      pollInterval: 2,
+      backend: "auto",
+      framerate: 15,
+      maxWidth: 1920,
+      bitrate: "3500k",
+    },
+    null,
+    2,
+  );
+  return `
 wmux_helper_dir="${remoteHelperDir()}";
 mkdir -p "$wmux_helper_dir";
+mkdir -p "$HOME/.wmux" 2>/dev/null || true;
+wmux_stream_agent_config="$HOME/.wmux/stream-agent.json";
+wmux_stream_agent_defaults="$HOME/.wmux/stream-agent.defaults.json";
+cat > "$wmux_stream_agent_defaults" <<'__WMUX_STREAM_AGENT_CONFIG__'
+${streamConfig}
+__WMUX_STREAM_AGENT_CONFIG__
+if [ ! -f "$wmux_stream_agent_config" ]; then
+  cp "$wmux_stream_agent_defaults" "$wmux_stream_agent_config" 2>/dev/null || true;
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$wmux_stream_agent_config" "$wmux_stream_agent_defaults" <<'__WMUX_STREAM_AGENT_CONFIG_MERGE__' 2>/dev/null || true
+import json
+import sys
+
+config_path, defaults_path = sys.argv[1], sys.argv[2]
+with open(defaults_path, "r", encoding="utf-8") as handle:
+    defaults = json.load(handle)
+try:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+changed = False
+for key in ("machine", "server", "wmuxUrl", "rtspUrl", "onDemand", "pollInterval"):
+    if key not in config:
+        config[key] = defaults[key]
+        changed = True
+if changed:
+    with open(config_path, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\\n")
+__WMUX_STREAM_AGENT_CONFIG_MERGE__
+fi;
 cat > "$wmux_helper_dir/wmux-media" <<'__WMUX_MEDIA_HELPER__'
 ${remoteMediaHelper}
 __WMUX_MEDIA_HELPER__
@@ -382,7 +438,10 @@ __WMUX_COPY_HELPER__
 cat > "$wmux_helper_dir/wmux-stream-agent" <<'__WMUX_STREAM_AGENT_HELPER__'
 ${localHelperScript("wmux-stream-agent")}
 __WMUX_STREAM_AGENT_HELPER__
-chmod +x "$wmux_helper_dir/wmux-media" "$wmux_helper_dir/wmux-notify" "$wmux_helper_dir/wmux-title" "$wmux_helper_dir/wmux-agent-event" "$wmux_helper_dir/wmux-run" "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wmux-stream-agent";
+cat > "$wmux_helper_dir/wmux-stream-agent-service" <<'__WMUX_STREAM_AGENT_SERVICE_HELPER__'
+${localHelperScript("wmux-stream-agent-service")}
+__WMUX_STREAM_AGENT_SERVICE_HELPER__
+chmod +x "$wmux_helper_dir/wmux-media" "$wmux_helper_dir/wmux-notify" "$wmux_helper_dir/wmux-title" "$wmux_helper_dir/wmux-agent-event" "$wmux_helper_dir/wmux-run" "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wmux-stream-agent" "$wmux_helper_dir/wmux-stream-agent-service";
 wmux_old_ifs="$IFS";
 IFS=":";
 wmux_candidate_path="$PATH:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/bin";
@@ -398,12 +457,14 @@ for wmux_path_dir in $wmux_candidate_path; do
         ln -sf "$wmux_helper_dir/wmux-run" "$wmux_path_dir/wmux-run" 2>/dev/null || true;
         ln -sf "$wmux_helper_dir/wmux-copy" "$wmux_path_dir/wmux-copy" 2>/dev/null || true;
         ln -sf "$wmux_helper_dir/wmux-stream-agent" "$wmux_path_dir/wmux-stream-agent" 2>/dev/null || true;
+        ln -sf "$wmux_helper_dir/wmux-stream-agent-service" "$wmux_path_dir/wmux-stream-agent-service" 2>/dev/null || true;
       fi;
       ;;
   esac;
 done;
 IFS="$wmux_old_ifs";
 `;
+};
 
 const localHelperScript = (name: string): string => {
   try {
