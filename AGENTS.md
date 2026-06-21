@@ -44,6 +44,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Machine definitions are read from `./wmux.config.json` first, then `~/.wmux/config.json`.
 - Keep remote-machine behavior explicit in `MachineConfig`; do not hide durable/session behavior in UI-only state.
 - The `local` and SSH machines default to durable `tmux`/`screen` sessions via `sessionBackend: "auto"`.
+- `kind: "powershell"` currently means WSMan `Enter-PSSession -ComputerName`. Do not mark it online from a non-Windows wmux host by TCP probe alone; Microsoft does not support WSMan remoting from non-Windows PowerShell hosts. Prefer adding an explicit PowerShell-over-SSH transport or a Windows-side agent.
 - Same-machine workspace/tab/split creation should preserve the source pane cwd. The primary source is tmux `#{pane_current_path}`; OSC 7 cwd reports from wmux-managed zsh/bash prompt hooks are the fallback state update path.
 - A pane maps to one long-lived server PTY client while the wmux service process is alive. Closing or refreshing the browser disconnects the WebSocket but does not kill the pane process.
 - Restarting the wmux service restores layout metadata and reattaches local/SSH durable sessions when the target has `tmux` or `screen`. Raw PTY and PowerShell panes still cannot preserve live process state across service restart.

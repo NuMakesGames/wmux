@@ -74,7 +74,7 @@ If the browser accesses wmux through a MagicDNS or reverse-proxy name that is no
 
 Unix-like local and SSH machines default to `"sessionBackend": "auto"`, which attaches panes to a durable `tmux` session when available, or `screen` when `tmux` is not installed. Use `"sessionBackend": "pty"` to force the original raw PTY behavior for a machine.
 
-PowerShell machines are launched from the wmux server with the local `pwsh` client and `Enter-PSSession`. For a Windows host such as `9800x3d` to show online, the wmux server needs `pwsh` installed, the target host needs WinRM enabled on the configured Tailscale/internal address and port, and remoting authentication must work from the wmux service user. wmux currently treats PowerShell panes as non-durable; they do not survive a wmux service restart the way local/SSH `tmux` or `screen` panes do.
+PowerShell machines are scaffolded through `Enter-PSSession -ComputerName`, which uses WSMan remoting. Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts, so an Ubuntu wmux server such as rtx6000 cannot reliably drive a Windows host that way even if `pwsh` is installed and WinRM answers on TCP 5985. To bring a Windows host such as `9800x3d` online from rtx6000, wmux needs a different transport such as PowerShell-over-SSH, a Windows-side wmux agent/service, or a Windows jump host that can run the WSMan client. wmux currently treats PowerShell panes as non-durable; they do not survive a wmux service restart the way local/SSH `tmux` or `screen` panes do.
 
 ## Settings
 

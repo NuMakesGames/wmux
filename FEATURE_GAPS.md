@@ -8,8 +8,7 @@
 
 2. PowerShell remoting is scaffolded but not validated.
 
-   `kind: "powershell"` starts `pwsh` or `powershell.exe` with `Enter-PSSession`. Authentication, TrustedHosts, WinRM transport, and interactive terminal behavior vary by environment and need validation on the target Windows host.
-   On this box, `9800x3d` is currently disabled in the UI because WinRM is reachable but the local `pwsh` client is not installed.
+   `kind: "powershell"` starts `pwsh` or `powershell.exe` with `Enter-PSSession -ComputerName`, which uses WSMan remoting. Microsoft documents WSMan remoting as unsupported from non-Windows PowerShell hosts, so this transport cannot make `9800x3d` usable from the current Ubuntu rtx6000 service. `9800x3d` is reachable on Tailscale and TCP 5985, but wmux should use a different transport such as PowerShell-over-SSH, a Windows-side wmux agent/service, or a Windows jump host before enabling it in the UI.
 
 3. PowerShell session process checkpointing does not survive service restart.
 

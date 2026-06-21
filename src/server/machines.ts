@@ -660,14 +660,17 @@ export const resolveMachineStatuses = async (
           backendDetail: localBackendDetail(machine),
         };
       }
-      if (machine.kind === "powershell" && process.platform !== "win32" && !commandExists("pwsh")) {
+      if (machine.kind === "powershell" && process.platform !== "win32") {
+        const hasPwsh = commandExists("pwsh");
         return {
           ...machine,
           reachable: false,
-          reason: "local pwsh client is not installed",
+          reason: hasPwsh
+            ? "WSMan PowerShell remoting is not supported from this non-Windows wmux host"
+            : "local pwsh client is not installed; WSMan PowerShell remoting is not supported from this non-Windows wmux host",
           checkedAt,
-          endpoint: machine.host ? `${machine.host}:5985` : undefined,
-          backendDetail: "PowerShell remoting client unavailable",
+          endpoint: machine.host ? `${machine.host}:${machine.port ?? 5985}` : undefined,
+          backendDetail: "PowerShell remoting transport unavailable",
         };
       }
       if (!machine.host) {
