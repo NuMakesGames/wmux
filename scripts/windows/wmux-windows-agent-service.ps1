@@ -7,9 +7,19 @@ $LogDir = Join-Path $StateDir 'logs'
 $Config = if ($env:WMUX_WINDOWS_AGENT_CONFIG) { $env:WMUX_WINDOWS_AGENT_CONFIG } else { Join-Path $StateDir 'windows-agent.json' }
 $HelperDir = if ($env:WMUX_HELPER_DIR) { $env:WMUX_HELPER_DIR } else { Join-Path $env:LOCALAPPDATA 'wmux\bin' }
 $Agent = Join-Path $HelperDir 'wmux-windows-agent.py'
-$Wrapper = Join-Path $HelperDir 'wmux-windows-agent-task.cmd'
+$Wrapper = Join-Path $HelperDir 'wmux-windows-agent-task.ps1'
 $OutLog = Join-Path $LogDir 'windows-agent.out.log'
 $ErrLog = Join-Path $LogDir 'windows-agent.err.log'
+
+function ConvertTo-PowerShellLiteral {
+  param([string]$Value)
+  return "'$($Value -replace "'", "''")'"
+}
+
+function ConvertTo-CmdArgument {
+  param([string]$Value)
+  return '"' + ($Value -replace '"', '\"') + '"'
+}
 
 function Get-PythonLaunch {
   $Py = Get-Command py.exe -ErrorAction SilentlyContinue
@@ -36,22 +46,53 @@ function Write-Wrapper {
     Write-Error 'Python was not found. Run wmux-windows-setup install-deps, then retry install-agent.'
     exit 127
   }
+  $HelperDirLiteral = ConvertTo-PowerShellLiteral $HelperDir
+  $LogDirLiteral = ConvertTo-PowerShellLiteral $LogDir
+  $PythonArgText = $Python.prefix.Trim()
+  $PythonArgs = @()
+  if ($PythonArgText) { $PythonArgs += $PythonArgText }
+  $CommandParts = @(
+    (ConvertTo-CmdArgument $Python.exe)
+  )
+  $CommandParts += $PythonArgs
+  $CommandParts += @(
+    (ConvertTo-CmdArgument $Agent)
+    '--config'
+    (ConvertTo-CmdArgument $Config)
+    '>>'
+    '"%WMUX_AGENT_OUT%"'
+    '2>>'
+    '"%WMUX_AGENT_ERR%"'
+  )
+  $Command = $CommandParts -join ' '
+  $CommandLiteral = ConvertTo-PowerShellLiteral $Command
   $Content = @"
-@echo off
-setlocal
-set "PATH=$HelperDir;%PATH%"
-set "WMUX_AGENT_RUN=%RANDOM%-%RANDOM%"
-set "WMUX_AGENT_OUT=$LogDir\windows-agent-%WMUX_AGENT_RUN%.out.log"
-set "WMUX_AGENT_ERR=$LogDir\windows-agent-%WMUX_AGENT_RUN%.err.log"
-"$($Python.exe)" $($Python.prefix)"$Agent" --config "$Config" >> "%WMUX_AGENT_OUT%" 2>> "%WMUX_AGENT_ERR%"
-exit /b %ERRORLEVEL%
+`$ErrorActionPreference = 'Continue'
+`$env:PATH = $HelperDirLiteral + ';' + `$env:PATH
+`$env:WMUX_AGENT_RUN = "`$(Get-Random)-`$(Get-Random)"
+`$env:WMUX_AGENT_OUT = Join-Path $LogDirLiteral "windows-agent-`$(`$env:WMUX_AGENT_RUN).out.log"
+`$env:WMUX_AGENT_ERR = Join-Path $LogDirLiteral "windows-agent-`$(`$env:WMUX_AGENT_RUN).err.log"
+`$Command = $CommandLiteral
+& `$env:ComSpec /d /s /c `$Command
+exit `$LASTEXITCODE
 "@
   [System.IO.File]::WriteAllText($Wrapper, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function New-HiddenPowerShellAction {
+  $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
+    $PowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+  }
+  $QuotedWrapper = '"' + ($Wrapper -replace '"', '\"') + '"'
+  New-ScheduledTaskAction `
+    -Execute $PowerShell `
+    -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $QuotedWrapper"
+}
+
 function Stop-AgentProcesses {
   Get-CimInstance Win32_Process |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like '*wmux-windows-agent.py*' } |
+    Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like '*wmux-windows-agent.py*' } |
     ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
     }
@@ -79,7 +120,7 @@ switch ($ActionName) {
       exit 127
     }
     Write-Wrapper
-    $TaskAction = New-ScheduledTaskAction -Execute $Wrapper
+    $TaskAction = New-HiddenPowerShellAction
     $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn
     $TaskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
     $TaskSettings = New-WmuxTaskSettings

@@ -232,7 +232,7 @@ Notes:
 - `install-deps` uses `winget` to install `Gyan.FFmpeg` and `Python.Python.3.12` when missing, then installs `pywinpty` with pip.
 - `install-stream` installs and starts the per-user `wmux-stream-agent` Scheduled Task.
 - `install-agent` installs and starts the per-user `wmux-windows-agent` Scheduled Task for experimental restart-durable sessions.
-- Both Windows Scheduled Tasks start at user logon, start when available, restart after failure, and have no fixed execution-time cutoff.
+- Both Windows Scheduled Tasks start at user logon, start when available, restart after failure, have no fixed execution-time cutoff, and launch through hidden PowerShell wrappers instead of visible `cmd.exe` windows.
 
 If you are running setup from plain SSH before the helper directory is on PATH, invoke the staged script by path:
 

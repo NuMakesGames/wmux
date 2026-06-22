@@ -7,19 +7,51 @@ $LogDir = Join-Path $StateDir 'logs'
 $Config = if ($env:WMUX_STREAM_AGENT_CONFIG) { $env:WMUX_STREAM_AGENT_CONFIG } else { Join-Path $StateDir 'stream-agent.json' }
 $HelperDir = if ($env:WMUX_HELPER_DIR) { $env:WMUX_HELPER_DIR } else { Join-Path $env:LOCALAPPDATA 'wmux\bin' }
 $Agent = Join-Path $HelperDir 'wmux-stream-agent.cmd'
-$Wrapper = Join-Path $HelperDir 'wmux-stream-agent-task.cmd'
+$Wrapper = Join-Path $HelperDir 'wmux-stream-agent-task.ps1'
 $OutLog = Join-Path $LogDir 'stream-agent.out.log'
 $ErrLog = Join-Path $LogDir 'stream-agent.err.log'
 
+function ConvertTo-PowerShellLiteral {
+  param([string]$Value)
+  return "'$($Value -replace "'", "''")'"
+}
+
+function ConvertTo-CmdArgument {
+  param([string]$Value)
+  return '"' + ($Value -replace '"', '\"') + '"'
+}
+
 function Write-Wrapper {
   New-Item -ItemType Directory -Force -Path $StateDir, $LogDir, $HelperDir | Out-Null
+  $CommandParts = @(
+    (ConvertTo-CmdArgument $Agent)
+    '--config',
+    (ConvertTo-CmdArgument $Config)
+    '>>',
+    (ConvertTo-CmdArgument $OutLog)
+    '2>>',
+    (ConvertTo-CmdArgument $ErrLog)
+  )
+  $Command = $CommandParts -join ' '
+  $CommandLiteral = ConvertTo-PowerShellLiteral $Command
   $Content = @"
-@echo off
-setlocal
-"$Agent" --config "$Config" >> "$OutLog" 2>> "$ErrLog"
-exit /b %ERRORLEVEL%
+`$ErrorActionPreference = 'Continue'
+`$Command = $CommandLiteral
+& `$env:ComSpec /d /s /c `$Command
+exit `$LASTEXITCODE
 "@
   [System.IO.File]::WriteAllText($Wrapper, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function New-HiddenPowerShellAction {
+  $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
+    $PowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+  }
+  $QuotedWrapper = '"' + ($Wrapper -replace '"', '\"') + '"'
+  New-ScheduledTaskAction `
+    -Execute $PowerShell `
+    -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $QuotedWrapper"
 }
 
 function New-WmuxTaskSettings {
@@ -33,6 +65,18 @@ function New-WmuxTaskSettings {
     -MultipleInstances IgnoreNew
 }
 
+function Stop-StreamProcesses {
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.ProcessId -ne $PID -and
+        $_.CommandLine -and
+        ($_.CommandLine -like '*wmux-stream-agent.py*' -or $_.CommandLine -like '*wmux-stream-agent.cmd*')
+    } |
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Show-Usage {
   Write-Error 'usage: wmux-stream-agent-service [install|restart|stop|uninstall|status|logs|diagnose]'
 }
@@ -44,7 +88,7 @@ switch ($ActionName) {
       exit 127
     }
     Write-Wrapper
-    $TaskAction = New-ScheduledTaskAction -Execute $Wrapper
+    $TaskAction = New-HiddenPowerShellAction
     $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn
     $TaskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
     $TaskSettings = New-WmuxTaskSettings
@@ -58,13 +102,16 @@ switch ($ActionName) {
   }
   'restart' {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Stop-StreamProcesses
     Start-ScheduledTask -TaskName $TaskName
   }
   'stop' {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Stop-StreamProcesses
   }
   'uninstall' {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Stop-StreamProcesses
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Output "Uninstalled $TaskName"
   }
