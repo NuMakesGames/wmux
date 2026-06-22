@@ -22,6 +22,17 @@ exit /b %ERRORLEVEL%
   [System.IO.File]::WriteAllText($Wrapper, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function New-WmuxTaskSettings {
+  New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -RestartCount 999 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -MultipleInstances IgnoreNew
+}
+
 function Show-Usage {
   Write-Error 'usage: wmux-stream-agent-service [install|restart|stop|uninstall|status|logs|diagnose]'
 }
@@ -36,7 +47,8 @@ switch ($ActionName) {
     $TaskAction = New-ScheduledTaskAction -Execute $Wrapper
     $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn
     $TaskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
-    $Task = New-ScheduledTask -Action $TaskAction -Trigger $TaskTrigger -Principal $TaskPrincipal
+    $TaskSettings = New-WmuxTaskSettings
+    $Task = New-ScheduledTask -Action $TaskAction -Trigger $TaskTrigger -Principal $TaskPrincipal -Settings $TaskSettings
     Register-ScheduledTask -TaskName $TaskName -InputObject $Task -Force | Out-Null
     Start-ScheduledTask -TaskName $TaskName
     Write-Output "Installed $TaskName"

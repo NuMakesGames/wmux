@@ -232,6 +232,7 @@ Notes:
 - `install-deps` uses `winget` to install `Gyan.FFmpeg` and `Python.Python.3.12` when missing, then installs `pywinpty` with pip.
 - `install-stream` installs and starts the per-user `wmux-stream-agent` Scheduled Task.
 - `install-agent` installs and starts the per-user `wmux-windows-agent` Scheduled Task for experimental restart-durable sessions.
+- Both Windows Scheduled Tasks start at user logon, start when available, restart after failure, and have no fixed execution-time cutoff.
 
 If you are running setup from plain SSH before the helper directory is on PATH, invoke the staged script by path:
 
@@ -358,5 +359,5 @@ Keep the legacy `powershell-ssh` path available as a fallback while the ConPTY a
 
 - Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent` and can survive `wmux.service` restarts.
 - Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
-- Windows screen streaming is validated on 9800x3d through FFmpeg/gdigrab and the per-user Scheduled Task. Locked/logged-out behavior, reconnect supervision, and a fuller Windows wmux agent are still not implemented.
+- Windows screen streaming is validated on 9800x3d through FFmpeg/gdigrab and the supervised per-user Scheduled Task. Locked/logged-out behavior and a fuller Windows wmux agent are still not implemented.
 - The Windows session agent uses pywinpty-backed ConPTY by default. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running, but Windows-agent restarts still kill the owned ConPTY processes and broad full-screen app validation is still pending.
