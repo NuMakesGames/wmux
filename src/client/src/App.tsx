@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, Link2, PanelLeft, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, GripVertical, Link2, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
 import { api } from "./api";
 import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
 import { LayoutView } from "./LayoutView";
@@ -42,6 +42,12 @@ const defaultSettings: WmuxSettings = {
   machineAliases: {},
 };
 
+const sidebarWidthStorageKey = "wmux.sidebarWidth";
+const defaultSidebarWidth = 288;
+const minSidebarWidth = 220;
+const maxSidebarWidth = 520;
+const collapseSidebarDragThreshold = 128;
+
 interface MobileViewportState {
   isMobile: boolean;
   keyboardOpen: boolean;
@@ -54,6 +60,7 @@ export function App() {
   const [newMachineId, setNewMachineId] = useState("local");
   const [error, setError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia("(max-width: 800px)").matches);
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [mediaItems, setMediaItems] = useState<TerminalMedia[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -75,6 +82,10 @@ export function App() {
     if (!mobileViewport.isMobile && previousMobileViewport.current) setSidebarCollapsed(false);
     previousMobileViewport.current = mobileViewport.isMobile;
   }, [mobileViewport.isMobile]);
+
+  useEffect(() => {
+    window.localStorage.setItem(sidebarWidthStorageKey, String(sidebarWidth));
+  }, [sidebarWidth]);
 
   useEffect(() => {
     api
@@ -345,6 +356,71 @@ export function App() {
   const clipboardTitle = clipboardItem
     ? `${clipboardStatus === "blocked" ? "Click to copy wmux buffer" : "wmux clipboard buffer"} (${formatBytes(clipboardItem.text.length)})`
     : "No wmux clipboard buffer";
+  const appStyle = {
+    "--wmux-sidebar-width": `${sidebarWidth}px`,
+  } as CSSProperties;
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((value) => !value);
+  }, []);
+
+  const startSidebarResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (mobileViewport.isMobile || event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarCollapsed ? 0 : sidebarWidth;
+    let latestWidth = sidebarWidth;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const rawWidth = startWidth + moveEvent.clientX - startX;
+      if (rawWidth < collapseSidebarDragThreshold) {
+        setSidebarCollapsed(true);
+        return;
+      }
+      const nextWidth = clampSidebarWidth(rawWidth);
+      latestWidth = nextWidth;
+      setSidebarCollapsed(false);
+      setSidebarWidth(nextWidth);
+    };
+    const stopResize = () => {
+      document.body.classList.remove("sidebar-resizing");
+      window.localStorage.setItem(sidebarWidthStorageKey, String(latestWidth));
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+
+    document.body.classList.add("sidebar-resizing");
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopResize, { once: true });
+    window.addEventListener("pointercancel", stopResize, { once: true });
+  }, [mobileViewport.isMobile, sidebarCollapsed, sidebarWidth]);
+
+  const onSidebarResizerKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (mobileViewport.isMobile) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleSidebar();
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      setSidebarCollapsed(true);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      setSidebarCollapsed(false);
+      setSidebarWidth(maxSidebarWidth);
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const delta = event.shiftKey ? 48 : 16;
+    const nextWidth = clampSidebarWidth(sidebarWidth + (event.key === "ArrowRight" ? delta : -delta));
+    setSidebarCollapsed(false);
+    setSidebarWidth(nextWidth);
+  }, [mobileViewport.isMobile, sidebarWidth, toggleSidebar]);
 
   const createWorkspace = async (machineId: string) => {
     await api.createWorkspace(machineId);
@@ -500,7 +576,7 @@ export function App() {
       const digit = /^[1-9]$/.test(key) ? Number(key) : null;
 
       if (primaryOnly && key === "b") {
-        run(() => setSidebarCollapsed((value) => !value));
+        run(toggleSidebar);
         return;
       }
 
@@ -687,7 +763,7 @@ export function App() {
         subtitle: "Toggle workspace and host navigation",
         section: "View",
         shortcut: "Cmd+B",
-        run: () => setSidebarCollapsed((value) => !value),
+        run: toggleSidebar,
         keywords: ["left", "navigation", "panel"],
       },
       {
@@ -907,7 +983,7 @@ export function App() {
     .join(" ");
 
   return (
-    <main className={appClassName}>
+    <main className={appClassName} style={appStyle}>
       {openTuiMode ? (
         <OpenTuiSidebar
           targetMachineId={newMachineId}
@@ -1021,6 +1097,33 @@ export function App() {
         </div>
       </aside>
       )}
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-label={sidebarCollapsed ? "Show sidebar" : "Resize sidebar"}
+        aria-orientation="vertical"
+        aria-valuemin={0}
+        aria-valuemax={maxSidebarWidth}
+        aria-valuenow={sidebarCollapsed ? 0 : sidebarWidth}
+        tabIndex={0}
+        onPointerDown={startSidebarResize}
+        onKeyDown={onSidebarResizerKeyDown}
+        onDoubleClick={toggleSidebar}
+      >
+        <button
+          type="button"
+          className="sidebar-collapse-button"
+          title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+          aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+          aria-expanded={!sidebarCollapsed}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onClick={toggleSidebar}
+        >
+          {sidebarCollapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+        </button>
+        <GripVertical size={13} className="sidebar-resize-icon" aria-hidden="true" />
+      </div>
       {mobileViewport.isMobile ? (
         <>
           <button
@@ -1029,7 +1132,7 @@ export function App() {
             title={sidebarCollapsed ? "Show navigation" : "Hide navigation"}
             aria-label={sidebarCollapsed ? "Show navigation" : "Hide navigation"}
             aria-expanded={!sidebarCollapsed}
-            onClick={() => setSidebarCollapsed((value) => !value)}
+            onClick={toggleSidebar}
           >
             <PanelLeft size={16} />
           </button>
@@ -1879,6 +1982,15 @@ const clampFontSize = (value: number): number => {
   const numeric = Number.isFinite(value) ? value : fallback;
   return Math.min(24, Math.max(10, Math.round(numeric)));
 };
+
+const loadSidebarWidth = (): number => {
+  const stored = window.localStorage.getItem(sidebarWidthStorageKey);
+  const numeric = stored === null ? defaultSidebarWidth : Number(stored);
+  return clampSidebarWidth(Number.isFinite(numeric) ? numeric : defaultSidebarWidth);
+};
+
+const clampSidebarWidth = (value: number): number =>
+  Math.min(maxSidebarWidth, Math.max(minSidebarWidth, Math.round(value)));
 
 const cleanAlias = (value: string): string => value.replace(/\s+/g, " ").trim().slice(0, 40);
 
