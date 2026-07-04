@@ -245,6 +245,7 @@ export class StateStore extends EventEmitter {
   setActiveWorkspace(workspaceId: string): void {
     this.requireWorkspace(workspaceId);
     this.state.activeWorkspaceId = workspaceId;
+    this.markWorkspaceNotificationsRead(workspaceId, false);
     this.save();
   }
 
@@ -253,6 +254,7 @@ export class StateStore extends EventEmitter {
     if (!workspace.tabs.some((tab) => tab.id === tabId)) throw new Error("tab not found");
     workspace.activeTabId = tabId;
     workspace.updatedAt = now();
+    this.markWorkspaceNotificationsRead(workspaceId, false);
     this.save();
   }
 
@@ -537,7 +539,7 @@ export class StateStore extends EventEmitter {
     this.save();
   }
 
-  markWorkspaceNotificationsRead(workspaceId: string): void {
+  markWorkspaceNotificationsRead(workspaceId: string, save = true): void {
     let changed = false;
     for (const notification of this.state.notifications) {
       if (notification.workspaceId === workspaceId && !notification.read) {
@@ -545,7 +547,7 @@ export class StateStore extends EventEmitter {
         changed = true;
       }
     }
-    if (changed) this.save();
+    if (changed && save) this.save();
   }
 
   private markPaneNotificationsRead(paneId: string, save = true): void {

@@ -432,6 +432,9 @@ export function App() {
     if (!current) return;
     const target = findWorkspaceTab(current, workspaceId, tabId);
     if (!target) return;
+    const shouldMarkWorkspaceRead = current.notifications.some(
+      (notification) => notification.workspaceId === workspaceId && !notification.read,
+    );
 
     const nextPath = chromePath(workspaceTabPath(workspaceId, target.tab.id));
     if (currentChromePath() !== nextPath) {
@@ -453,7 +456,14 @@ export function App() {
 
     const shouldActivateWorkspace = current.activeWorkspaceId !== workspaceId;
     const shouldActivateTab = target.workspace.activeTabId !== target.tab.id;
-    if (!shouldActivateWorkspace && !shouldActivateTab) return;
+    if (!shouldActivateWorkspace && !shouldActivateTab) {
+      if (shouldMarkWorkspaceRead) {
+        void api.markWorkspaceNotificationsRead(workspaceId)
+          .then((payload) => refresh(activateWorkspaceTabInState(payload, workspaceId, target.tab.id)))
+          .catch((nextError) => setError(String(nextError)));
+      }
+      return;
+    }
 
     const requestId = ++activeRouteRequestId.current;
     pendingActiveRoute.current = { requestId, workspaceId, tabId: target.tab.id };
@@ -2183,14 +2193,25 @@ const findWorkspaceTab = (
 const activateWorkspaceTabInState = (payload: BootstrapPayload, workspaceId: string, tabId: string): BootstrapPayload => {
   const target = findWorkspaceTab(payload, workspaceId, tabId);
   if (!target) return payload;
-  if (payload.activeWorkspaceId === workspaceId && target.workspace.activeTabId === tabId) return payload;
+  const nextPayload = markWorkspaceNotificationsReadInState(payload, workspaceId);
+  if (nextPayload.activeWorkspaceId === workspaceId && target.workspace.activeTabId === tabId) return nextPayload;
   return {
-    ...payload,
+    ...nextPayload,
     activeWorkspaceId: workspaceId,
-    workspaces: payload.workspaces.map((workspace) =>
+    workspaces: nextPayload.workspaces.map((workspace) =>
       workspace.id === workspaceId ? { ...workspace, activeTabId: tabId } : workspace,
     ),
   };
+};
+
+const markWorkspaceNotificationsReadInState = (payload: BootstrapPayload, workspaceId: string): BootstrapPayload => {
+  let changed = false;
+  const notifications = payload.notifications.map((notification) => {
+    if (notification.workspaceId !== workspaceId || notification.read) return notification;
+    changed = true;
+    return { ...notification, read: true };
+  });
+  return changed ? { ...payload, notifications } : payload;
 };
 
 const activateRouteTarget = async (payload: BootstrapPayload): Promise<BootstrapPayload> => {
