@@ -27,8 +27,6 @@ interface OpenTuiTopbarProps {
   targetLabel: string;
   canCreate: boolean;
   canCopyLink: boolean;
-  canCopyClipboard: boolean;
-  clipboardAttention: boolean;
   canOpenStream: boolean;
   streamLive: boolean;
   streamViewerCount: number;
@@ -43,7 +41,6 @@ interface OpenTuiTopbarProps {
   onToggleActivity: () => void;
   onOpenStream: () => void;
   onCopyLink: () => void;
-  onCopyClipboard: () => void;
   onEnableNotifications: () => void;
   onMarkRead: () => void;
 }
@@ -56,7 +53,6 @@ type HitAction =
   | { type: "activity" }
   | { type: "stream" }
   | { type: "copy-link" }
-  | { type: "copy-clipboard" }
   | { type: "notifications" }
   | { type: "mark-read" };
 
@@ -125,7 +121,6 @@ export function OpenTuiTopbar(props: OpenTuiTopbarProps) {
     if (action.type === "activity") props.onToggleActivity();
     if (action.type === "stream") props.onOpenStream();
     if (action.type === "copy-link") props.onCopyLink();
-    if (action.type === "copy-clipboard") props.onCopyClipboard();
     if (action.type === "notifications") props.onEnableNotifications();
     if (action.type === "mark-read") props.onMarkRead();
   };
@@ -211,7 +206,6 @@ const drawTopbar = (
   const buttons: Array<[string, string, HitAction, boolean, boolean]> = [
     ["ok", "Mark workspace notifications read", { type: "mark-read" }, !props.canMarkRead, props.canMarkRead],
     [props.unreadNotifications > 0 ? `bell${props.unreadNotifications}` : "bell", "Enable browser notifications", { type: "notifications" }, !props.canEnableNotifications, props.unreadNotifications > 0],
-    [props.clipboardAttention ? "clip!" : "clip", "Copy wmux clipboard buffer", { type: "copy-clipboard" }, !props.canCopyClipboard, props.canCopyClipboard],
     [props.streamLive ? `str${Math.min(99, props.streamViewerCount)}` : "str", "Machine screen stream", { type: "stream" }, !props.canOpenStream, props.streamLive],
     ["link", "Copy active session link", { type: "copy-link" }, !props.canCopyLink, false],
     [props.activityOpen ? "act*" : "act", "Activity", { type: "activity" }, false, props.activityOpen],

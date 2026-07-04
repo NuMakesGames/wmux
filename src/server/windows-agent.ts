@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import https from "node:https";
 import type { MachineConfig, PaneState } from "./types.js";
+import { appendBoundedReplay } from "./replay-buffer.js";
 
 interface AgentEvents {
   output: [string];
@@ -16,6 +17,7 @@ interface AgentSessionResponse {
   status?: string;
   exitCode?: number | null;
   cwd?: string;
+  base?: number;
   cursor?: number;
 }
 
@@ -132,7 +134,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
         },
       });
       this.pidValue = response.pid ?? 0;
-      this.cursor = response.cursor ?? 0;
+      this.cursor = typeof response.base === "number" ? response.base : 0;
       if (response.cwd) {
         this.cwd = response.cwd;
         this.emit("cwd", response.cwd);
@@ -201,12 +203,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   }
 
   private appendReplay(data: string): void {
-    this.replay.push(data);
-    this.replayBytes += Buffer.byteLength(data);
-    while (this.replayBytes > MAX_REPLAY_BYTES && this.replay.length > 1) {
-      const removed = this.replay.shift() ?? "";
-      this.replayBytes -= Buffer.byteLength(removed);
-    }
+    this.replayBytes = appendBoundedReplay(this.replay, this.replayBytes, data, MAX_REPLAY_BYTES);
   }
 
   private captureCwd(data: string): void {

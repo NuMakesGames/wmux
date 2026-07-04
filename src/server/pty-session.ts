@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, type IPty } from "node-pty";
 import type { MachineConfig, PaneState } from "./types.js";
 import { buildSpawnSpec } from "./machines.js";
+import { appendBoundedReplay } from "./replay-buffer.js";
 
 interface PtyEvents {
   output: [string];
@@ -96,12 +97,7 @@ export class PtySession extends EventEmitter<PtyEvents> {
   }
 
   private appendReplay(data: string): void {
-    this.replay.push(data);
-    this.replayBytes += Buffer.byteLength(data);
-    while (this.replayBytes > MAX_REPLAY_BYTES && this.replay.length > 1) {
-      const removed = this.replay.shift() ?? "";
-      this.replayBytes -= Buffer.byteLength(removed);
-    }
+    this.replayBytes = appendBoundedReplay(this.replay, this.replayBytes, data, MAX_REPLAY_BYTES);
   }
 
   private captureCwd(data: string): void {

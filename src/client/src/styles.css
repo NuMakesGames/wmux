@@ -249,12 +249,6 @@ button.active-tool {
   background: #181407;
 }
 
-button.attention-tool {
-  border-color: rgba(217, 74, 61, 0.65);
-  color: #ffc2b8;
-  background: #24100d;
-}
-
 .new-session select {
   flex: 1;
 }
@@ -304,6 +298,24 @@ button.attention-tool {
   background: #181407;
 }
 
+.workspace-item.agent-completed {
+  border-color: rgba(71, 211, 124, 0.18);
+}
+
+.workspace-item.agent-running {
+  border-color: rgba(90, 169, 255, 0.32);
+  background: linear-gradient(90deg, rgba(90, 169, 255, 0.08), transparent 72%);
+}
+
+.workspace-item.agent-running.active {
+  background: linear-gradient(90deg, rgba(90, 169, 255, 0.1), #181407 68%);
+}
+
+.workspace-item.agent-failed {
+  border-color: rgba(217, 74, 61, 0.36);
+  box-shadow: inset 3px 0 0 rgba(217, 74, 61, 0.78);
+}
+
 .workspace-item.disabled {
   color: #786f5f;
 }
@@ -320,6 +332,54 @@ button.attention-tool {
 .reach-dot.on,
 .status-dot.on {
   background: var(--green);
+}
+
+.workspace-state-dot {
+  grid-column: 1;
+  grid-row: 1;
+  width: 8px;
+  height: 8px;
+  align-self: center;
+  justify-self: center;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.workspace-state-dot.reachable,
+.workspace-state-dot.completed {
+  background: var(--green);
+}
+
+.workspace-state-dot.offline,
+.workspace-state-dot.failed {
+  background: var(--red);
+}
+
+.workspace-state-dot.updated {
+  background: var(--gold);
+}
+
+.workspace-state-dot.running {
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(90, 169, 255, 0.2);
+  border-top-color: var(--blue);
+  background: transparent;
+  animation: wmux-state-spin 780ms linear infinite;
+}
+
+@keyframes wmux-state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.workspace-bell-indicator {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: center;
+  justify-self: center;
+  color: var(--gold);
 }
 
 .workspace-title {
@@ -370,14 +430,20 @@ button.attention-tool {
 
 .agent-pill.running {
   color: var(--blue);
+  border-color: rgba(90, 169, 255, 0.32);
+  background: rgba(90, 169, 255, 0.08);
 }
 
 .agent-pill.completed {
-  color: var(--green);
+  color: #b7d8bf;
+  border-color: rgba(71, 211, 124, 0.25);
+  background: rgba(71, 211, 124, 0.06);
 }
 
 .agent-pill.failed {
   color: var(--red);
+  border-color: rgba(217, 74, 61, 0.36);
+  background: rgba(217, 74, 61, 0.1);
 }
 
 .workspace-host {
@@ -1072,6 +1138,10 @@ button.attention-tool {
 
 .terminal-host canvas {
   display: block;
+}
+
+.terminal-host textarea {
+  caret-color: transparent;
 }
 
 .terminal-context-copy-bridge {

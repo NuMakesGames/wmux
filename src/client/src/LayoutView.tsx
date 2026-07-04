@@ -14,6 +14,7 @@ interface Props {
   onSplit: (paneId: string, direction: SplitDirection, machineId?: string) => void;
   onResizeSplit: (path: string, ratio: number) => void;
   onClosePane: (paneId: string) => void;
+  onBell: (paneId: string) => void;
   onDismissMedia: (mediaId: string) => void;
 }
 
@@ -29,6 +30,7 @@ export function LayoutView({
   onSplit,
   onResizeSplit,
   onClosePane,
+  onBell,
   onDismissMedia,
 }: Props) {
   const [draftRatios, setDraftRatios] = useState<Record<string, number>>({});
@@ -106,6 +108,7 @@ export function LayoutView({
           onActivate={() => onActivatePane(pane.id)}
           onSplit={(direction, machineId) => onSplit(pane.id, direction, machineId)}
           onClose={() => onClosePane(pane.id)}
+          onBell={() => onBell(pane.id)}
           onDismissMedia={onDismissMedia}
         />
       );

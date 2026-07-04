@@ -18,7 +18,6 @@ import type {
   MachineStatus,
   SplitDirection,
   SurfaceTab,
-  TerminalClipboard,
   TerminalMedia,
   TerminalNotification,
   TerminalRun,
@@ -89,8 +88,7 @@ export function App() {
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
   const [activityOpen, setActivityOpen] = useState(false);
   const [streamOpen, setStreamOpen] = useState(false);
-  const [clipboardItem, setClipboardItem] = useState<TerminalClipboard | null>(null);
-  const [clipboardStatus, setClipboardStatus] = useState<"idle" | "copied" | "blocked">("idle");
+  const [bellPaneIds, setBellPaneIds] = useState<Set<string>>(() => new Set());
   const [mountedTabKeys, setMountedTabKeys] = useState<string[]>([]);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState<TerminalFocusRequest | null>(null);
   const eventsSocketRef = useRef<WebSocket | null>(null);
@@ -150,12 +148,8 @@ export function App() {
           setMediaItems((items) => [media, ...items.filter((item) => item.id !== media.id)].slice(0, 20));
         }
         if (message.type === "clipboard") {
-          const clipboard = message.clipboard as TerminalClipboard;
-          setClipboardItem(clipboard);
-          setClipboardStatus("idle");
-          writeBrowserClipboard(clipboard.text)
-            .then(() => setClipboardStatus("copied"))
-            .catch(() => setClipboardStatus("blocked"));
+          const clipboard = message.clipboard as { text?: string };
+          if (typeof clipboard.text === "string") void writeBrowserClipboard(clipboard.text).catch(() => undefined);
         }
         if (message.type === "state" || message.type === "notification") {
           api.bootstrap().then((payload) => refresh(payload)).catch((nextError) => setError(String(nextError)));
@@ -239,6 +233,7 @@ export function App() {
   const agentEvents = state?.agentEvents ?? [];
   const runs = state?.runs ?? [];
   const streams = state?.streams ?? [];
+  const bellByWorkspaceId = useMemo(() => bellWorkspaces(state, bellPaneIds), [bellPaneIds, state]);
   const latestAgentByWorkspaceId = useMemo(() => latestAgentByWorkspace(agentEvents), [agentEvents]);
   const latestRunByPaneId = useMemo(() => latestRunByPane(runs), [runs]);
 
@@ -295,11 +290,14 @@ export function App() {
             active: workspace.id === activeWorkspace?.id,
             unreadCount,
             agentLabel: latestAgent ? `${latestAgent.agent} ${latestAgent.status}` : undefined,
+            agentStatus: latestAgent ? agentStatusClass(latestAgent.status) : undefined,
+            bell: bellByWorkspaceId.has(workspace.id),
           },
         ];
       }),
     [
       activeWorkspace?.id,
+      bellByWorkspaceId,
       displayMachines,
       latestAgentByWorkspaceId,
       latestUnreadByWorkspaceId,
@@ -441,6 +439,7 @@ export function App() {
       lastSyncedPath.current = nextPath;
     }
     if (mobileViewport.isMobile) setSidebarCollapsed(true);
+    clearBellPanes(target.tab.panes.map((pane) => pane.id));
 
     const optimistic = activateWorkspaceTabInState(current, workspaceId, target.tab.id);
     stateRef.current = optimistic;
@@ -497,15 +496,39 @@ export function App() {
   const activeStreamMachine = machineFor(displayMachines, activeStreamMachineId);
   const activeStream = streams.find((stream) => stream.machineId === activeStreamMachineId);
   const canOpenStream = !mobileViewport.isMobile && Boolean(activeStream);
-  const clipboardTitle = clipboardItem
-    ? `${clipboardStatus === "blocked" ? "Click to copy wmux buffer" : "wmux clipboard buffer"} (${formatBytes(clipboardItem.text.length)})`
-    : "No wmux clipboard buffer";
   const appStyle = {
     "--wmux-sidebar-width": `${sidebarWidth}px`,
   } as CSSProperties;
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((value) => !value);
+  }, []);
+
+  const clearBellPanes = useCallback((paneIds: string[]) => {
+    if (paneIds.length === 0) return;
+    setBellPaneIds((current) => {
+      if (paneIds.every((paneId) => !current.has(paneId))) return current;
+      const next = new Set(current);
+      for (const paneId of paneIds) next.delete(paneId);
+      return next;
+    });
+  }, []);
+
+  const recordPaneBell = useCallback((paneId: string) => {
+    const snapshot = stateRef.current;
+    if (!snapshot) return;
+    const context = findPaneContextInState(snapshot, paneId);
+    if (!context) return;
+    const sessionIsCurrent =
+      snapshot.activeWorkspaceId === context.workspace.id &&
+      context.workspace.activeTabId === context.tab.id;
+    if (sessionIsCurrent) return;
+    setBellPaneIds((current) => {
+      if (current.has(paneId)) return current;
+      const next = new Set(current);
+      next.add(paneId);
+      return next;
+    });
   }, []);
 
   const startSidebarResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
@@ -597,16 +620,6 @@ export function App() {
     if (!activeWorkspace || !activeTab) return;
     const url = new URL(chromePath(workspaceTabPath(activeWorkspace.id, activeTab.id)), window.location.origin);
     await writeBrowserClipboard(url.toString());
-  };
-
-  const copyWmuxClipboard = async () => {
-    if (!clipboardItem) return;
-    try {
-      await writeBrowserClipboard(clipboardItem.text);
-      setClipboardStatus("copied");
-    } catch {
-      setClipboardStatus("blocked");
-    }
   };
 
   const createTab = async (machineId: string) => {
@@ -887,15 +900,6 @@ export function App() {
         keywords: ["url", "share", "link"],
       },
       {
-        id: "copy-wmux-buffer",
-        title: "Copy wmux clipboard buffer",
-        subtitle: clipboardItem ? `${formatBytes(clipboardItem.text.length)} from wmux-copy` : undefined,
-        section: "Actions",
-        disabled: !clipboardItem,
-        run: copyWmuxClipboard,
-        keywords: ["clipboard", "copy", "pipe"],
-      },
-      {
         id: "toggle-sidebar",
         title: sidebarCollapsed ? "Show sidebar" : "Hide sidebar",
         subtitle: "Toggle workspace and host navigation",
@@ -1081,7 +1085,6 @@ export function App() {
   }, [
     activeTab,
     activeWorkspace,
-    clipboardItem,
     displayMachines,
     machines,
     newMachineId,
@@ -1185,6 +1188,14 @@ export function App() {
               const showDescriptor = visibleDescriptor && visibleDescriptor !== host;
               const tooltip = [workspace.name, showDescriptor ? tooltipDescriptor : "", host].filter(Boolean).join(" / ");
               const tab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId) ?? workspace.tabs[0];
+              const latestAgentStatus = latestAgent ? agentStatusClass(latestAgent.status) : "";
+              const hasBell = bellByWorkspaceId.has(workspace.id);
+              const workspaceStateClass = latestAgentStatus || (machine?.reachable ? "reachable" : "offline");
+              const workspaceStateTitle = latestAgent
+                ? `${latestAgent.agent} ${latestAgent.status}`
+                : machine?.reachable
+                  ? "Host reachable"
+                  : "Host offline";
               if (!tab) return null;
               return (
               <a
@@ -1193,14 +1204,15 @@ export function App() {
                 title={tooltip}
                 className={`workspace-item ${workspace.id === activeWorkspace?.id ? "active" : ""} ${
                   machine?.reachable ? "" : "disabled"
-                }`}
+                } ${latestAgentStatus ? `agent-${latestAgentStatus}` : ""}`}
                 onClick={(event) => activateWorkspaceLink(event, workspace.id, tab.id, { focusTerminal: true })}
                 >
-                  <span className={`reach-dot ${machine?.reachable ? "on" : ""}`} />
+                  <span className={`workspace-state-dot ${workspaceStateClass}`} title={workspaceStateTitle} />
+                  {hasBell ? <Bell size={10} className="workspace-bell-indicator" aria-label="Terminal bell" /> : null}
                   <span className="workspace-title">{workspace.name}</span>
                   {unreadCount > 0 ? <span className="badge workspace-badge">{unreadCount}</span> : null}
                   <span className="workspace-meta">
-                    {latestAgent ? <span className={`agent-pill ${agentStatusClass(latestAgent.status)}`}>{latestAgent.agent} {latestAgent.status}</span> : null}
+                    {latestAgent ? <span className={`agent-pill ${latestAgentStatus}`}>{latestAgent.agent} {latestAgent.status}</span> : null}
                     {showDescriptor ? <span className="workspace-descriptor">{visibleDescriptor}</span> : null}
                     <span className="workspace-host">{host}</span>
                   </span>
@@ -1289,8 +1301,6 @@ export function App() {
             targetLabel={selectedMachine?.name ?? newMachineId}
             canCreate={Boolean(selectedMachine?.reachable)}
             canCopyLink={Boolean(activeWorkspace && activeTab)}
-            canCopyClipboard={Boolean(clipboardItem)}
-            clipboardAttention={clipboardStatus === "blocked"}
             canOpenStream={canOpenStream}
             streamLive={Boolean(activeStream?.live)}
             streamViewerCount={activeStream?.viewerCount ?? 0}
@@ -1305,7 +1315,6 @@ export function App() {
             onToggleActivity={() => setActivityOpen((value) => !value)}
             onOpenStream={() => setStreamOpen(true)}
             onCopyLink={copyActiveLink}
-            onCopyClipboard={copyWmuxClipboard}
             onEnableNotifications={enableBrowserNotifications}
             onMarkRead={markWorkspaceRead}
           />
@@ -1375,14 +1384,6 @@ export function App() {
               <Link2 size={16} />
             </button>
             <button
-              className={clipboardStatus === "blocked" ? "attention-tool" : clipboardItem ? "active-tool" : ""}
-              title={clipboardTitle}
-              disabled={!clipboardItem}
-              onClick={copyWmuxClipboard}
-            >
-              <Clipboard size={16} />
-            </button>
-            <button
               title="Enable browser notifications"
               disabled={!("Notification" in window) || Notification.permission !== "default"}
               onClick={enableBrowserNotifications}
@@ -1416,7 +1417,11 @@ export function App() {
                     unreadByPaneId={unreadByPaneId}
                     mediaByPaneId={mediaByPaneId}
                     focusActivePaneSignal={terminalFocusRequest?.key === view.key ? terminalFocusRequest.token : 0}
-                    onActivatePane={async (paneId) => refresh(await api.activatePane(view.tabId, paneId))}
+                    onActivatePane={async (paneId) => {
+                      clearBellPanes([paneId]);
+                      await refresh(await api.activatePane(view.tabId, paneId));
+                    }}
+                    onBell={recordPaneBell}
                     onSplit={async (paneId, direction, machineId) => {
                       const response = await api.splitPane(view.tabId, paneId, direction, machineId);
                       await refresh(response.state);
@@ -1591,7 +1596,7 @@ const latestRunByPane = (runs: TerminalRun[]): Map<string, TerminalRun> => {
   return latest;
 };
 
-const agentStatusClass = (status: string): string => {
+const agentStatusClass = (status: string): "running" | "completed" | "failed" | "updated" => {
   const normalized = status.toLowerCase();
   if (["failed", "error", "cancelled", "stopped"].includes(normalized)) return "failed";
   if (["completed", "done", "success"].includes(normalized)) return "completed";
@@ -2214,6 +2219,30 @@ const latestUnreadByWorkspace = (notifications: TerminalNotification[]): Map<str
     latest.set(notification.workspaceId, notification);
   }
   return latest;
+};
+
+const bellWorkspaces = (payload: BootstrapPayload | null, paneIds: Set<string>): Set<string> => {
+  const workspaceIds = new Set<string>();
+  if (!payload || paneIds.size === 0) return workspaceIds;
+  for (const workspace of payload.workspaces) {
+    for (const tab of workspace.tabs) {
+      if (tab.panes.some((pane) => paneIds.has(pane.id))) {
+        workspaceIds.add(workspace.id);
+        break;
+      }
+    }
+  }
+  return workspaceIds;
+};
+
+const findPaneContextInState = (payload: BootstrapPayload, paneId: string) => {
+  for (const workspace of payload.workspaces) {
+    for (const tab of workspace.tabs) {
+      const pane = tab.panes.find((candidate) => candidate.id === paneId);
+      if (pane) return { workspace, tab, pane };
+    }
+  }
+  return null;
 };
 
 const groupMediaByPane = (items: TerminalMedia[]): Map<string, TerminalMedia[]> => {

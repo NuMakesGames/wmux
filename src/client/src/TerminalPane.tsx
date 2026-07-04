@@ -32,6 +32,7 @@ interface Props {
   onActivate: () => void;
   onSplit: (direction: SplitDirection, machineId?: string) => void;
   onClose: () => void;
+  onBell: () => void;
   onDismissMedia: (mediaId: string) => void;
 }
 
@@ -83,6 +84,7 @@ export function TerminalPane({
   onActivate,
   onSplit,
   onClose,
+  onBell,
   onDismissMedia,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -437,7 +439,10 @@ export function TerminalPane({
           setKittyInlineItems([]);
           if (message.replay) handleOutput(term, message.replay);
         }
-        if (message.type === "output") handleOutput(term, message.data);
+        if (message.type === "output") {
+          if (typeof message.data === "string" && message.data.includes("\x07")) onBell();
+          handleOutput(term, message.data);
+        }
         if (message.type === "exit") {
           flushQueuedTerminalText(term);
           term.write(`\r\n[wmux] process exited with code ${message.code}\r\n`);

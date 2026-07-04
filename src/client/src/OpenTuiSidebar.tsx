@@ -25,6 +25,8 @@ export interface OpenTuiSidebarWorkspace {
   active: boolean;
   unreadCount: number;
   agentLabel?: string;
+  agentStatus?: "running" | "completed" | "failed" | "updated";
+  bell?: boolean;
 }
 
 export interface OpenTuiSidebarMachine {
@@ -70,11 +72,29 @@ const colors = {
   muted: "#8d826f",
   faint: "#5f584b",
   red: "#d94a3d",
+  green: "#47d37c",
+  blue: "#5aa9ff",
+  runningSoft: "#061019",
+  failedSoft: "#150806",
 };
 
 const rgba = Object.fromEntries(
   Object.entries(colors).map(([key, value]) => [key, hexToRgba(value)]),
 ) as Record<keyof typeof colors, RGBA>;
+
+const runningFrames = ["|", "/", "-", "\\"];
+const statusBullet = "•";
+const reachColor = (reachable: boolean): RGBA => reachable ? rgba.green : rgba.red;
+
+interface SidebarRenderModel {
+  targetMachineId: string;
+  targetMachineName: string;
+  targetMachineReachable: boolean;
+  hostPickerOpen: boolean;
+  animationTick: number;
+  workspaces: OpenTuiSidebarWorkspace[];
+  machines: OpenTuiSidebarMachine[];
+}
 
 export function OpenTuiSidebar({
   targetMachineId,
@@ -87,21 +107,37 @@ export function OpenTuiSidebar({
   onActivateWorkspace,
 }: OpenTuiSidebarProps) {
   const [hostPickerOpen, setHostPickerOpen] = useState(false);
+  const [animationTick, setAnimationTick] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hitsRef = useRef<HitZone[]>([]);
   const metricsRef = useRef<CellMetrics>({ width: 8, height: 16, cols: 1, rows: 1 });
+  const paintRef = useRef<(() => void) | null>(null);
+  const hasRunningWorkspace = workspaces.some((workspace) => workspace.agentStatus === "running");
 
-  const renderModel = useMemo(
+  useEffect(() => {
+    if (!hasRunningWorkspace) return;
+    const timer = window.setInterval(() => setAnimationTick((value) => (value + 1) % runningFrames.length), 140);
+    return () => window.clearInterval(timer);
+  }, [hasRunningWorkspace]);
+
+  const renderModel = useMemo<SidebarRenderModel>(
     () => ({
       targetMachineId,
       targetMachineName,
       targetMachineReachable,
       hostPickerOpen,
+      animationTick,
       workspaces,
       machines,
     }),
-    [hostPickerOpen, machines, targetMachineId, targetMachineName, targetMachineReachable, workspaces],
+    [animationTick, hostPickerOpen, machines, targetMachineId, targetMachineName, targetMachineReachable, workspaces],
   );
+  const renderModelRef = useRef(renderModel);
+
+  useEffect(() => {
+    renderModelRef.current = renderModel;
+    paintRef.current?.();
+  }, [renderModel]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -117,16 +153,18 @@ export function OpenTuiSidebar({
     const paint = (entry?: ResizeObserverEntry) => {
       const metrics = syncPainterViewport(painter, canvas, entry);
       metricsRef.current = metrics;
-      painter.paint(drawSidebarGrid(metricsRef.current, renderModel, hitsRef));
+      painter.paint(drawSidebarGrid(metricsRef.current, renderModelRef.current, hitsRef));
     };
 
+    paintRef.current = () => paint();
     paint();
     const observer = observeCanvasViewport(canvas, paint);
     return () => {
+      paintRef.current = null;
       observer.disconnect();
       painter.dispose();
     };
-  }, [renderModel]);
+  }, []);
 
   const onClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -165,14 +203,7 @@ export function OpenTuiSidebar({
 
 const drawSidebarGrid = (
   metrics: CellMetrics,
-  model: {
-    targetMachineId: string;
-    targetMachineName: string;
-    targetMachineReachable: boolean;
-    hostPickerOpen: boolean;
-    workspaces: OpenTuiSidebarWorkspace[];
-    machines: OpenTuiSidebarMachine[];
-  },
+  model: SidebarRenderModel,
   hitsRef: MutableRefObject<HitZone[]>,
 ): CellGrid => {
   const { cols, rows } = metrics;
@@ -207,7 +238,9 @@ const drawSidebarGrid = (
   section(row, "target host");
   row++;
   fillRow(row, rgba.panel);
-  write(row, 1, `${model.hostPickerOpen ? "[^]" : "[v]"} ${model.targetMachineReachable ? "[on] " : "[--] "}${model.targetMachineName}`, model.targetMachineReachable ? rgba.text : rgba.muted);
+  write(row, 1, model.hostPickerOpen ? "^" : "v", rgba.gold, 700);
+  write(row, 3, statusBullet, reachColor(model.targetMachineReachable), 700);
+  write(row, 5, model.targetMachineName, model.targetMachineReachable ? rgba.text : rgba.muted);
   write(row, cols - 4, "+", model.targetMachineReachable ? rgba.gold : rgba.faint, 700);
   actionCells(row, 0, Math.max(1, cols - 5), "Pick target host", { type: "toggle-host-picker" });
   if (model.targetMachineReachable) {
@@ -219,7 +252,9 @@ const drawSidebarGrid = (
       if (row >= rows - 4) break;
       const activeTarget = machine.id === model.targetMachineId;
       fillRow(row, activeTarget ? rgba.active : rgba.black);
-      write(row, 2, `${activeTarget ? ">" : " "} ${machine.reachable ? "[on]" : "[--]"} ${machine.name}`, machine.reachable ? rgba.text : rgba.muted, activeTarget ? 700 : 600);
+      write(row, 2, activeTarget ? ">" : " ", activeTarget ? rgba.gold : rgba.faint, 700);
+      write(row, 4, statusBullet, reachColor(machine.reachable), 700);
+      write(row, 6, machine.name, machine.reachable ? rgba.text : rgba.muted, activeTarget ? 700 : 600);
       actionCells(row, 0, cols, `Target ${machine.name}`, { type: "target-machine", machineId: machine.id });
       row++;
       write(row, 6, machine.detail, machine.reachable ? rgba.faint : rgba.red);
@@ -243,15 +278,32 @@ const drawSidebarGrid = (
       const itemRows = 1 + descriptionLines.length + 1;
       if (row + itemRows >= workspaceEndRow) break;
       const itemStart = row;
+      const statusColor = workspace.agentStatus === "completed"
+        ? rgba.green
+        : workspace.agentStatus === "failed"
+          ? rgba.red
+          : workspace.agentStatus === "running"
+            ? rgba.blue
+            : reachColor(workspace.reachable);
+      const statusMarker = workspace.agentStatus === "running" ? runningFrames[model.animationTick] : statusBullet;
+      const inactiveBackground = workspace.agentStatus === "completed"
+        ? rgba.black
+        : workspace.agentStatus === "failed"
+          ? rgba.failedSoft
+          : workspace.agentStatus === "running"
+            ? rgba.runningSoft
+            : rgba.black;
       for (let offset = 0; offset < itemRows; offset += 1) {
-        fillRow(row + offset, workspace.active ? (offset === 0 ? rgba.active : rgba.activeSoft) : rgba.black);
+        fillRow(row + offset, workspace.active ? (offset === 0 ? rgba.active : rgba.activeSoft) : inactiveBackground);
       }
-      fillRow(row, workspace.active ? rgba.active : rgba.black);
+      fillRow(row, workspace.active ? rgba.active : inactiveBackground);
       write(row, 1, workspace.active ? ">" : " ", workspace.active ? rgba.gold : rgba.faint, 700);
-      write(row, 3, `${workspace.reachable ? "[on]" : "[--]"} ${workspace.title}`, workspace.reachable ? rgba.text : rgba.muted, 700);
+      write(row, 3, statusMarker, statusColor, 700);
+      write(row, 5, workspace.title, workspace.reachable ? rgba.text : rgba.muted, 700);
       if (workspace.unreadCount > 0) write(row, cols - 6, `(${workspace.unreadCount})`, rgba.gold, 700);
       row++;
       for (const line of descriptionLines) {
+        if (workspace.bell && row === itemStart + 1) write(row, 3, "!", rgba.gold, 700);
         write(row, 5, line, rgba.muted);
         row++;
       }
@@ -275,7 +327,8 @@ const drawSidebarGrid = (
     const activeTarget = machine.id === model.targetMachineId;
     fillRow(row, activeTarget ? rgba.active : rgba.black);
     write(row, 1, activeTarget ? ">" : " ", activeTarget ? rgba.gold : rgba.faint, 700);
-    write(row, 3, `${machine.reachable ? "[on]" : "[--]"} ${machine.name}`, machine.reachable ? rgba.text : rgba.muted, 700);
+    write(row, 3, statusBullet, reachColor(machine.reachable), 700);
+    write(row, 5, machine.name, machine.reachable ? rgba.text : rgba.muted, 700);
     actionCells(row, 0, cols, `Target ${machine.name}`, { type: "target-machine", machineId: machine.id });
     row++;
     write(row, 5, machine.detail, machine.reachable ? rgba.faint : rgba.red);
