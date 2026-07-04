@@ -64,6 +64,13 @@ interface CellMetrics {
   height: number;
 }
 
+interface SynchronizedOutputState {
+  active: boolean;
+  pending: string;
+  carry: string;
+  flushTimer: number | undefined;
+}
+
 export function TerminalPane({
   pane,
   active,
@@ -89,6 +96,7 @@ export function TerminalPane({
   const kittyVirtualPlacementsRef = useRef(new Map<string, KittyVirtualPlacement>());
   const pendingVirtualImageIdRef = useRef<string | undefined>();
   const wmuxControlCarryRef = useRef("");
+  const synchronizedOutputRef = useRef<SynchronizedOutputState>(createSynchronizedOutputState());
   const shellCursorPlacementRef = useRef(false);
   const onActivateRef = useRef(onActivate);
   const [connected, setConnected] = useState(false);
@@ -111,6 +119,10 @@ export function TerminalPane({
     let scrollDisposable: { dispose: () => void } | undefined;
     let renderDisposable: { dispose: () => void } | undefined;
     let mouseDownListener: ((event: MouseEvent) => void) | undefined;
+    let copyListener: ((event: ClipboardEvent) => void) | undefined;
+    let pasteListener: ((event: ClipboardEvent) => void) | undefined;
+    let terminalOutputTimer: number | undefined;
+    let queuedTerminalOutput = "";
     let reconnectDelayMs = 350;
     kittyParserRef.current = new KittyGraphicsParser();
     kittyPlaceholderStripRef.current.pendingPlaceholderMarks = false;
@@ -118,6 +130,7 @@ export function TerminalPane({
     kittyVirtualPlacementsRef.current.clear();
     pendingVirtualImageIdRef.current = undefined;
     wmuxControlCarryRef.current = "";
+    resetSynchronizedOutput(synchronizedOutputRef.current);
     shellCursorPlacementRef.current = false;
     setKittyMediaItems([]);
     setKittyInlineItems([]);
@@ -246,6 +259,64 @@ export function TerminalPane({
         });
     };
 
+    const writeTerminalTextNow = (term: Terminal, text: string) => {
+      if (!text) return;
+      const placeholderCells: KittyPlaceholderCell[] = [];
+      writeTerminalOutput(
+        term,
+        outputCarryRef,
+        kittyPlaceholderStripRef,
+        text,
+        () => {
+          const imageId = pendingVirtualImageIdRef.current;
+          const cursor = term.wasmTerm?.getCursor();
+          if (!imageId || !cursor) return;
+          placeholderCells.push({ imageId, col: cursor.x, row: cursor.y });
+        },
+        (privateMode) => {
+          sendInput(socketRef.current, cursorPositionResponse(term, privateMode));
+        },
+      );
+      recordKittyPlaceholderCells(placeholderCells);
+    };
+
+    const flushQueuedTerminalText = (term: Terminal) => {
+      if (terminalOutputTimer !== undefined) {
+        window.clearTimeout(terminalOutputTimer);
+        terminalOutputTimer = undefined;
+      }
+      const text = queuedTerminalOutput;
+      queuedTerminalOutput = "";
+      if (text) writeTerminalTextNow(term, text);
+    };
+
+    const queueTerminalText = (term: Terminal, text: string) => {
+      if (!text) return;
+      queuedTerminalOutput += text;
+      if (terminalOutputTimer !== undefined) return;
+      terminalOutputTimer = window.setTimeout(() => flushQueuedTerminalText(term), TERMINAL_OUTPUT_BATCH_MS);
+    };
+
+    const flushSynchronizedOutput = (term: Terminal) => {
+      const text = drainSynchronizedOutput(synchronizedOutputRef.current);
+      if (text) queueTerminalText(term, text);
+    };
+
+    const scheduleSynchronizedOutputFlush = (term: Terminal) => {
+      const state = synchronizedOutputRef.current;
+      if (!state.active || state.flushTimer !== undefined) return;
+      state.flushTimer = window.setTimeout(() => {
+        state.flushTimer = undefined;
+        flushSynchronizedOutput(term);
+      }, MAX_SYNCHRONIZED_OUTPUT_HOLD_MS);
+    };
+
+    const handleTerminalText = (term: Terminal, text: string) => {
+      const chunks = pushSynchronizedOutput(synchronizedOutputRef.current, text);
+      for (const chunk of chunks) queueTerminalText(term, chunk);
+      scheduleSynchronizedOutputFlush(term);
+    };
+
     const handleOutput = (term: Terminal, data: string) => {
       const parsed = kittyParserRef.current.push(data);
       for (const event of parsed.events) {
@@ -254,24 +325,7 @@ export function TerminalPane({
             if (control === "cursor=1") shellCursorPlacementRef.current = true;
             if (control === "cursor=0") shellCursorPlacementRef.current = false;
           });
-          if (!text) continue;
-          const placeholderCells: KittyPlaceholderCell[] = [];
-          writeTerminalOutput(
-            term,
-            outputCarryRef,
-            kittyPlaceholderStripRef,
-            text,
-            () => {
-              const imageId = pendingVirtualImageIdRef.current;
-              const cursor = term.wasmTerm?.getCursor();
-              if (!imageId || !cursor) return;
-              placeholderCells.push({ imageId, col: cursor.x, row: cursor.y });
-            },
-            (privateMode) => {
-              sendInput(socketRef.current, cursorPositionResponse(term, privateMode));
-            },
-          );
-          recordKittyPlaceholderCells(placeholderCells);
+          if (text) handleTerminalText(term, text);
         }
         if (event.kind === "control") handleKittyControl(event.control);
         if (event.kind === "graphic") handleKittyGraphic(event.graphic);
@@ -321,13 +375,23 @@ export function TerminalPane({
         if (typeof message.paneId === "string" && message.paneId !== pane.id) return;
         if (message.type === "ready") {
           outputCarryRef.current = "";
+          queuedTerminalOutput = "";
+          if (terminalOutputTimer !== undefined) {
+            window.clearTimeout(terminalOutputTimer);
+            terminalOutputTimer = undefined;
+          }
+          resetSynchronizedOutput(synchronizedOutputRef.current);
           term.clear();
           setKittyInlineItems([]);
           if (message.replay) handleOutput(term, message.replay);
         }
         if (message.type === "output") handleOutput(term, message.data);
-        if (message.type === "exit") term.write(`\r\n[wmux] process exited with code ${message.code}\r\n`);
+        if (message.type === "exit") {
+          flushQueuedTerminalText(term);
+          term.write(`\r\n[wmux] process exited with code ${message.code}\r\n`);
+        }
         if (message.type === "removed") {
+          flushQueuedTerminalText(term);
           removed = true;
           ws.close();
         }
@@ -374,6 +438,30 @@ export function TerminalPane({
         sendInput(socketRef.current, sequence);
       };
       term.element?.addEventListener("mousedown", mouseDownListener, { capture: true });
+      copyListener = (event) => {
+        const selection = term.getSelection();
+        if (!selection) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        if (event.clipboardData) {
+          event.clipboardData.setData("text/plain", selection);
+        } else {
+          void navigator.clipboard?.writeText(selection);
+        }
+      };
+      pasteListener = (event) => {
+        const text = event.clipboardData?.getData("text/plain") || event.clipboardData?.getData("text") || "";
+        if (!text) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        if (term.getViewportY() > 0) term.scrollToBottom();
+        term.clearSelection();
+        term.paste(text);
+      };
+      term.element?.addEventListener("copy", copyListener, { capture: true });
+      term.element?.addEventListener("paste", pasteListener, { capture: true });
 
       term.attachCustomKeyEventHandler((event) => {
         if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
@@ -401,6 +489,7 @@ export function TerminalPane({
 
       term.onData((data) => {
         if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
+        if (term.getViewportY() > 0) term.scrollToBottom();
         sendInput(socketRef.current, data);
       });
       term.onResize((size) => {
@@ -418,8 +507,12 @@ export function TerminalPane({
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       scrollDisposable?.dispose();
       renderDisposable?.dispose();
+      if (terminalOutputTimer !== undefined) window.clearTimeout(terminalOutputTimer);
       if (mouseDownListener) terminalRef.current?.element?.removeEventListener("mousedown", mouseDownListener, { capture: true });
+      if (copyListener) terminalRef.current?.element?.removeEventListener("copy", copyListener, { capture: true });
+      if (pasteListener) terminalRef.current?.element?.removeEventListener("paste", pasteListener, { capture: true });
       socketRef.current?.close();
+      resetSynchronizedOutput(synchronizedOutputRef.current);
       fitAddon?.dispose();
       terminalRef.current?.dispose();
       socketRef.current = null;
@@ -588,6 +681,95 @@ const inputMayLeaveShellPrompt = (data: string): boolean => data.includes("\r") 
 const WMUX_CONTROL_PREFIX = "\x1b]777;wmux;";
 const WMUX_SHELL_CURSOR_PREFIX = "\x1b[9000;";
 const MAX_WMUX_CONTROL_CARRY = 256;
+const SYNCHRONIZED_OUTPUT_START = "\x1b[?2026h";
+const SYNCHRONIZED_OUTPUT_END = "\x1b[?2026l";
+const SYNCHRONIZED_OUTPUT_SEQUENCES = [SYNCHRONIZED_OUTPUT_START, SYNCHRONIZED_OUTPUT_END];
+const MAX_SYNCHRONIZED_OUTPUT_BUFFER_CHARS = 512 * 1024;
+const MAX_SYNCHRONIZED_OUTPUT_HOLD_MS = 500;
+const TERMINAL_OUTPUT_BATCH_MS = 16;
+
+const createSynchronizedOutputState = (): SynchronizedOutputState => ({
+  active: false,
+  pending: "",
+  carry: "",
+  flushTimer: undefined,
+});
+
+const resetSynchronizedOutput = (state: SynchronizedOutputState): void => {
+  if (state.flushTimer !== undefined) window.clearTimeout(state.flushTimer);
+  state.active = false;
+  state.pending = "";
+  state.carry = "";
+  state.flushTimer = undefined;
+};
+
+const drainSynchronizedOutput = (state: SynchronizedOutputState): string => {
+  if (state.flushTimer !== undefined) window.clearTimeout(state.flushTimer);
+  const output = state.pending;
+  state.active = false;
+  state.pending = "";
+  state.carry = "";
+  state.flushTimer = undefined;
+  return output;
+};
+
+const pushSynchronizedOutput = (state: SynchronizedOutputState, data: string): string[] => {
+  const outputs: string[] = [];
+  const combined = state.carry + data;
+  const carryLength = synchronizedOutputPartialSuffixLength(combined);
+  const input = carryLength > 0 ? combined.slice(0, -carryLength) : combined;
+  state.carry = carryLength > 0 ? combined.slice(-carryLength) : "";
+
+  const emit = (text: string) => {
+    if (!text) return;
+    if (!state.active) {
+      outputs.push(text);
+      return;
+    }
+
+    state.pending += text;
+    if (state.pending.length > MAX_SYNCHRONIZED_OUTPUT_BUFFER_CHARS) {
+      outputs.push(drainSynchronizedOutput(state));
+    }
+  };
+
+  let offset = 0;
+  while (offset < input.length) {
+    const start = input.indexOf(SYNCHRONIZED_OUTPUT_START, offset);
+    const end = input.indexOf(SYNCHRONIZED_OUTPUT_END, offset);
+    const next = nextSynchronizedOutputMarker(start, end);
+
+    if (!next) {
+      emit(input.slice(offset));
+      break;
+    }
+
+    emit(input.slice(offset, next.index));
+    if (next.sequence === SYNCHRONIZED_OUTPUT_START) {
+      state.active = true;
+    } else if (state.active) {
+      const pending = drainSynchronizedOutput(state);
+      if (pending) outputs.push(pending);
+    }
+    offset = next.index + next.sequence.length;
+  }
+
+  return outputs;
+};
+
+const nextSynchronizedOutputMarker = (
+  start: number,
+  end: number,
+): { index: number; sequence: string } | null => {
+  if (start === -1 && end === -1) return null;
+  if (end === -1 || (start !== -1 && start < end)) {
+    return { index: start, sequence: SYNCHRONIZED_OUTPUT_START };
+  }
+  return { index: end, sequence: SYNCHRONIZED_OUTPUT_END };
+};
+
+const synchronizedOutputPartialSuffixLength = (input: string): number =>
+  SYNCHRONIZED_OUTPUT_SEQUENCES.reduce((best, sequence) => Math.max(best, partialSuffixLength(input, sequence)), 0);
 
 const stripWmuxControlSequences = (
   carryRef: MutableRefObject<string>,
@@ -802,7 +984,7 @@ const writeTerminalBody = (
 
   const flush = () => {
     if (!pending) return;
-    term.write(pending);
+    writePreservingScrollbackViewport(term, pending);
     pending = "";
   };
 
@@ -852,6 +1034,17 @@ const writeTerminalBody = (
 
   state.pendingPlaceholderMarks = previousWasPlaceholder;
   flush();
+};
+
+const writePreservingScrollbackViewport = (term: Terminal, data: string): void => {
+  const viewportY = term.getViewportY();
+  const previousScrollbackLength = viewportY > 0 ? term.getScrollbackLength() : 0;
+  term.write(data);
+  if (viewportY <= 0) return;
+
+  const nextScrollbackLength = term.getScrollbackLength();
+  const scrollbackDelta = nextScrollbackLength - previousScrollbackLength;
+  term.scrollToLine(viewportY + scrollbackDelta);
 };
 
 const cursorPositionResponse = (term: Terminal, privateMode: boolean): string => {
