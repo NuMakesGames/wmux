@@ -413,7 +413,7 @@ export function TerminalPane({
         }
         reconnectDelayMs = 350;
         setConnected(true);
-        ws.send(JSON.stringify({ type: "resize", cols: safeCols(term.cols), rows: safeRows(term.rows) }));
+        sendResizeMessage(ws, activeRef.current ? "activate" : "resize", term);
       };
       ws.onclose = () => {
         if (cancelled) return;
@@ -568,7 +568,7 @@ export function TerminalPane({
       term.onResize((size) => {
         const ws = socketRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+          ws.send(JSON.stringify({ type: activeRef.current ? "activate" : "resize", cols: size.cols, rows: size.rows }));
         }
       });
       connect();
@@ -598,8 +598,12 @@ export function TerminalPane({
 
   useEffect(() => {
     const term = terminalRef.current;
-    if (!active || focusSignal <= 0 || !term) return;
-    requestAnimationFrame(() => term.focus());
+    if (!active || !term) return;
+    requestAnimationFrame(() => {
+      fitAddonRef.current?.fit();
+      sendResizeMessage(socketRef.current, "activate", term);
+      if (focusSignal > 0) term.focus();
+    });
   }, [active, focusSignal]);
 
   useEffect(() => {
@@ -754,6 +758,11 @@ const configureTerminalInput = (term: Terminal): void => {
 
 const sendInput = (ws: WebSocket | null, data: string): void => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+};
+
+const sendResizeMessage = (ws: WebSocket | null, type: "resize" | "activate", term: Terminal): void => {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type, cols: safeCols(term.cols), rows: safeRows(term.rows) }));
 };
 
 const inputMayLeaveShellPrompt = (data: string): boolean => data.includes("\r") || data.includes("\n") || data.includes("\x04");

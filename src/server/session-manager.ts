@@ -2,13 +2,18 @@ import type { WebSocket } from "ws";
 import type { MachineConfig, PaneState } from "./types.js";
 import { PtySession } from "./pty-session.js";
 import type { StateStore } from "./state.js";
-import { disposeDurableSession } from "./machines.js";
+import {
+  canRefreshDurableSessionClient,
+  disposeDurableSession,
+  refreshDurableSessionClient,
+} from "./machines.js";
 import { streamPathForMachine } from "./streams.js";
 import { shouldUseWindowsAgent, WindowsAgentSession } from "./windows-agent.js";
 
 type ClientMessage =
   | { type: "input"; data: string }
-  | { type: "resize"; cols: number; rows: number };
+  | { type: "resize"; cols: number; rows: number }
+  | { type: "activate"; cols: number; rows: number };
 
 interface SocketState {
   paneId: string;
@@ -24,6 +29,7 @@ export class SessionManager {
   private outputWatchers = new Map<string, Set<WebSocket>>();
   private resizeOwners = new Map<string, WebSocket>();
   private socketState = new Map<WebSocket, SocketState>();
+  private ignoredSessionExits = new WeakSet<ManagedSession>();
 
   constructor(
     private readonly state: StateStore,
@@ -37,22 +43,22 @@ export class SessionManager {
       return;
     }
     const initialSize = normalizeSize(cols, rows);
-    const session = this.ensureSession(pane, initialSize.cols, initialSize.rows);
+    this.recycleIdleDurableClient(pane);
     if (!this.sockets.has(paneId)) this.sockets.set(paneId, new Set());
     const paneSockets = this.sockets.get(paneId);
     paneSockets?.add(socket);
     this.socketState.set(socket, { paneId, ...initialSize });
+    let session: ManagedSession;
+    try {
+      session = this.ensureSession(pane, initialSize.cols, initialSize.rows);
+    } catch (error) {
+      this.socketState.delete(socket);
+      paneSockets?.delete(socket);
+      this.deleteEmptySocketSet(paneId);
+      socket.close(1011, error instanceof Error ? error.message : "session start failed");
+      return;
+    }
     const resizeOwner = this.ensureResizeOwner(paneId, socket, session, initialSize);
-
-    this.send(socket, {
-      type: "ready",
-      paneId,
-      pid: session.pid,
-      title: pane.title,
-      status: pane.status,
-      resizeOwner,
-      replay: session.replayOutput,
-    });
 
     socket.on("message", (raw) => {
       const message = this.parse(raw.toString());
@@ -66,6 +72,11 @@ export class SessionManager {
         this.socketState.set(socket, { paneId, ...size });
         if (this.resizeOwners.get(paneId) === socket) session.resize(size.cols, size.rows);
       }
+      if (message.type === "activate") {
+        const size = normalizeSize(message.cols, message.rows);
+        this.socketState.set(socket, { paneId, ...size });
+        this.activateResizeOwner(paneId, socket, session);
+      }
     });
 
     socket.on("close", () => {
@@ -73,6 +84,17 @@ export class SessionManager {
       this.sockets.get(paneId)?.delete(socket);
       this.reassignResizeOwner(paneId, socket, session);
     });
+
+    this.send(socket, {
+      type: "ready",
+      paneId,
+      pid: session.pid,
+      title: pane.title,
+      status: pane.status,
+      resizeOwner,
+      replay: this.replayOutputFor(pane, session),
+    });
+    this.scheduleDurableClientRefresh(pane, socket);
   }
 
   watchOutput(paneId: string, socket: WebSocket, cols = 96, rows = 32): void {
@@ -180,6 +202,7 @@ export class SessionManager {
       this.state.updatePane(pane.id, { cwd });
     });
     session.on("exit", (code) => {
+      if (this.ignoredSessionExits.has(session)) return;
       this.broadcast(pane.id, { type: "exit", paneId: pane.id, code });
       this.sessions.delete(pane.id);
       this.resizeOwners.delete(pane.id);
@@ -206,6 +229,40 @@ export class SessionManager {
     }
   }
 
+  private replayOutputFor(pane: PaneState, session: ManagedSession): string {
+    return this.shouldUseDurableClientRefresh(pane) ? "" : session.replayOutput;
+  }
+
+  private scheduleDurableClientRefresh(pane: PaneState, socket: WebSocket): void {
+    if (!this.shouldUseDurableClientRefresh(pane)) return;
+    for (const delayMs of [120, 500]) {
+      setTimeout(() => {
+        if (socket.readyState !== socket.OPEN) return;
+        const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
+        if (machine) refreshDurableSessionClient(machine, pane.id);
+      }, delayMs);
+    }
+  }
+
+  private shouldUseDurableClientRefresh(pane: PaneState): boolean {
+    const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
+    return machine ? canRefreshDurableSessionClient(machine) : false;
+  }
+
+  private recycleIdleDurableClient(pane: PaneState): void {
+    if (!this.shouldUseDurableClientRefresh(pane) || this.hasPaneConnections(pane.id)) return;
+    const existing = this.sessions.get(pane.id);
+    if (!existing || existing.isExited) return;
+    this.ignoredSessionExits.add(existing);
+    this.sessions.delete(pane.id);
+    this.resizeOwners.delete(pane.id);
+    existing.kill();
+  }
+
+  private hasPaneConnections(paneId: string): boolean {
+    return (this.sockets.get(paneId)?.size ?? 0) > 0 || (this.outputWatchers.get(paneId)?.size ?? 0) > 0;
+  }
+
   private ensureResizeOwner(
     paneId: string,
     socket: WebSocket,
@@ -224,6 +281,13 @@ export class SessionManager {
 
   private promoteResizeOwner(paneId: string, socket: WebSocket, session: ManagedSession): void {
     if (this.resizeOwners.get(paneId) === socket) return;
+    const state = this.socketState.get(socket);
+    if (!state) return;
+    this.resizeOwners.set(paneId, socket);
+    session.resize(state.cols, state.rows);
+  }
+
+  private activateResizeOwner(paneId: string, socket: WebSocket, session: ManagedSession): void {
     const state = this.socketState.get(socket);
     if (!state) return;
     this.resizeOwners.set(paneId, socket);
@@ -297,7 +361,7 @@ export class SessionManager {
       const parsed = JSON.parse(raw) as ClientMessage;
       if (parsed.type === "input" && typeof parsed.data === "string") return parsed;
       if (
-        parsed.type === "resize" &&
+        (parsed.type === "resize" || parsed.type === "activate") &&
         Number.isFinite(parsed.cols) &&
         Number.isFinite(parsed.rows)
       ) {

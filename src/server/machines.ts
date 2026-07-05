@@ -177,7 +177,8 @@ export const buildSpawnSpec = (
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 const powershellQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 
-const durableSessionName = (paneId?: string): string => `wmux_${(paneId || "unknown").replace(/[^A-Za-z0-9_-]/g, "_")}`;
+export const durableSessionName = (paneId?: string): string =>
+  `wmux_${(paneId || "unknown").replace(/[^A-Za-z0-9_-]/g, "_")}`;
 
 const interactiveShellCommand = (shellValue: string, sessionName: string): string => {
   const shellDir = `"${"${TMPDIR:-/tmp}"}/wmux-shell-${sessionName}"`;
@@ -450,6 +451,27 @@ export const readDurableSessionCwd = (machine: MachineConfig, paneId: string): s
   return sanitizeCwd(result.stdout.split(/\r?\n/)[0]);
 };
 
+export const canRefreshDurableSessionClient = (machine: MachineConfig): boolean => {
+  const backend = machine.sessionBackend ?? "auto";
+  return machine.kind === "local" && !machine.command?.length && (backend === "auto" || backend === "tmux");
+};
+
+export const refreshDurableSessionClient = (machine: MachineConfig, paneId: string): boolean => {
+  if (!canRefreshDurableSessionClient(machine)) return false;
+  const sessionName = durableSessionName(paneId);
+  const clients = spawnSync("tmux", ["list-clients", "-t", sessionName, "-F", "#{client_name}"], {
+    encoding: "utf8",
+    timeout: 1000,
+  });
+  if (clients.status !== 0 || !clients.stdout.trim()) return false;
+  let refreshed = false;
+  for (const client of clients.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+    const result = spawnSync("tmux", ["refresh-client", "-t", client], { stdio: "ignore", timeout: 1000 });
+    refreshed ||= result.status === 0;
+  }
+  return refreshed;
+};
+
 const readRemoteDurableSessionCwd = (
   machine: MachineConfig,
   query: string,
@@ -673,7 +695,10 @@ __WMUX_STREAM_AGENT_HELPER__
 cat > "$wmux_helper_dir/wmux-stream-agent-service" <<'__WMUX_STREAM_AGENT_SERVICE_HELPER__'
 ${localHelperScript("wmux-stream-agent-service")}
 __WMUX_STREAM_AGENT_SERVICE_HELPER__
-chmod +x "$wmux_helper_dir/wmux-media" "$wmux_helper_dir/wmux-notify" "$wmux_helper_dir/wmux-title" "$wmux_helper_dir/wmux-agent-event" "$wmux_helper_dir/wmux-run" "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wmux-stream-agent" "$wmux_helper_dir/wmux-stream-agent-service";
+cat > "$wmux_helper_dir/wmux-sunshine-setup" <<'__WMUX_SUNSHINE_SETUP_HELPER__'
+${localHelperScript("wmux-sunshine-setup")}
+__WMUX_SUNSHINE_SETUP_HELPER__
+chmod +x "$wmux_helper_dir/wmux-media" "$wmux_helper_dir/wmux-notify" "$wmux_helper_dir/wmux-title" "$wmux_helper_dir/wmux-agent-event" "$wmux_helper_dir/wmux-run" "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wmux-stream-agent" "$wmux_helper_dir/wmux-stream-agent-service" "$wmux_helper_dir/wmux-sunshine-setup";
 ln -sf "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wmux-clip" 2>/dev/null || true;
 ln -sf "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wclip" 2>/dev/null || true;
 ln -sf "$wmux_helper_dir/wmux-copy" "$wmux_helper_dir/wmclip" 2>/dev/null || true;
@@ -696,6 +721,7 @@ for wmux_path_dir in $wmux_candidate_path; do
         ln -sf "$wmux_helper_dir/wmux-copy" "$wmux_path_dir/wmclip" 2>/dev/null || true;
         ln -sf "$wmux_helper_dir/wmux-stream-agent" "$wmux_path_dir/wmux-stream-agent" 2>/dev/null || true;
         ln -sf "$wmux_helper_dir/wmux-stream-agent-service" "$wmux_path_dir/wmux-stream-agent-service" 2>/dev/null || true;
+        ln -sf "$wmux_helper_dir/wmux-sunshine-setup" "$wmux_path_dir/wmux-sunshine-setup" 2>/dev/null || true;
       fi;
       ;;
   esac;

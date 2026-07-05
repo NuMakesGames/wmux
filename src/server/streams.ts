@@ -175,7 +175,7 @@ const resolveMoonlightGatewayStatus = async (
   requestStatus: StreamRequestStatus,
 ): Promise<StreamStatus> => {
   const gatewayUrl = moonlightGatewayUrl(machine, host);
-  const openUrl = normalizeUrl(machine.stream?.gatewayOpenUrl ?? gatewayUrl);
+  const openUrl = normalizeUrl(machine.stream?.gatewayOpenUrl ?? moonlightGatewayOpenUrl(gatewayUrl));
   const healthUrl = joinUrl(gatewayUrl, "/api/wmux/health");
   const health = await readMoonlightGatewayHealth(healthUrl).catch((error: unknown) => ({
     error: error instanceof Error ? error.message : "Moonlight gateway status unavailable",
@@ -229,6 +229,9 @@ const moonlightGatewayUrl = (machine: MachineConfig, host: string): string => {
   const gatewayPort = process.env.WMUX_MOONLIGHT_GATEWAY_PORT || "3490";
   return `http://${gatewayHost}:${gatewayPort}`;
 };
+
+const moonlightGatewayOpenUrl = (gatewayUrl: string): string =>
+  joinUrl(gatewayUrl, "/api/wmux/open");
 
 const normalizeUrl = (value: string): string => value.replace(/\/+$/, "");
 

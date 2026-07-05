@@ -54,8 +54,11 @@ export WMUX_SUNSHINE_USER=wmux
 export WMUX_SUNSHINE_PASSWORD='...'
 export WMUX_MOONLIGHT_HOST=127.0.0.1
 export WMUX_MOONLIGHT_HOST_HTTP_PORT=47989
-export WMUX_SUNSHINE_CLIENT_NAME=wmux-9800x3d
+export WMUX_MOONLIGHT_PAIR_DEVICE_NAME=roth
+export WMUX_SUNSHINE_PIN_DELAY_MS=3500
 ```
+
+Moonlight Web Stream v2.10.0 hardcodes its pair device name to `roth` in the actual pair request. The gateway submits that same name to Sunshine's PIN API by default. Override `WMUX_MOONLIGHT_PAIR_DEVICE_NAME` only when the upstream bridge changes its pair-device-name behavior.
 
 Then call:
 
@@ -73,13 +76,14 @@ You can also pass the same values in the request body:
     "user": "wmux",
     "password": "...",
     "host": "127.0.0.1",
-    "httpPort": 47989
+    "httpPort": 47989,
+    "pairDeviceName": "roth"
   },
   "sunshine": {
     "url": "https://127.0.0.1:47990",
     "user": "wmux",
     "password": "...",
-    "clientName": "wmux-9800x3d",
+    "pinDelayMs": 3500,
     "insecure": true
   }
 }
@@ -92,6 +96,52 @@ Check setup readiness:
 ```bash
 curl http://100.x.y.z:3490/api/wmux/setup/status
 ```
+
+### Browser Login
+
+When `WMUX_MOONLIGHT_WEB_USER` and `WMUX_MOONLIGHT_WEB_PASSWORD` are set in the gateway environment, wmux opens Moonlight gateway streams through:
+
+```text
+/api/wmux/open
+```
+
+That endpoint logs into Moonlight Web server-side, resolves the configured `WMUX_MOONLIGHT_HOST`, picks the configured `WMUX_MOONLIGHT_APP_TITLE` or `Desktop`, sets Moonlight Web's browser setting to use websocket transport by default, and opens Moonlight Web's `stream.html` for that host/app. The gateway also injects a server-owned Moonlight session cookie into proxied HTTP and WebSocket requests, so browsers that block iframe cookie storage can still use the UI. Keep the credentials in a mode-600 environment file or service environment; do not place raw credentials in `wmux.config.json`.
+
+Set `WMUX_MOONLIGHT_APP_TITLE` or `WMUX_MOONLIGHT_APP_ID` on the gateway service to default to something other than `Desktop`.
+Set `WMUX_MOONLIGHT_DATA_TRANSPORT=auto` or `webrtc` only when WebRTC negotiation is known to work through the gateway; the default is `websocket`.
+Set both `WMUX_MOONLIGHT_HOST_ID` and `WMUX_MOONLIGHT_APP_ID` when the gateway owns one fixed host/app. That lets `/api/wmux/open` skip live host/app discovery and immediately launch the known stream target.
+
+### Spinner Troubleshooting
+
+If `/api/wmux/open` loads but the stream page stays on its spinner, first check whether Moonlight Web can query the paired Sunshine host:
+
+```bash
+curl http://100.x.y.z:3490/api/host?host_id=1446783110
+curl http://100.x.y.z:3490/api/apps?host_id=1446783110
+```
+
+If those hang, check Sunshine's GameStream HTTPS port from the wmux server:
+
+```bash
+curl -vk 'https://SUNSHINE_HOST:47984/serverinfo?uniqueid=0123456789abcdef&uuid=0123456789abcdef'
+```
+
+An unpaired curl client should complete TLS and then fail with a client-certificate-required alert. If the TCP connection opens but TLS never gets a ServerHello, Sunshine is wedged; restart the host-side Sunshine service, for example `wmux-sunshine-setup start-sunshine` on macOS.
+
+### macOS Host Setup
+
+Inside a wmux SSH pane on a macOS host:
+
+```bash
+wmux-sunshine-setup install-sunshine
+export WMUX_SUNSHINE_USER=wmux
+export WMUX_SUNSHINE_PASSWORD='...'
+wmux-sunshine-setup configure-sunshine
+wmux-sunshine-setup start-sunshine
+wmux-sunshine-setup sunshine-status
+```
+
+The default installer downloads the official macOS DMG and installs `Sunshine.app` into `~/Applications`. Set `WMUX_SUNSHINE_INSTALL_METHOD=brew` to use the official LizardByte Homebrew tap. macOS may still require user approval for Screen Recording, Accessibility/Input Monitoring, and Local Network permissions before Sunshine can capture and accept input.
 
 ### Windows Host Setup
 

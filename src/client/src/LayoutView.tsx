@@ -4,6 +4,7 @@ import type { LayoutNode, MachineStatus, PaneState, SplitDirection, SurfaceTab, 
 
 interface Props {
   tab: SurfaceTab;
+  viewActive: boolean;
   machines: MachineStatus[];
   terminalFontSize: number;
   terminalScrollbackRows: number;
@@ -21,6 +22,7 @@ interface Props {
 
 export function LayoutView({
   tab,
+  viewActive,
   machines,
   terminalFontSize,
   terminalScrollbackRows,
@@ -100,14 +102,14 @@ export function LayoutView({
         <TerminalPane
           key={`${pane.id}:${terminalScrollbackRows}`}
           pane={pane}
-          active={tab.activePaneId === pane.id}
+          active={viewActive && tab.activePaneId === pane.id}
           unreadCount={unreadByPaneId.get(pane.id) ?? 0}
           machines={machines}
           terminalFontSize={terminalFontSize}
           terminalScrollbackRows={terminalScrollbackRows}
           mediaItems={mediaByPaneId.get(pane.id) ?? []}
           lastRun={runsByPaneId.get(pane.id)}
-          focusSignal={tab.activePaneId === pane.id ? focusActivePaneSignal : 0}
+          focusSignal={viewActive && tab.activePaneId === pane.id ? focusActivePaneSignal : 0}
           onActivate={() => onActivatePane(pane.id)}
           onSplit={(direction, machineId) => onSplit(pane.id, direction, machineId)}
           onClose={() => onClosePane(pane.id)}

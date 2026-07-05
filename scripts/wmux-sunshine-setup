@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+action="${1:-status}"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:${PATH}"
+state_dir="${WMUX_STATE_DIR:-${HOME}/.wmux}"
+log_dir="${state_dir}/logs"
+label="${WMUX_SUNSHINE_LABEL:-dev.wmux.sunshine}"
+uid="$(id -u)"
+domain="gui/${uid}"
+launch_agents_dir="${HOME}/Library/LaunchAgents"
+plist="${launch_agents_dir}/${label}.plist"
+sunshine_url="${WMUX_SUNSHINE_URL:-https://127.0.0.1:47990}"
+
+die() {
+  echo "wmux-sunshine-setup: $*" >&2
+  exit 1
+}
+
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+xml_escape() {
+  sed \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' \
+    -e "s/'/\&apos;/g"
+}
+
+escaped() {
+  printf '%s' "$1" | xml_escape
+}
+
+require_macos() {
+  [[ "$(uname -s)" == "Darwin" ]] || die "this helper currently supports macOS only"
+}
+
+sunshine_app_candidates() {
+  if [[ -n "${WMUX_SUNSHINE_APP:-}" ]]; then
+    printf '%s\n' "${WMUX_SUNSHINE_APP}"
+  fi
+  printf '%s\n' \
+    "/Applications/Sunshine.app" \
+    "${HOME}/Applications/Sunshine.app" \
+    "${state_dir}/apps/Sunshine.app"
+}
+
+find_sunshine_app() {
+  while IFS= read -r candidate; do
+    [[ -d "${candidate}" ]] && {
+      printf '%s\n' "${candidate}"
+      return 0
+    }
+  done < <(sunshine_app_candidates)
+  return 1
+}
+
+sunshine_bin_for_app() {
+  local app="$1"
+  local candidate
+  for candidate in \
+    "${app}/Contents/MacOS/sunshine" \
+    "${app}/Contents/MacOS/Sunshine"; do
+    [[ -x "${candidate}" ]] && {
+      printf '%s\n' "${candidate}"
+      return 0
+    }
+  done
+  return 1
+}
+
+find_sunshine_bin() {
+  if [[ -n "${WMUX_SUNSHINE_BIN:-}" && -x "${WMUX_SUNSHINE_BIN}" ]]; then
+    printf '%s\n' "${WMUX_SUNSHINE_BIN}"
+    return 0
+  fi
+  if command -v sunshine >/dev/null 2>&1; then
+    command -v sunshine
+    return 0
+  fi
+  local app
+  app="$(find_sunshine_app 2>/dev/null || true)"
+  if [[ -n "${app}" ]]; then
+    sunshine_bin_for_app "${app}" && return 0
+  fi
+  return 1
+}
+
+find_brew() {
+  command -v brew 2>/dev/null || true
+}
+
+api_status() {
+  curl -k -fsS --max-time 3 "${sunshine_url%/}/api/configLocale" >/dev/null 2>&1 && printf 'reachable' || printf 'unreachable'
+}
+
+launch_state() {
+  launchctl print "${domain}/${label}" 2>/dev/null | sed -n 's/^[[:space:]]*state = //p' | head -n 1
+}
+
+process_pid() {
+  pgrep -f '[s]unshine' 2>/dev/null | head -n 1 || true
+}
+
+status_json() {
+  require_macos
+  local app bin brew state pid api app_json bin_json brew_json state_json pid_json api_json url_json
+  app="$(find_sunshine_app 2>/dev/null || true)"
+  bin="$(find_sunshine_bin 2>/dev/null || true)"
+  brew="$(find_brew)"
+  state="$(launch_state || true)"
+  pid="$(process_pid)"
+  api="$(api_status)"
+  app_json="$(printf '%s' "${app}" | json_escape)"
+  bin_json="$(printf '%s' "${bin}" | json_escape)"
+  brew_json="$(printf '%s' "${brew}" | json_escape)"
+  state_json="$(printf '%s' "${state}" | json_escape)"
+  pid_json="$(printf '%s' "${pid}" | json_escape)"
+  api_json="$(printf '%s' "${api}" | json_escape)"
+  url_json="$(printf '%s' "${sunshine_url}" | json_escape)"
+  cat <<EOF
+{
+  "platform": "macos",
+  "installed": $([[ -n "${bin}" ]] && printf true || printf false),
+  "app": ${app_json},
+  "command": ${bin_json},
+  "homebrew": {
+    "command": ${brew_json}
+  },
+  "launchAgent": {
+    "label": "${label}",
+    "state": ${state_json},
+    "plist": "${plist}"
+  },
+  "process": {
+    "pid": ${pid_json}
+  },
+  "api": {
+    "url": ${url_json},
+    "status": ${api_json}
+  },
+  "permissionsHint": "Grant Screen Recording, Accessibility/Input Monitoring, and Local Network permissions to Sunshine if macOS prompts for them."
+}
+EOF
+}
+
+install_sunshine() {
+  require_macos
+  if find_sunshine_bin >/dev/null 2>&1; then
+    echo "Sunshine is already installed."
+    return
+  fi
+  case "${WMUX_SUNSHINE_INSTALL_METHOD:-dmg}" in
+    brew|homebrew)
+      install_sunshine_brew
+      return
+      ;;
+    dmg)
+      ;;
+    *)
+      die "WMUX_SUNSHINE_INSTALL_METHOD must be 'dmg' or 'brew'"
+      ;;
+  esac
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  command -v hdiutil >/dev/null 2>&1 || die "hdiutil is required"
+  command -v ditto >/dev/null 2>&1 || die "ditto is required"
+
+  local machine arch url tmp mount app dest_dir dest_app
+  machine="$(uname -m)"
+  case "${machine}" in
+    arm64|aarch64) arch="arm64" ;;
+    x86_64|amd64) arch="x86_64" ;;
+    *) die "unsupported macOS architecture: ${machine}" ;;
+  esac
+  url="${WMUX_SUNSHINE_DMG_URL:-https://github.com/LizardByte/Sunshine/releases/latest/download/Sunshine-macOS-${arch}.dmg}"
+  tmp="$(mktemp -d)"
+  mount="${tmp}/mnt"
+  mkdir -p "${mount}"
+  trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true; rm -rf "$tmp"' RETURN
+
+  echo "Downloading Sunshine ${arch} DMG..."
+  curl -fL "${url}" -o "${tmp}/sunshine.dmg"
+  set +o pipefail
+  yes | hdiutil attach -nobrowse -readonly -mountpoint "${mount}" "${tmp}/sunshine.dmg" >/dev/null
+  local attach_status=$?
+  set -o pipefail
+  [[ "${attach_status}" -eq 0 ]] || exit "${attach_status}"
+  app="$(find "${mount}" -maxdepth 2 -type d -name 'Sunshine.app' -print -quit)"
+  [[ -n "${app}" ]] || die "Sunshine.app was not found inside the DMG"
+  dest_dir="${WMUX_SUNSHINE_APP_DIR:-${HOME}/Applications}"
+  dest_app="${dest_dir}/Sunshine.app"
+  mkdir -p "${dest_dir}"
+  rm -rf "${dest_app}"
+  ditto "${app}" "${dest_app}"
+  xattr -dr com.apple.quarantine "${dest_app}" >/dev/null 2>&1 || true
+  echo "Installed ${dest_app}"
+}
+
+install_sunshine_brew() {
+  local brew
+  brew="$(find_brew)"
+  [[ -n "${brew}" ]] || die "Homebrew was not found on PATH"
+  "${brew}" tap LizardByte/homebrew
+  "${brew}" install sunshine
+  echo "Installed Sunshine with Homebrew."
+}
+
+configure_sunshine() {
+  require_macos
+  local bin
+  bin="$(find_sunshine_bin)" || die "sunshine is not installed; run wmux-sunshine-setup install-sunshine"
+  [[ -n "${WMUX_SUNSHINE_USER:-}" ]] || die "WMUX_SUNSHINE_USER is required"
+  [[ -n "${WMUX_SUNSHINE_PASSWORD:-}" ]] || die "WMUX_SUNSHINE_PASSWORD is required"
+  "${bin}" --creds "${WMUX_SUNSHINE_USER}" "${WMUX_SUNSHINE_PASSWORD}"
+  echo "Sunshine credentials configured."
+}
+
+write_plist() {
+  local bin app
+  bin="$(find_sunshine_bin)" || die "sunshine is not installed; run wmux-sunshine-setup install-sunshine"
+  app="$(find_sunshine_app 2>/dev/null || true)"
+  mkdir -p "${launch_agents_dir}" "${log_dir}"
+  cat > "${plist}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(escaped "${label}")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(escaped "${bin}")</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$(escaped "${HOME}")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.local/bin:${HOME}/.cargo/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>$(escaped "${log_dir}/sunshine.out.log")</string>
+  <key>StandardErrorPath</key>
+  <string>$(escaped "${log_dir}/sunshine.err.log")</string>
+</dict>
+</plist>
+EOF
+  if [[ -n "${app}" ]]; then
+    echo "Sunshine permission target:"
+    echo "  ${app}"
+  fi
+}
+
+bootout() {
+  launchctl bootout "${domain}" "${plist}" >/dev/null 2>&1 || true
+}
+
+start_sunshine() {
+  require_macos
+  write_plist
+  bootout
+  launchctl bootstrap "${domain}" "${plist}"
+  launchctl enable "${domain}/${label}"
+  launchctl kickstart -k "${domain}/${label}"
+  echo "Started ${label}"
+  echo "Logs:"
+  echo "  ${log_dir}/sunshine.out.log"
+  echo "  ${log_dir}/sunshine.err.log"
+}
+
+stop_sunshine() {
+  require_macos
+  bootout
+  echo "Stopped ${label}"
+}
+
+open_permissions() {
+  require_macos
+  local app
+  app="$(find_sunshine_app 2>/dev/null || true)"
+  open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" >/dev/null 2>&1 || true
+  [[ -n "${app}" ]] && open -R "${app}" >/dev/null 2>&1 || true
+  echo "Grant Screen Recording, Accessibility/Input Monitoring, and Local Network permissions to Sunshine."
+  [[ -n "${app}" ]] && echo "Permission target: ${app}"
+}
+
+logs() {
+  tail -n "${WMUX_SUNSHINE_LOG_LINES:-120}" "${log_dir}/sunshine.out.log" "${log_dir}/sunshine.err.log" 2>/dev/null || true
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: wmux-sunshine-setup [status|validate|install-sunshine|configure-sunshine|start-sunshine|stop-sunshine|sunshine-status|logs|open-permissions]
+
+install-sunshine    Install Sunshine.app from the latest official macOS DMG.
+                    Set WMUX_SUNSHINE_INSTALL_METHOD=brew to use Homebrew.
+configure-sunshine  Set Sunshine credentials from WMUX_SUNSHINE_USER/WMUX_SUNSHINE_PASSWORD.
+start-sunshine      Run Sunshine as a per-user macOS LaunchAgent.
+stop-sunshine       Stop the LaunchAgent.
+sunshine-status     Alias for status.
+open-permissions    Open macOS privacy settings and reveal Sunshine.app.
+EOF
+}
+
+case "${action}" in
+  status|validate|sunshine-status)
+    status_json
+    ;;
+  install-sunshine)
+    install_sunshine
+    ;;
+  configure-sunshine)
+    configure_sunshine
+    ;;
+  start-sunshine)
+    start_sunshine
+    ;;
+  stop-sunshine)
+    stop_sunshine
+    ;;
+  logs)
+    logs
+    ;;
+  open-permissions)
+    open_permissions
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

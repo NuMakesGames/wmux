@@ -374,7 +374,7 @@ export function App() {
   const refresh = async (nextState?: BootstrapPayload) => {
     const incoming = nextState ?? (await api.bootstrap());
     const pending = pendingActiveRoute.current;
-    const applied = pending ? activateWorkspaceTabInState(incoming, pending.workspaceId, pending.tabId) : incoming;
+    const applied = applyRouteTargetToState(incoming, pending ?? parseRouteTarget());
     stateRef.current = applied;
     setState(applied);
   };
@@ -642,8 +642,8 @@ export function App() {
   }, [mobileViewport.isMobile, sidebarWidth, toggleSidebar]);
 
   const createWorkspace = async (machineId: string) => {
-    await api.createWorkspace(machineId);
-    await refresh();
+    const response = await api.createWorkspace(machineId);
+    await refresh(response.state);
   };
 
   const activateWorkspaceLink = (
@@ -1550,6 +1550,7 @@ export function App() {
                 >
                   <LayoutView
                     tab={view.tab}
+                    viewActive={isActive}
                     machines={displayMachines}
                     terminalFontSize={settings.terminalFontSize}
                     terminalScrollbackRows={persistedSettings.terminalScrollbackRows}
@@ -2462,7 +2463,13 @@ const markWorkspaceNotificationsReadInState = (payload: BootstrapPayload, worksp
 };
 
 const activateRouteTarget = async (payload: BootstrapPayload): Promise<BootstrapPayload> => {
-  const target = parseRouteTarget();
+  return applyRouteTargetToState(payload, parseRouteTarget());
+};
+
+const applyRouteTargetToState = (
+  payload: BootstrapPayload,
+  target: { workspaceId: string; tabId?: string } | null,
+): BootstrapPayload => {
   if (!target) return payload;
   const route = findWorkspaceTab(payload, target.workspaceId, target.tabId);
   return route ? activateWorkspaceTabInState(payload, route.workspace.id, route.tab.id) : payload;

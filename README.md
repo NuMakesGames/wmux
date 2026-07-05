@@ -115,7 +115,7 @@ curl -fsS \
 
 Unread notifications light the workspace, tab, and pane. The browser notification button in the top bar requests browser notification permission.
 
-SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, its `wmux-clip`/`wclip`/`wmclip` aliases, and `wmux-stream-agent` available on hosts like Away-Team without manually copying this repo there.
+SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, its `wmux-clip`/`wclip`/`wmclip` aliases, `wmux-stream-agent`, `wmux-stream-agent-service`, and `wmux-sunshine-setup` available on hosts like Away-Team without manually copying this repo there.
 
 Windows `powershell-ssh` panes fetch a helper bundle from wmux when the pane starts and stage PowerShell/CMD shims into `%LOCALAPPDATA%\wmux\bin`. New Windows panes get the same helper command names plus `wmux-hooks`, `wmux-stream-agent-service`, and `wmux-windows-setup`.
 
@@ -218,6 +218,19 @@ wmux-stream-agent-service status
 wmux-stream-agent-service logs
 ```
 
+macOS Sunshine setup can use the staged helper too:
+
+```bash
+wmux-sunshine-setup install-sunshine
+export WMUX_SUNSHINE_USER=wmux
+export WMUX_SUNSHINE_PASSWORD='...'
+wmux-sunshine-setup configure-sunshine
+wmux-sunshine-setup start-sunshine
+wmux-sunshine-setup sunshine-status
+```
+
+`install-sunshine` installs the official macOS DMG into `~/Applications` by default. Set `WMUX_SUNSHINE_INSTALL_METHOD=brew` to install through the official LizardByte Homebrew tap instead. macOS may still require approving Screen Recording, Accessibility/Input Monitoring, and Local Network prompts for Sunshine.
+
 On Windows hosts, `wmux-stream-agent-service install` creates a supervised per-user Scheduled Task at logon. The task runs in the logged-in user's desktop session but launches through a hidden PowerShell wrapper, so normal operation should not leave an empty console window on screen. `wmux-windows-setup install-deps` can install FFmpeg and Python with `winget`, installs `pywinpty`, and `wmux-stream-agent --probe-capture` can test a direct one-frame FFmpeg capture. Direct SSH capture may fail with Windows desktop access errors; the scheduled task is the intended path because it runs in the logged-in interactive user context.
 
 As an alternate interactive remote-control path, a machine can use a browser-native Moonlight/Sunshine gateway instead of MediaMTX:
@@ -245,7 +258,7 @@ WMUX_MOONLIGHT_WEB_URL=http://127.0.0.1:8080 \
 
 The gateway exposes `/api/wmux/health` for wmux and proxies HTTP/WebSocket traffic to the Moonlight Web upstream. See [docs/MOONLIGHT_GATEWAY.md](docs/MOONLIGHT_GATEWAY.md) for setup notes and the implementation risks found while reviewing Moonlight Web Stream.
 
-For Windows hosts, `wmux-windows-setup install-sunshine` installs Sunshine with `winget`; `configure-sunshine` sets Sunshine credentials from `WMUX_SUNSHINE_USER` and `WMUX_SUNSHINE_PASSWORD`; `start-sunshine` starts it in the logged-in user session. The gateway can then automate pairing by calling `/api/wmux/setup/pair`, which generates the Moonlight Web PIN and submits it to Sunshine's `/api/pin`.
+For macOS SSH hosts, `wmux-sunshine-setup install-sunshine` installs the official DMG or Homebrew formula, `configure-sunshine` sets credentials, and `start-sunshine` creates a user LaunchAgent. For Windows hosts, `wmux-windows-setup install-sunshine` installs Sunshine with `winget`; `configure-sunshine` sets Sunshine credentials from `WMUX_SUNSHINE_USER` and `WMUX_SUNSHINE_PASSWORD`; `start-sunshine` starts it in the logged-in user session. The gateway can then automate pairing by calling `/api/wmux/setup/pair`, which generates the Moonlight Web PIN, waits briefly for Sunshine to register the pending pair request, and submits the matching Moonlight pair device name to Sunshine's `/api/pin`. When `WMUX_MOONLIGHT_WEB_USER` and `WMUX_MOONLIGHT_WEB_PASSWORD` are set on the gateway service, wmux stream links enter through the gateway autologin endpoint instead of prompting for Moonlight Web credentials.
 
 ## Experimental Windows Session Agent
 

@@ -44,7 +44,7 @@ export const api = {
       body: JSON.stringify(settings),
     }),
   createWorkspace: (machineId: string) =>
-    json<{ workspace: BootstrapPayload["workspaces"][number] }>("/api/workspaces", {
+    json<{ workspace: BootstrapPayload["workspaces"][number]; state: BootstrapPayload }>("/api/workspaces", {
       method: "POST",
       body: JSON.stringify({ machineId }),
     }),

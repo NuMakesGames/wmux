@@ -198,7 +198,7 @@ export const createHttpServer = (
         const body = (await readBody(request)) as { machineId?: string };
         const machineId = body.machineId ?? "local";
         const workspace = state.createWorkspace(machineId, cwdForActivePane(state, machines, machineId));
-        sendJson(response, 201, { workspace });
+        sendJson(response, 201, { workspace, state: await bootstrap() });
         return;
       }
 
