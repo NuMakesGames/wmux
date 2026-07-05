@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, GripVertical, Link2, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
 import { api, UnauthorizedError } from "./api";
+
+// The terminal engine (ghostty-web + kitty graphics) loads on demand so the
+// login screen and chrome paint without it.
+const LayoutView = lazy(() => import("./LayoutView").then((m) => ({ default: m.LayoutView })));
 import { createAppStore, useAppState } from "./app-store";
 import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
-import { LayoutView } from "./LayoutView";
 import { LoginView } from "./LoginView";
 import { MobileAgentSurface } from "./MobileAgentSurface";
 import { OpenTuiActivityPanel } from "./OpenTuiActivityPanel";
@@ -1278,6 +1281,7 @@ export function App() {
           />
         ) : activeTab ? (
           <div className="layout-cache">
+            <Suspense fallback={null}>
             {mountedTabViews.map((view) => {
               const isActive = view.key === activeTabKey;
               return (
@@ -1306,6 +1310,7 @@ export function App() {
                 </div>
               );
             })}
+            </Suspense>
           </div>
         ) : (
           <EmptyWorkspaceView />

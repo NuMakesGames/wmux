@@ -15,6 +15,15 @@ export default defineConfig({
   build: {
     outDir: "../../dist/client",
     emptyOutDir: true,
+    // The LayoutView chunk deliberately carries the whole ghostty-web
+    // terminal engine; it loads lazily, so its size doesn't gate first paint.
+    chunkSizeWarningLimit: 700,
+    rollupOptions: {
+      output: {
+        manualChunks: (id) =>
+          /node_modules\/(react|react-dom|scheduler|lucide-react)\//.test(id) ? "vendor" : undefined,
+      },
+    },
   },
   server: {
     host: "127.0.0.1",
