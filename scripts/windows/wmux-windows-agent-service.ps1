@@ -131,9 +131,28 @@ switch ($ActionName) {
     Write-Output "Logs: $LogDir"
   }
   'restart' {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    Stop-AgentProcesses
-    Start-ScheduledTask -TaskName $TaskName
+    # Run the stop/kill/start sequence in a detached process. When restart is
+    # invoked from inside an agent-owned pane, Stop-AgentProcesses kills this
+    # script's own console tree, and an inline Start-ScheduledTask would never
+    # run — leaving the agent down (task stopped, port dark).
+    $RestartScript = Join-Path $HelperDir 'wmux-windows-agent-restart.ps1'
+    $Sequence = @"
+Stop-ScheduledTask -TaskName '$($TaskName -replace "'", "''")' -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process |
+  Where-Object { `$_.ProcessId -ne `$PID -and `$_.CommandLine -and `$_.CommandLine -like '*wmux-windows-agent.py*' } |
+  ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 1
+Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
+"@
+    [System.IO.File]::WriteAllText($RestartScript, $Sequence, [System.Text.UTF8Encoding]::new($false))
+    $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
+      $PowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    }
+    Start-Process -FilePath $PowerShell -WindowStyle Hidden -ArgumentList @(
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $RestartScript
+    )
+    Write-Output "Restarting $TaskName (detached; survives this console)"
   }
   'stop' {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
