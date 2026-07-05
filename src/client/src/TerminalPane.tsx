@@ -136,10 +136,12 @@ export const TerminalPane = memo(function TerminalPane({
     let scrollDisposable: { dispose: () => void } | undefined;
     let renderDisposable: { dispose: () => void } | undefined;
     let mouseDownListener: ((event: MouseEvent) => void) | undefined;
+    let mouseUpListener: ((event: MouseEvent) => void) | undefined;
     let contextMenuListener: ((event: MouseEvent) => void) | undefined;
     let copyListener: ((event: ClipboardEvent) => void) | undefined;
     let pasteListener: ((event: ClipboardEvent) => void) | undefined;
     let contextMenuSelection = "";
+    let pendingCursorPlacement: { sequence: string; x: number; y: number } | null = null;
     let contextCopyBridge: HTMLTextAreaElement | undefined;
     let contextCopyBridgeTimer: number | undefined;
     let removeContextCopyBridgeDismissListeners: (() => void) | undefined;
@@ -564,15 +566,25 @@ export const TerminalPane = memo(function TerminalPane({
         }
         const sequence = shellCursorPlacementSequence(event, term, shellCursorPlacementRef.current);
         if (!sequence) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
+        // Don't intercept the press: swallowing mousedown here would make
+        // drag-selection impossible whenever the shell prompt is active.
+        // Remember the candidate placement and only send it on mouseup if the
+        // gesture turned out to be a plain click rather than a selection drag.
+        pendingCursorPlacement = { sequence, x: event.clientX, y: event.clientY };
+      };
+      term.element?.addEventListener("mousedown", mouseDownListener, { capture: true });
+      mouseUpListener = (event) => {
+        const pending = pendingCursorPlacement;
+        pendingCursorPlacement = null;
+        if (!pending || event.button !== 0) return;
+        const dragged = Math.hypot(event.clientX - pending.x, event.clientY - pending.y) > 4;
+        if (dragged || term.getSelection()) return;
         onActivateRef.current();
         term.focus();
         term.clearSelection();
-        sendInput(socketRef.current, sequence);
+        sendInput(socketRef.current, pending.sequence);
       };
-      term.element?.addEventListener("mousedown", mouseDownListener, { capture: true });
+      term.element?.addEventListener("mouseup", mouseUpListener, { capture: true });
       contextMenuListener = () => {
         const selection = term.getSelection() || contextMenuSelection;
         contextMenuSelection = "";
@@ -668,6 +680,7 @@ export const TerminalPane = memo(function TerminalPane({
       if (terminalOutputTimer !== undefined) window.clearTimeout(terminalOutputTimer);
       clearContextCopyBridge();
       if (mouseDownListener) terminalRef.current?.element?.removeEventListener("mousedown", mouseDownListener, { capture: true });
+      if (mouseUpListener) terminalRef.current?.element?.removeEventListener("mouseup", mouseUpListener, { capture: true });
       if (contextMenuListener) terminalRef.current?.element?.removeEventListener("contextmenu", contextMenuListener, { capture: true });
       if (copyListener) terminalRef.current?.element?.removeEventListener("copy", copyListener, { capture: true });
       if (pasteListener) terminalRef.current?.element?.removeEventListener("paste", pasteListener, { capture: true });

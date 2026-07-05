@@ -6,6 +6,19 @@ import sys
 import urllib.request
 
 
+def _wmux_url():
+    url = os.environ.get("WMUX_URL")
+    if url:
+        return url
+    # ~/.wmux/url is persisted alongside ~/.wmux/token by wmux.
+    try:
+        with open(os.path.expanduser("~/.wmux/url"), "r", encoding="utf-8") as handle:
+            url = handle.read().strip()
+    except OSError:
+        url = ""
+    return url or "http://127.0.0.1:3478"
+
+
 def _wmux_token():
     token = os.environ.get("WMUX_TOKEN")
     if token:
@@ -40,7 +53,7 @@ def read_input(path: str | None) -> str:
 
 
 parser = argparse.ArgumentParser(prog=command_name)
-parser.add_argument("--url", default=os.environ.get("WMUX_URL", "http://127.0.0.1:3478"))
+parser.add_argument("--url", default=_wmux_url())
 parser.add_argument("--pane", default=os.environ.get("WMUX_PANE_ID", ""))
 parser.add_argument("--workspace", default=os.environ.get("WMUX_WORKSPACE_ID", ""))
 parser.add_argument("--tab", default=os.environ.get("WMUX_TAB_ID", ""))

@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-wmux_url="${WMUX_URL:-http://127.0.0.1:3478}"
+wmux_url="${WMUX_URL:-}"
+if [[ -z "${wmux_url}" && -r "${HOME}/.wmux/url" ]]; then
+  # ~/.wmux/url is persisted alongside ~/.wmux/token by wmux.
+  wmux_url="$(tr -d '[:space:]' < "${HOME}/.wmux/url")"
+fi
+wmux_url="${wmux_url:-http://127.0.0.1:3478}"
 title="wmux"
 subtitle=""
 body=""

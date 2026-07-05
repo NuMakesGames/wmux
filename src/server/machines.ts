@@ -611,6 +611,17 @@ const durableShellScript = ({
     .filter(([, value]) => value)
     .map(([key, value]) => `export ${key}=${shellQuote(value)};`)
     .join(" ");
+  // Persist the wmux URL/token to ~/.wmux on the target at every (re)attach.
+  // Shells inside pre-existing durable sessions keep their original env, so
+  // helpers and agent hooks there rely on this file fallback to reach an
+  // authenticated server (same contract as ~/.wmux/token on the server host).
+  const credentialWrites = [
+    extraEnv.WMUX_TOKEN ? `printf '%s\\n' ${shellQuote(extraEnv.WMUX_TOKEN)} > "$HOME/.wmux/token" 2>/dev/null || true;` : "",
+    extraEnv.WMUX_URL ? `printf '%s\\n' ${shellQuote(extraEnv.WMUX_URL)} > "$HOME/.wmux/url" 2>/dev/null || true;` : "",
+  ].filter(Boolean);
+  const persistCredentials = credentialWrites.length > 0
+    ? `( umask 077; mkdir -p "$HOME/.wmux" 2>/dev/null || true; ${credentialWrites.join(" ")} );`
+    : "";
   const pathExport = helperPathExport ?? "";
   const startDir = cwd ? `cd ${shellQuote(cwd)} 2>/dev/null || true;` : "";
   const paneCommand = `${startDir} ${exports} ${pathExport} ${shellCommand}`;
@@ -654,12 +665,12 @@ const durableShellScript = ({
   const fallbackShell = `${startDir} ${exports} ${pathExport} echo '[wmux] tmux/screen not found; session will not survive wmux restart.' >&2; ${shellCommand}`;
 
   if (backend === "tmux") {
-    return `if command -v tmux >/dev/null 2>&1; then ${tmuxCommand}; fi; echo '[wmux] tmux is required for this machine sessionBackend.' >&2; ${fallbackShell}`;
+    return `${persistCredentials} if command -v tmux >/dev/null 2>&1; then ${tmuxCommand}; fi; echo '[wmux] tmux is required for this machine sessionBackend.' >&2; ${fallbackShell}`;
   }
   if (backend === "screen") {
-    return `if command -v screen >/dev/null 2>&1; then ${screenAttach} || exec ${screenCreate}; exit $?; fi; echo '[wmux] screen is required for this machine sessionBackend.' >&2; ${fallbackShell}`;
+    return `${persistCredentials} if command -v screen >/dev/null 2>&1; then ${screenAttach} || exec ${screenCreate}; exit $?; fi; echo '[wmux] screen is required for this machine sessionBackend.' >&2; ${fallbackShell}`;
   }
-  return `if command -v tmux >/dev/null 2>&1; then ${tmuxCommand}; fi; if command -v screen >/dev/null 2>&1; then ${screenAttach} || exec ${screenCreate}; exit $?; fi; ${fallbackShell}`;
+  return `${persistCredentials} if command -v tmux >/dev/null 2>&1; then ${tmuxCommand}; fi; if command -v screen >/dev/null 2>&1; then ${screenAttach} || exec ${screenCreate}; exit $?; fi; ${fallbackShell}`;
 };
 
 const localScopeScript = (sessionName: string, innerScript: string): string => {

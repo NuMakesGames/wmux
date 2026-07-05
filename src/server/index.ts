@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { loadAuthConfig } from "./auth.js";
 import { isAllowedBindHost } from "./bind.js";
 import { loadConfig } from "./config.js";
@@ -28,6 +31,18 @@ const main = async (): Promise<void> => {
   const settings = new SettingsStore();
   const sessionManager = new SessionManager(state, config.machines, auth.token);
   const server = await createHttpServer(host, state, config.machines, sessionManager, settings, { dev, auth });
+  // Persist the reachable URL next to ~/.wmux/token: helpers and agent hooks
+  // running without WMUX_URL in their env (existing durable panes) read this
+  // instead of assuming localhost, which is wrong on non-loopback binds.
+  try {
+    const wmuxDir = path.join(os.homedir(), ".wmux");
+    fs.mkdirSync(wmuxDir, { recursive: true });
+    const publicUrl = process.env.WMUX_PUBLIC_URL ?? `http://${host}:${port}`;
+    fs.writeFileSync(path.join(wmuxDir, "url"), `${publicUrl}\n`, { mode: 0o600 });
+  } catch {
+    // Best-effort; helpers fall back to their localhost default.
+  }
+
   server.listen(port, host, () => {
     console.log(`wmux listening on http://${host}:${port}${dev ? " (dev)" : ""}`);
     if (auth.enabled) {

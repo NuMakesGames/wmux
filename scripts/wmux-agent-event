@@ -7,18 +7,32 @@ import sys
 import urllib.request
 
 
-def _wmux_token():
-    token = os.environ.get("WMUX_TOKEN")
-    if token:
-        return token
-    # Fall back to the server's local token file so hooks in existing/durable
-    # local panes authenticate even when WMUX_TOKEN was never in their env.
-    path = os.environ.get("WMUX_TOKEN_PATH") or os.path.expanduser("~/.wmux/token")
+def _wmux_file(path):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             return handle.read().strip()
     except OSError:
         return ""
+
+
+def _wmux_token():
+    token = os.environ.get("WMUX_TOKEN")
+    if token:
+        return token
+    # Fall back to ~/.wmux/token so hooks in existing/durable panes
+    # authenticate even when WMUX_TOKEN was never in their env. wmux writes
+    # the file on the server host at startup and on every remote (re)attach.
+    return _wmux_file(os.environ.get("WMUX_TOKEN_PATH") or os.path.expanduser("~/.wmux/token"))
+
+
+def _wmux_url():
+    # Env, else the ~/.wmux/url file wmux persists alongside the token, else
+    # the historical localhost default.
+    return (
+        os.environ.get("WMUX_URL")
+        or _wmux_file(os.path.expanduser("~/.wmux/url"))
+        or "http://127.0.0.1:3478"
+    )
 
 
 def _wmux_auth_headers():
@@ -149,7 +163,7 @@ def post_json(url, payload):
 
 def main():
     parser = argparse.ArgumentParser(prog="wmux-agent-event")
-    parser.add_argument("--url", default=os.environ.get("WMUX_URL", "http://127.0.0.1:3478"))
+    parser.add_argument("--url", default=_wmux_url())
     parser.add_argument("--agent", default=os.environ.get("WMUX_AGENT_NAME", "agent"))
     parser.add_argument("--status", default="completed")
     parser.add_argument("--title", default="")
@@ -201,7 +215,13 @@ def main():
     if not args.force and not any(key in payload for key in ("paneId", "workspaceId")):
         return 0
 
-    post_json(args.url, payload)
+    # Event delivery is telemetry; a down/unauthenticated server must never
+    # fail the agent hook that invoked us (Claude/Codex surface non-zero hook
+    # exits as errors and may block the prompt).
+    try:
+        post_json(args.url, payload)
+    except Exception as error:  # noqa: BLE001
+        print(f"wmux-agent-event: delivery failed: {error}", file=sys.stderr)
     return 0
 
 
