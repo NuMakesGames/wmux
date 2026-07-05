@@ -1,4 +1,12 @@
+import { authHeaders } from "./token";
 import type { BootstrapPayload, DurableSessionAudit, SplitDirection, WmuxSettings } from "./types";
+
+export class UnauthorizedError extends Error {
+  constructor() {
+    super("unauthorized");
+    this.name = "UnauthorizedError";
+  }
+}
 
 export interface PaneAttachment {
   id: string;
@@ -15,15 +23,33 @@ const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
     ...init,
     headers: {
       "content-type": "application/json",
+      ...authHeaders(),
       ...(init?.headers ?? {}),
     },
   });
+  if (response.status === 401) throw new UnauthorizedError();
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<T>;
 };
 
+export interface AuthInfo {
+  authEnabled: boolean;
+  loginEnabled: boolean;
+}
+
 export const api = {
   bootstrap: () => json<BootstrapPayload>("/api/bootstrap"),
+  authInfo: () => json<AuthInfo>("/api/auth-info"),
+  login: async (username: string, password: string): Promise<{ token: string; expiresInMs: number }> => {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (response.status === 401) throw new Error("Invalid username or password");
+    if (!response.ok) throw new Error(await response.text());
+    return response.json() as Promise<{ token: string; expiresInMs: number }>;
+  },
   streams: () => json<{ streams: BootstrapPayload["streams"] }>("/api/streams"),
   requestStream: (machineId: string, requestId: string, ttlMs: number) =>
     json<{ streams: BootstrapPayload["streams"] }>(`/api/streams/${encodeURIComponent(machineId)}/request`, {

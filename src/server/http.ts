@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import { WebSocketServer } from "ws";
+import { type AuthConfig, isAuthorized, issueSessionToken, verifyCredentials } from "./auth.js";
 import { isAllowedOrigin, isAllowedRequestHost } from "./bind.js";
 import { readDurableSessionCwd, resolveMachineStatuses } from "./machines.js";
 import { auditDurableSessions, cleanupDurableSession } from "./session-audit.js";
@@ -15,11 +16,38 @@ import type { StateStore } from "./state.js";
 import type { SessionManager } from "./session-manager.js";
 import type { SettingsStore } from "./settings.js";
 
-const readBody = async (request: http.IncomingMessage): Promise<unknown> => {
+class HttpError extends Error {
+  constructor(readonly status: number, readonly code: string) {
+    super(code);
+  }
+}
+
+// Default cap for JSON control endpoints; upload endpoints pass a larger cap.
+const MAX_JSON_BODY = 1024 * 1024;
+const MAX_UPLOAD_BODY = 12 * 1024 * 1024;
+
+// Lifetime of a login-issued session token. Long enough to be convenient on a
+// trusted network; a restart with a rotated secret invalidates all sessions.
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+const readBody = async (request: http.IncomingMessage, maxBytes = MAX_JSON_BODY): Promise<unknown> => {
   const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      request.destroy();
+      throw new HttpError(413, "payload_too_large");
+    }
+    chunks.push(Buffer.from(chunk));
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new HttpError(400, "invalid_json");
+  }
 };
 
 const sendJson = (response: http.ServerResponse, status: number, payload: unknown): void => {
@@ -38,8 +66,9 @@ export const createHttpServer = (
   machines: MachineConfig[],
   sessions: SessionManager,
   settings: SettingsStore,
-  options: { dev?: boolean } = {},
+  options: { dev?: boolean; auth: AuthConfig },
 ): Promise<http.Server> => {
+  const { auth } = options;
   const root = clientRoot();
   const streamRequests = new StreamRequestStore();
   let vite: ViteDevServer | undefined;
@@ -67,9 +96,45 @@ export const createHttpServer = (
     }
 
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? bindHost}`);
+
+    // Token gate: everything under /api requires a valid token, except the
+    // unauthenticated bootstrap endpoints (liveness, auth capability probe, and
+    // login itself). The static app shell is served unauthenticated so the
+    // browser can load and then present its stored token.
+    const unauthenticatedApi = new Set(["/api/health", "/api/auth-info", "/api/login"]);
+    if (url.pathname.startsWith("/api/") && !unauthenticatedApi.has(url.pathname) && !isAuthorized(auth, request, url)) {
+      sendJson(response, 401, { error: "unauthorized" });
+      return;
+    }
+
     try {
       if (url.pathname === "/api/health" && request.method === "GET") {
         sendJson(response, 200, { ok: true });
+        return;
+      }
+
+      if (url.pathname === "/api/auth-info" && request.method === "GET") {
+        // Lets the browser decide whether to show a login form vs. a token hint.
+        sendJson(response, 200, { authEnabled: auth.enabled, loginEnabled: auth.loginEnabled });
+        return;
+      }
+
+      if (url.pathname === "/api/login" && request.method === "POST") {
+        if (!auth.enabled || !auth.loginEnabled) {
+          sendJson(response, 404, { error: "login_disabled" });
+          return;
+        }
+        const body = (await readBody(request)) as { username?: unknown; password?: unknown };
+        if (typeof body.username !== "string" || typeof body.password !== "string") {
+          sendJson(response, 400, { error: "invalid_credentials_format" });
+          return;
+        }
+        if (!verifyCredentials(auth, body.username, body.password)) {
+          sendJson(response, 401, { error: "invalid_credentials" });
+          return;
+        }
+        const token = issueSessionToken(auth.sessionSecret, SESSION_TTL_MS, Date.now());
+        sendJson(response, 200, { token, expiresInMs: SESSION_TTL_MS });
         return;
       }
 
@@ -280,7 +345,7 @@ export const createHttpServer = (
       }
 
       if (url.pathname === "/api/media" && request.method === "POST") {
-        const body = (await readBody(request)) as {
+        const body = (await readBody(request, MAX_UPLOAD_BODY)) as {
           workspaceId?: string;
           tabId?: string;
           paneId?: string;
@@ -290,6 +355,10 @@ export const createHttpServer = (
         };
         if (!body.data) {
           sendJson(response, 400, { error: "missing_media_data" });
+          return;
+        }
+        if (!isBase64Data(body.data.replace(/\s+/g, ""))) {
+          sendJson(response, 400, { error: "invalid_media_data" });
           return;
         }
         const media = state.createMedia({
@@ -332,7 +401,7 @@ export const createHttpServer = (
           sendJson(response, 404, { error: "pane_not_found" });
           return;
         }
-        const body = (await readBody(request)) as { name?: unknown; mimeType?: unknown; data?: unknown };
+        const body = (await readBody(request, MAX_UPLOAD_BODY)) as { name?: unknown; mimeType?: unknown; data?: unknown };
         if (typeof body.data !== "string" || !body.data.trim()) {
           sendJson(response, 400, { error: "missing_attachment_data" });
           return;
@@ -552,7 +621,11 @@ export const createHttpServer = (
         const filePath =
           url.pathname === "/" ? path.join(root, "index.html") : path.join(root, url.pathname);
         const normalized = path.normalize(filePath);
-        if (normalized.startsWith(root) && fs.existsSync(normalized) && fs.statSync(normalized).isFile()) {
+        if (
+          (normalized === root || normalized.startsWith(`${root}${path.sep}`)) &&
+          fs.existsSync(normalized) &&
+          fs.statSync(normalized).isFile()
+        ) {
           response.writeHead(200, staticHeaders(normalized));
           fs.createReadStream(normalized).pipe(response);
           return;
@@ -567,7 +640,14 @@ export const createHttpServer = (
 
       sendJson(response, 404, { error: "not_found" });
     } catch (error) {
-      sendJson(response, 500, { error: error instanceof Error ? error.message : "server_error" });
+      if (error instanceof HttpError) {
+        sendJson(response, error.status, { error: error.code });
+        return;
+      }
+      // Log full detail server-side but never leak internal messages/paths to
+      // the client.
+      console.error("wmux: request handler error:", error);
+      sendJson(response, 500, { error: "server_error" });
     }
   });
 
@@ -588,6 +668,32 @@ export const createHttpServer = (
   };
 
   const wss = new WebSocketServer({ noServer: true });
+
+  // Heartbeat: half-open connections (mobile/VPN drops without a close frame)
+  // never fire "close", so their PTY output buffers and resize-owner state
+  // would leak. Ping every interval and terminate any socket that missed the
+  // previous pong; terminate() fires "close" so the normal cleanup path runs.
+  const aliveSockets = new WeakSet<import("ws").WebSocket>();
+  const markAlive = (ws: import("ws").WebSocket): void => {
+    aliveSockets.add(ws);
+    ws.on("pong", () => aliveSockets.add(ws));
+    ws.on("error", () => {
+      /* surfaced via "close"; handler prevents an unhandled-error crash */
+    });
+  };
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!aliveSockets.has(ws)) {
+        ws.terminate();
+        continue;
+      }
+      aliveSockets.delete(ws);
+      ws.ping();
+    }
+  }, 30_000);
+  heartbeat.unref();
+  server.on("close", () => clearInterval(heartbeat));
+
   server.on("upgrade", (request, socket, head) => {
     if (
       !isAllowedRequestHost(request.headers.host, bindHost) ||
@@ -599,8 +705,16 @@ export const createHttpServer = (
     }
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? bindHost}`);
     if (options.dev && url.pathname === "/ws/vite-hmr") return;
+    // WebSockets can't set an Authorization header from the browser, so the
+    // token rides on the query string; enforce it before any handshake.
+    if (!isAuthorized(auth, request, url)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     if (url.pathname === "/ws/events") {
       wss.handleUpgrade(request, socket, head, (ws) => {
+        markAlive(ws);
         const onChange = () => {
           if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "state" }));
         };
@@ -644,6 +758,7 @@ export const createHttpServer = (
     const outputMatch = url.pathname.match(/^\/ws\/panes\/([^/]+)\/output$/);
     if (outputMatch) {
       wss.handleUpgrade(request, socket, head, (ws) => {
+        markAlive(ws);
         sessions.watchOutput(
           outputMatch[1],
           ws,
@@ -660,6 +775,7 @@ export const createHttpServer = (
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {
+      markAlive(ws);
       sessions.attach(
         match[1],
         ws,

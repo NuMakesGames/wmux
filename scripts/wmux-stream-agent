@@ -299,8 +299,13 @@ def request_status_url(args: argparse.Namespace, machine_id: str) -> str:
     return args.wmux_url.rstrip("/") + f"/api/streams/{quote(machine_id, safe='')}/request"
 
 
+def wmux_headers() -> dict:
+    token = os.environ.get("WMUX_TOKEN")
+    return {"authorization": "Bearer " + token} if token else {}
+
+
 def stream_requested(args: argparse.Namespace, machine_id: str) -> bool:
-    request = urllib.request.Request(request_status_url(args, machine_id), method="GET")
+    request = urllib.request.Request(request_status_url(args, machine_id), method="GET", headers=wmux_headers())
     try:
         with urllib.request.urlopen(request, timeout=max(2, min(10, args.poll_interval + 2))) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -426,6 +431,12 @@ def main() -> int:
     )
     pre_args, _ = pre_parser.parse_known_args()
     config = load_config(pre_args.config)
+    # The wmux lease endpoint is token-gated when auth is enabled; allow the
+    # token to arrive via env or the staged config file.
+    if not os.environ.get("WMUX_TOKEN"):
+        config_token = config_string(config, "token")
+        if config_token:
+            os.environ["WMUX_TOKEN"] = config_token
     system = platform.system().lower()
     default_input_pixel_format = ""
 

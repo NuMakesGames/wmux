@@ -3,6 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import type { MachineConfig, PaneState } from "./types.js";
 import { appendBoundedReplay } from "./replay-buffer.js";
+import { captureOsc7 } from "./osc7.js";
 
 interface AgentEvents {
   output: [string];
@@ -42,7 +43,6 @@ export interface WindowsAgentHealth {
 }
 
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
-const MAX_CWD_CAPTURE_BYTES = 8192;
 
 export const windowsAgentUrl = (machine: MachineConfig): string | undefined => {
   if (machine.agentUrl) return machine.agentUrl.replace(/\/+$/, "");
@@ -53,6 +53,9 @@ export const windowsAgentUrl = (machine: MachineConfig): string | undefined => {
 export const shouldUseWindowsAgent = (machine: MachineConfig): boolean =>
   machine.kind === "powershell-ssh" && machine.sessionBackend === "agent";
 
+const authHeaders = (machine: MachineConfig): Record<string, string> =>
+  machine.agentToken ? { authorization: `Bearer ${machine.agentToken}` } : {};
+
 export const probeWindowsAgent = async (
   machine: MachineConfig,
   timeoutMs = 1500,
@@ -60,7 +63,7 @@ export const probeWindowsAgent = async (
   const url = windowsAgentUrl(machine);
   if (!url) return { reachable: false, reason: "missing Windows agent URL" };
   try {
-    const health = await requestJson<WindowsAgentHealth>("GET", `${url}/health`, undefined, timeoutMs);
+    const health = await requestJson<WindowsAgentHealth>("GET", `${url}/health`, undefined, timeoutMs, authHeaders(machine));
     return { reachable: health.ok === true, health, url, reason: health.ok === true ? undefined : "agent health check failed" };
   } catch (error) {
     return { reachable: false, url, reason: error instanceof Error ? error.message : "agent health check failed" };
@@ -77,6 +80,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private cwd = "";
   private cwdCaptureBuffer = "";
   private stopped = false;
+  private paused = false;
 
   constructor(
     readonly pane: PaneState,
@@ -120,6 +124,16 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     void this.delete(`/sessions/${encodeURIComponent(this.pane.id)}`);
   }
 
+  pause(): void {
+    // Output is buffered agent-side and replayed from the cursor, so halting the
+    // poll loop is a safe backpressure valve — no data is dropped.
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
+  }
+
   private async start(): Promise<void> {
     try {
       const response = await this.post<AgentSessionResponse>(`/sessions/${encodeURIComponent(this.pane.id)}`, {
@@ -150,6 +164,10 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
 
   private async poll(): Promise<void> {
     while (!this.stopped && !this.exited) {
+      if (this.paused) {
+        await delay(50);
+        continue;
+      }
       try {
         const response = await this.get<AgentOutputResponse>(
           `/sessions/${encodeURIComponent(this.pane.id)}/output?cursor=${this.cursor}&timeoutMs=15000`,
@@ -181,19 +199,19 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private async get<T>(path: string, timeoutMs = 5000): Promise<T> {
     const url = windowsAgentUrl(this.machine);
     if (!url) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
-    return requestJson<T>("GET", `${url}${path}`, undefined, timeoutMs);
+    return requestJson<T>("GET", `${url}${path}`, undefined, timeoutMs, authHeaders(this.machine));
   }
 
   private async post<T = unknown>(path: string, body: unknown): Promise<T> {
     const url = windowsAgentUrl(this.machine);
     if (!url) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
-    return requestJson<T>("POST", `${url}${path}`, body, 5000);
+    return requestJson<T>("POST", `${url}${path}`, body, 5000, authHeaders(this.machine));
   }
 
   private async delete<T = unknown>(path: string): Promise<T> {
     const url = windowsAgentUrl(this.machine);
     if (!url) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
-    return requestJson<T>("DELETE", `${url}${path}`, undefined, 5000);
+    return requestJson<T>("DELETE", `${url}${path}`, undefined, 5000, authHeaders(this.machine));
   }
 
   private appendAndEmit(data: string): void {
@@ -207,28 +225,23 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   }
 
   private captureCwd(data: string): void {
-    const combined = this.cwdCaptureBuffer + data;
-    const pendingStart = combined.lastIndexOf("\x1b]7;");
-    let searchable = combined;
-    this.cwdCaptureBuffer = "";
-    if (pendingStart !== -1) {
-      const pending = combined.slice(pendingStart);
-      if (!pending.includes("\x07") && !pending.includes("\x1b\\")) {
-        searchable = combined.slice(0, pendingStart);
-        this.cwdCaptureBuffer = pending.slice(-MAX_CWD_CAPTURE_BYTES);
-      }
-    }
-
-    for (const match of searchable.matchAll(/\x1b]7;file:\/\/([^\x07\x1b]*)(?:\x07|\x1b\\)/g)) {
-      const cwd = cwdFromFileUri(match[1]);
-      if (!cwd || cwd === this.cwd) continue;
+    const { cwds, pending } = captureOsc7(this.cwdCaptureBuffer, data);
+    this.cwdCaptureBuffer = pending;
+    for (const cwd of cwds) {
+      if (cwd === this.cwd) continue;
       this.cwd = cwd;
       this.emit("cwd", cwd);
     }
   }
 }
 
-const requestJson = <T>(method: string, rawUrl: string, body: unknown, timeoutMs: number): Promise<T> =>
+const requestJson = <T>(
+  method: string,
+  rawUrl: string,
+  body: unknown,
+  timeoutMs: number,
+  extraHeaders: Record<string, string> = {},
+): Promise<T> =>
   new Promise((resolve, reject) => {
     const url = new URL(rawUrl);
     const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
@@ -238,12 +251,15 @@ const requestJson = <T>(method: string, rawUrl: string, body: unknown, timeoutMs
       {
         method,
         timeout: timeoutMs,
-        headers: data
-          ? {
-              "content-type": "application/json",
-              "content-length": String(data.byteLength),
-            }
-          : undefined,
+        headers: {
+          ...extraHeaders,
+          ...(data
+            ? {
+                "content-type": "application/json",
+                "content-length": String(data.byteLength),
+              }
+            : {}),
+        },
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -269,24 +285,6 @@ const requestJson = <T>(method: string, rawUrl: string, body: unknown, timeoutMs
     if (data) request.write(data);
     request.end();
   });
-
-const cwdFromFileUri = (value: string): string | undefined => {
-  const slash = value.indexOf("/");
-  if (slash === -1) return undefined;
-  const pathPart = value.slice(slash);
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(pathPart);
-  } catch {
-    decoded = pathPart;
-  }
-  if (/^\/[A-Za-z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
-  if (decoded.length > 4096) return undefined;
-  if (/[\x00-\x1f\x7f]/.test(decoded)) return undefined;
-  if (/^[A-Za-z]:[\\/]/.test(decoded)) return decoded;
-  if (!decoded.startsWith("/")) return undefined;
-  return decoded;
-};
 
 const formatError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

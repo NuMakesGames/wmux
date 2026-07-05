@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -22,6 +23,11 @@ const port = intOption(options.port || process.env.WMUX_MOONLIGHT_GATEWAY_PORT, 
 const upstreamUrl = normalizeBaseUrl(String(options.upstream || process.env.WMUX_MOONLIGHT_WEB_URL || DEFAULT_UPSTREAM));
 const upstream = new URL(upstreamUrl);
 const managedBin = options.bin || process.env.WMUX_MOONLIGHT_WEB_BIN || "";
+// When set, every gateway request (except health) must present this token via
+// an Authorization: Bearer header or a ?token= query param. This closes the
+// otherwise-unauthenticated proxy that hands out an authenticated Moonlight
+// session. Left empty for backward compatibility with unconfigured setups.
+const gatewayToken = String(options.token || process.env.WMUX_MOONLIGHT_GATEWAY_TOKEN || "").trim();
 const managedArgs = [
   ...envArgs(process.env.WMUX_MOONLIGHT_WEB_ARGS),
   ...arrayOption(options["bin-arg"]),
@@ -68,10 +74,30 @@ server.listen(port, host, () => {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
+function gatewayAuthorized(request, url) {
+  if (!gatewayToken) return true;
+  const header = String(request.headers.authorization || "");
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  const presented = (match ? match[1] : url.searchParams.get("token") || "").trim();
+  if (!presented || presented.length !== gatewayToken.length) return false;
+  return timingSafeEqualStr(presented, gatewayToken);
+}
+
+function timingSafeEqualStr(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 async function handleRequest(request, response) {
   const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
   if (url.pathname === "/api/wmux/health" && request.method === "GET") {
     sendJson(response, 200, await healthPayload());
+    return;
+  }
+  if (!gatewayAuthorized(request, url)) {
+    sendJson(response, 401, { error: "unauthorized" });
     return;
   }
   if (url.pathname === "/api/wmux/sessions" && request.method === "GET") {
@@ -573,6 +599,12 @@ function proxyHttp(request, response) {
 async function handleUpgrade(request, socket, head) {
   if (request.url && request.url.startsWith("/api/wmux/")) {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  const upgradeUrl = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
+  if (!gatewayAuthorized(request, upgradeUrl)) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
     return;
   }

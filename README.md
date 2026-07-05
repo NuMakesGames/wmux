@@ -81,6 +81,30 @@ Legacy `kind: "powershell"` still uses `Enter-PSSession -ComputerName`, which us
 
 For the full Windows registration checklist, see [docs/WINDOWS_NODE_REGISTRATION.md](docs/WINDOWS_NODE_REGISTRATION.md).
 
+## Authentication
+
+wmux gates every API and WebSocket endpoint behind a bearer token, on top of the bind-address and Host/Origin checks. There are two ways to get a token, and both are accepted on every request:
+
+**Browser login (people).** On first start wmux seeds default credentials `wmux` / `wmux` in `~/.wmux/auth.json` and logs a warning to change them. The browser shows a login form; signing in mints a stateless, signed session token (30-day expiry) that the client stores in `localStorage`. Change the credentials with:
+
+```bash
+scripts/wmux-set-password --username you   # prompts for a new password
+```
+
+Session tokens are HMAC-signed with a secret persisted to `~/.wmux/session-secret`, so they survive restarts. Deleting that file rotates the secret and logs everyone out.
+
+**Shared token (machines).** On first start wmux also generates a static token at `~/.wmux/token` (mode `0600`) and logs a URL:
+
+```
+wmux: access requires a token. Open http://100.x.y.z:3478/?token=XXXX once per browser.
+```
+
+Opening that URL stores the token directly (skipping the login form) — handy for kiosk/bookmark use. More importantly, this static token is what non-interactive clients use: every pane receives it as `WMUX_TOKEN`, so the bundled helpers authenticate automatically, and remote scripts/`curl` send `authorization: Bearer $WMUX_TOKEN`. Set your own with `WMUX_TOKEN=…` (or `WMUX_TOKEN_PATH`).
+
+To run without any token — relying solely on the network boundary, as earlier versions did — set `WMUX_DISABLE_AUTH=1`.
+
+The optional Windows session agent and Moonlight gateway run as separate services and enforce their own tokens when configured: set a machine's `agentToken` in `wmux.config.json` for the Windows agent, and `WMUX_MOONLIGHT_GATEWAY_TOKEN` (mirrored by the machine's `stream.gatewayToken`) for the gateway. When enabling auth, provide `WMUX_TOKEN` to any `wmux-stream-agent` service so it can read the stream lease.
+
 ## Settings
 
 The settings modal writes to `~/.wmux/settings.json` on the wmux server. Current settings cover terminal font size, browser scrollback rows, and host display aliases, so aliases follow you across browsers without changing the underlying machine IDs used for connections.
@@ -109,9 +133,12 @@ The same endpoint works from remote machines on the Tailnet:
 ```bash
 curl -fsS \
   -H 'content-type: application/json' \
+  -H "authorization: Bearer $WMUX_TOKEN" \
   -d "{\"paneId\":\"$WMUX_PANE_ID\",\"title\":\"Codex\",\"subtitle\":\"Completed\",\"body\":\"Run finished\"}" \
   "$WMUX_URL/api/notifications"
 ```
+
+`WMUX_TOKEN` is present in every pane's environment, so the bundled helpers (`wmux-notify`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`) send it automatically. See [Authentication](#authentication) below.
 
 Unread notifications light the workspace, tab, and pane. The browser notification button in the top bar requests browser notification permission.
 

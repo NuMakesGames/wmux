@@ -1,0 +1,82 @@
+import { useEffect, useState } from "react";
+import { api } from "./api";
+import { setToken } from "./token";
+
+interface LoginViewProps {
+  onAuthenticated: () => void;
+}
+
+/**
+ * Shown when the app is unauthenticated. If credential login is configured it
+ * offers a username/password form (minting a session token); otherwise it
+ * explains the token-URL path used by machine clients.
+ */
+export const LoginView = ({ onAuthenticated }: LoginViewProps) => {
+  const [loginEnabled, setLoginEnabled] = useState<boolean | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .authInfo()
+      .then((info) => setLoginEnabled(info.loginEnabled))
+      .catch(() => setLoginEnabled(false));
+  }, []);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { token } = await api.login(username, password);
+      setToken(token);
+      onAuthenticated();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Login failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="wmux-login">
+      <form className="wmux-login-card" onSubmit={submit}>
+        <h1 className="wmux-login-title">wmux</h1>
+        {loginEnabled === false ? (
+          <p className="wmux-login-hint">
+            This server requires an access token. Open the URL the server printed on startup, including
+            <code> ?token=…</code>.
+          </p>
+        ) : (
+          <>
+            <label className="wmux-login-field">
+              <span>Username</span>
+              <input
+                autoFocus
+                autoComplete="username"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+              />
+            </label>
+            <label className="wmux-login-field">
+              <span>Password</span>
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </label>
+            {error ? <p className="wmux-login-error">{error}</p> : null}
+            <button type="submit" className="wmux-login-submit" disabled={busy}>
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </>
+        )}
+      </form>
+    </div>
+  );
+};

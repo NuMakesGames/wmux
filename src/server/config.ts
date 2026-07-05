@@ -9,6 +9,7 @@ const streamSchema = z.object({
   provider: z.enum(["mediamtx", "moonlight-gateway"]).optional(),
   gatewayUrl: z.string().url().optional(),
   gatewayOpenUrl: z.string().url().optional(),
+  gatewayToken: z.string().optional(),
 });
 
 const machineSchema = z.object({

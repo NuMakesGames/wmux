@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import { Activity, Bell, Bot, CheckCircle2, Command as CommandIcon, Image as ImageIcon, MessageSquare, Play, Send, Square, TerminalSquare, X, Zap } from "lucide-react";
 import type { PaneAttachment } from "./api";
+import { withTokenParam } from "./token";
 import type {
   AgentActivity,
   BootstrapPayload,
@@ -774,7 +775,7 @@ const threadItemScrollKey = (item: MobileThreadItem): string => {
 
 const paneOutputSocketUrl = (paneId: string): string => {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws/panes/${encodeURIComponent(paneId)}/output`;
+  return withTokenParam(`${protocol}//${window.location.host}/ws/panes/${encodeURIComponent(paneId)}/output`);
 };
 
 const parsePaneSocketMessage = (raw: unknown): { type?: string; paneId?: string; data?: string } | null => {

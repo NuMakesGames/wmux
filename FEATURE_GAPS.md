@@ -18,9 +18,9 @@
 
    Machines are loaded from `wmux.config.json` or `~/.wmux/config.json`. There is no in-app editor yet.
 
-5. Authentication relies on network boundary.
+5. Authentication is token/single-login, not multi-user.
 
-   The service refuses public bind hosts and checks Host/Origin headers, but there is no user login or token gate. This matches the Tailscale/internal-network assumption and should be revisited before any broader exposure.
+   The service refuses public bind hosts, checks Host/Origin headers, and gates every API/WebSocket endpoint. Two token sources are accepted: a shared bearer token (auto-generated to `~/.wmux/token`, overridable via `WMUX_TOKEN`, used by helpers/curl/agents) and a browser username/password login that mints stateless HMAC-signed session tokens (credentials in `~/.wmux/auth.json`, default `wmux`/`wmux`, secret in `~/.wmux/session-secret`). Disable everything with `WMUX_DISABLE_AUTH=1`. The optional Windows agent and Moonlight gateway enforce their own tokens when configured. Still missing: multiple user accounts, per-session revocation (rotating the secret logs everyone out), and TLS termination inside wmux.
 
 6. Terminal replay is bounded.
 

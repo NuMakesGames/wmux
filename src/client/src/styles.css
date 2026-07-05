@@ -2839,3 +2839,159 @@ button.active-tool {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.wmux-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.wmux-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--ivory);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  line-height: 1.4;
+  animation: wmux-toast-in 140ms ease-out;
+}
+
+.wmux-toast-error {
+  border-color: var(--red);
+  border-left-width: 3px;
+}
+
+.wmux-toast-info {
+  border-color: var(--line-bright);
+  border-left-width: 3px;
+}
+
+.wmux-toast-message {
+  flex: 1;
+  word-break: break-word;
+}
+
+.wmux-toast-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  margin-top: 1px;
+}
+
+.wmux-toast-dismiss:hover {
+  color: var(--ivory);
+}
+
+@keyframes wmux-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.wmux-login {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+  background: var(--black);
+}
+
+.wmux-login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(360px, 100%);
+  padding: 28px 26px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+}
+
+.wmux-login-title {
+  margin: 0 0 4px;
+  font-size: 22px;
+  letter-spacing: 0.08em;
+  color: var(--gold);
+  text-transform: lowercase;
+}
+
+.wmux-login-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wmux-login-hint code {
+  color: var(--ivory);
+  font-family: var(--wmux-mono-font);
+}
+
+.wmux-login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.wmux-login-field input {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ivory);
+  font-size: 14px;
+}
+
+.wmux-login-field input:focus {
+  outline: none;
+  border-color: var(--line-bright);
+}
+
+.wmux-login-error {
+  margin: 0;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.wmux-login-submit {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-bright);
+  border-radius: 7px;
+  background: var(--gold);
+  color: var(--black);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wmux-login-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

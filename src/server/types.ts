@@ -6,6 +6,7 @@ export interface MachineStreamConfig {
   provider?: StreamProvider;
   gatewayUrl?: string;
   gatewayOpenUrl?: string;
+  gatewayToken?: string;
 }
 
 export interface MachineConfig {

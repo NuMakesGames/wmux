@@ -5,6 +5,7 @@ import { spawn, type IPty } from "node-pty";
 import type { MachineConfig, PaneState } from "./types.js";
 import { buildSpawnSpec } from "./machines.js";
 import { appendBoundedReplay } from "./replay-buffer.js";
+import { captureOsc7 } from "./osc7.js";
 
 interface PtyEvents {
   output: [string];
@@ -14,7 +15,6 @@ interface PtyEvents {
 }
 
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
-const MAX_CWD_CAPTURE_BYTES = 8192;
 
 export class PtySession extends EventEmitter<PtyEvents> {
   private pty: IPty;
@@ -96,26 +96,33 @@ export class PtySession extends EventEmitter<PtyEvents> {
     }
   }
 
+  pause(): void {
+    if (this.exited) return;
+    try {
+      this.pty.pause();
+    } catch {
+      /* PTY already exited */
+    }
+  }
+
+  resume(): void {
+    if (this.exited) return;
+    try {
+      this.pty.resume();
+    } catch {
+      /* PTY already exited */
+    }
+  }
+
   private appendReplay(data: string): void {
     this.replayBytes = appendBoundedReplay(this.replay, this.replayBytes, data, MAX_REPLAY_BYTES);
   }
 
   private captureCwd(data: string): void {
-    const combined = this.cwdCaptureBuffer + data;
-    const pendingStart = combined.lastIndexOf("\x1b]7;");
-    let searchable = combined;
-    this.cwdCaptureBuffer = "";
-    if (pendingStart !== -1) {
-      const pending = combined.slice(pendingStart);
-      if (!pending.includes("\x07") && !pending.includes("\x1b\\")) {
-        searchable = combined.slice(0, pendingStart);
-        this.cwdCaptureBuffer = pending.slice(-MAX_CWD_CAPTURE_BYTES);
-      }
-    }
-
-    for (const match of searchable.matchAll(/\x1b]7;file:\/\/([^\x07\x1b]*)(?:\x07|\x1b\\)/g)) {
-      const cwd = cwdFromFileUri(match[1]);
-      if (!cwd || cwd === this.cwd) continue;
+    const { cwds, pending } = captureOsc7(this.cwdCaptureBuffer, data);
+    this.cwdCaptureBuffer = pending;
+    for (const cwd of cwds) {
+      if (cwd === this.cwd) continue;
       this.cwd = cwd;
       this.emit("cwd", cwd);
     }
@@ -123,21 +130,3 @@ export class PtySession extends EventEmitter<PtyEvents> {
 }
 
 export const describeLocalCwd = (): string => path.basename(process.cwd()) || os.hostname();
-
-const cwdFromFileUri = (value: string): string | undefined => {
-  const slash = value.indexOf("/");
-  if (slash === -1) return undefined;
-  const pathPart = value.slice(slash);
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(pathPart);
-  } catch {
-    decoded = pathPart;
-  }
-  if (/^\/[A-Za-z]:[\\/]/.test(decoded)) decoded = decoded.slice(1);
-  if (decoded.length > 4096) return undefined;
-  if (/[\x00-\x1f\x7f]/.test(decoded)) return undefined;
-  if (/^[A-Za-z]:[\\/]/.test(decoded)) return decoded;
-  if (!decoded.startsWith("/")) return undefined;
-  return decoded;
-};

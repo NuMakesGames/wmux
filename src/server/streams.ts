@@ -107,102 +107,126 @@ export class StreamRequestStore extends EventEmitter {
 export const streamPathForMachine = (machineId: string): string =>
   `wmux-${machineId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 
+// Each stream provider implements this interface once; resolveStreamStatuses
+// only groups machines by provider and dispatches. resolveStatuses receives
+// the whole provider group per sweep so a provider can batch its upstream
+// health fetches (MediaMTX exposes one path-list endpoint for all machines).
+export interface StreamProviderBackend {
+  resolveStatuses(
+    machines: MachineConfig[],
+    host: string,
+    requestStatusFor: (machineId: string) => StreamRequestStatus,
+  ): Promise<StreamStatus[]>;
+}
+
 export const resolveStreamStatuses = async (
   machines: MachineConfig[],
   host: string,
   requests?: StreamRequestStore,
 ): Promise<StreamStatus[]> => {
   const requestStatuses = requests?.snapshotMany(machines.map((machine) => machine.id)) ?? new Map<string, StreamRequestStatus>();
-  const mediaBase = mediaMtxBase(host);
-  const hasMediaMtxStreams = machines.some((machine) => streamProviderForMachine(machine) === "mediamtx");
-  const paths = hasMediaMtxStreams
-    ? await readMediaMtxPaths(mediaBase.apiUrl).catch((error: unknown) => ({
-        error: error instanceof Error ? error.message : "MediaMTX status unavailable",
-        items: [] as MediaMtxPath[],
-      }))
-    : { items: [] as MediaMtxPath[] };
-  const pathItems = "items" in paths ? paths.items ?? [] : [];
-  const mediaErrorReason = "error" in paths && typeof paths.error === "string" ? paths.error : undefined;
-  const mediaByName = new Map(pathItems.map((path) => [path.name, path]));
+  const requestStatusFor = (machineId: string): StreamRequestStatus =>
+    requestStatuses.get(machineId) ?? { machineId, requested: false, requestCount: 0 };
 
-  return Promise.all(
-    machines.map(async (machine) => {
-      const requestStatus = requestStatuses.get(machine.id) ?? {
-        machineId: machine.id,
-        requested: false,
-        requestCount: 0,
-      };
-      return streamProviderForMachine(machine) === "moonlight-gateway"
-        ? resolveMoonlightGatewayStatus(machine, host, requestStatus)
-        : resolveMediaMtxStatus(machine, mediaBase, mediaByName, requestStatus, mediaErrorReason);
-    }),
+  const groups = new Map<StreamProvider, MachineConfig[]>();
+  for (const machine of machines) {
+    const provider = streamProviderForMachine(machine);
+    const group = groups.get(provider) ?? [];
+    group.push(machine);
+    groups.set(provider, group);
+  }
+
+  const resolved = await Promise.all(
+    [...groups.entries()].map(([provider, group]) =>
+      (streamProviderBackends[provider] ?? mediaMtxBackend).resolveStatuses(group, host, requestStatusFor),
+    ),
   );
+  const byMachineId = new Map(resolved.flat().map((status) => [status.machineId, status]));
+  return machines.map((machine) => byMachineId.get(machine.id)!);
 };
 
-const resolveMediaMtxStatus = (
-  machine: MachineConfig,
-  base: { host: string; apiUrl: string; webRtcOrigin: string },
-  paths: Map<string | undefined, MediaMtxPath>,
-  requestStatus: StreamRequestStatus,
-  errorReason?: string,
-): StreamStatus => {
-  const path = streamPathForMachine(machine.id);
-  const status = paths.get(path);
-  const live = Boolean(status?.online ?? status?.ready);
-  const webRtcUrl = `${base.webRtcOrigin}/${path}`;
-  return {
-    machineId: machine.id,
-    provider: "mediamtx",
-    path,
-    live,
-    requested: requestStatus.requested,
-    requestCount: requestStatus.requestCount,
-    requestedUntil: requestStatus.requestedUntil,
-    viewerCount: status?.readers?.length ?? 0,
-    startedAt: status?.onlineTime ?? status?.readyTime,
-    webRtcUrl,
-    openUrl: webRtcUrl,
-    publishRtspUrl: `rtsp://${base.host}:8554/${path}`,
-    publishWhipUrl: `${base.webRtcOrigin}/${path}/whip`,
-    inputEnabled: false,
-    reason: live ? undefined : errorReason,
-  };
+const mediaMtxBackend: StreamProviderBackend = {
+  async resolveStatuses(machines, host, requestStatusFor) {
+    const base = mediaMtxBase(host);
+    const paths = await readMediaMtxPaths(base.apiUrl).catch((error: unknown) => ({
+      error: error instanceof Error ? error.message : "MediaMTX status unavailable",
+      items: [] as MediaMtxPath[],
+    }));
+    const errorReason = "error" in paths && typeof paths.error === "string" ? paths.error : undefined;
+    const statusByName = new Map((paths.items ?? []).map((path) => [path.name, path]));
+
+    return machines.map((machine) => {
+      const requestStatus = requestStatusFor(machine.id);
+      const path = streamPathForMachine(machine.id);
+      const status = statusByName.get(path);
+      const live = Boolean(status?.online ?? status?.ready);
+      const webRtcUrl = `${base.webRtcOrigin}/${path}`;
+      return {
+        machineId: machine.id,
+        provider: "mediamtx" as const,
+        path,
+        live,
+        requested: requestStatus.requested,
+        requestCount: requestStatus.requestCount,
+        requestedUntil: requestStatus.requestedUntil,
+        viewerCount: status?.readers?.length ?? 0,
+        startedAt: status?.onlineTime ?? status?.readyTime,
+        webRtcUrl,
+        openUrl: webRtcUrl,
+        publishRtspUrl: `rtsp://${base.host}:8554/${path}`,
+        publishWhipUrl: `${base.webRtcOrigin}/${path}/whip`,
+        inputEnabled: false,
+        reason: live ? undefined : errorReason,
+      };
+    });
+  },
 };
 
-const resolveMoonlightGatewayStatus = async (
-  machine: MachineConfig,
-  host: string,
-  requestStatus: StreamRequestStatus,
-): Promise<StreamStatus> => {
-  const gatewayUrl = moonlightGatewayUrl(machine, host);
-  const openUrl = normalizeUrl(machine.stream?.gatewayOpenUrl ?? moonlightGatewayOpenUrl(gatewayUrl));
-  const healthUrl = joinUrl(gatewayUrl, "/api/wmux/health");
-  const health = await readMoonlightGatewayHealth(healthUrl).catch((error: unknown) => ({
-    error: error instanceof Error ? error.message : "Moonlight gateway status unavailable",
-  }));
-  const path = streamPathForMachine(machine.id);
-  const live = "ok" in health ? Boolean(health.ok) && health.upstream?.ok !== false : false;
-  const upstreamReason =
-    "ok" in health && health.upstream && health.upstream.ok === false
-      ? health.upstream.reason ?? `Moonlight Web upstream returned ${health.upstream.status ?? "an error"}`
-      : undefined;
-  const errorReason = "error" in health ? health.error : undefined;
-  return {
-    machineId: machine.id,
-    provider: "moonlight-gateway",
-    path,
-    live,
-    requested: requestStatus.requested,
-    requestCount: requestStatus.requestCount,
-    requestedUntil: requestStatus.requestedUntil,
-    viewerCount: "ok" in health && typeof health.viewerCount === "number" ? health.viewerCount : requestStatus.requestCount,
-    startedAt: "ok" in health ? health.startedAt : undefined,
-    webRtcUrl: openUrl,
-    openUrl,
-    gatewayUrl,
-    inputEnabled: true,
-    reason: live ? upstreamReason : errorReason,
-  };
+const moonlightGatewayBackend: StreamProviderBackend = {
+  resolveStatuses(machines, host, requestStatusFor) {
+    return Promise.all(
+      machines.map(async (machine) => {
+        const requestStatus = requestStatusFor(machine.id);
+        const gatewayUrl = moonlightGatewayUrl(machine, host);
+        const openUrl = withGatewayToken(
+          normalizeUrl(machine.stream?.gatewayOpenUrl ?? moonlightGatewayOpenUrl(gatewayUrl)),
+          machine.stream?.gatewayToken,
+        );
+        const healthUrl = joinUrl(gatewayUrl, "/api/wmux/health");
+        const health = await readMoonlightGatewayHealth(healthUrl).catch((error: unknown) => ({
+          error: error instanceof Error ? error.message : "Moonlight gateway status unavailable",
+        }));
+        const path = streamPathForMachine(machine.id);
+        const live = "ok" in health ? Boolean(health.ok) && health.upstream?.ok !== false : false;
+        const upstreamReason =
+          "ok" in health && health.upstream && health.upstream.ok === false
+            ? health.upstream.reason ?? `Moonlight Web upstream returned ${health.upstream.status ?? "an error"}`
+            : undefined;
+        const errorReason = "error" in health ? health.error : undefined;
+        return {
+          machineId: machine.id,
+          provider: "moonlight-gateway" as const,
+          path,
+          live,
+          requested: requestStatus.requested,
+          requestCount: requestStatus.requestCount,
+          requestedUntil: requestStatus.requestedUntil,
+          viewerCount: "ok" in health && typeof health.viewerCount === "number" ? health.viewerCount : requestStatus.requestCount,
+          startedAt: "ok" in health ? health.startedAt : undefined,
+          webRtcUrl: openUrl,
+          openUrl,
+          gatewayUrl,
+          inputEnabled: true,
+          reason: errorReason ?? upstreamReason,
+        };
+      }),
+    );
+  },
+};
+
+const streamProviderBackends: Record<StreamProvider, StreamProviderBackend> = {
+  mediamtx: mediaMtxBackend,
+  "moonlight-gateway": moonlightGatewayBackend,
 };
 
 const streamProviderForMachine = (machine: MachineConfig): StreamProvider =>
@@ -232,6 +256,15 @@ const moonlightGatewayUrl = (machine: MachineConfig, host: string): string => {
 
 const moonlightGatewayOpenUrl = (gatewayUrl: string): string =>
   joinUrl(gatewayUrl, "/api/wmux/open");
+
+// The gateway, when token-gated, needs the token on the browser-facing open URL
+// since the browser navigates to it directly.
+const withGatewayToken = (openUrl: string, token?: string): string => {
+  if (!token) return openUrl;
+  const url = new URL(openUrl);
+  url.searchParams.set("token", token);
+  return url.toString();
+};
 
 const normalizeUrl = (value: string): string => value.replace(/\/+$/, "");
 

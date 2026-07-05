@@ -7,8 +7,49 @@ import sys
 import urllib.request
 
 
+def _wmux_token():
+    token = os.environ.get("WMUX_TOKEN")
+    if token:
+        return token
+    # Fall back to the server's local token file so hooks in existing/durable
+    # local panes authenticate even when WMUX_TOKEN was never in their env.
+    path = os.environ.get("WMUX_TOKEN_PATH") or os.path.expanduser("~/.wmux/token")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _wmux_auth_headers():
+    token = _wmux_token()
+    return {"authorization": "Bearer " + token} if token else {}
+
+
+_NOISE_BLOCK_TAGS = (
+    "system-reminder",
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+    "function_calls",
+    "function_results",
+)
+
+
+def strip_markup(value):
+    # Drop Claude Code's injected XML-ish wrappers (and their content) plus any
+    # stray tags so agent-derived titles/summaries stay human-readable.
+    for tag in _NOISE_BLOCK_TAGS:
+        value = re.sub(rf"<{tag}(?:\s[^>]*)?>.*?</{tag}>", " ", value, flags=re.I | re.S)
+    return re.sub(r"</?[a-zA-Z][^>]*>", " ", value)
+
+
 def clean_text(value, limit):
-    value = re.sub(r"\s+", " ", value or "").strip()
+    value = strip_markup(value or "")
+    value = re.sub(r"\s+", " ", value).strip()
     return value[:limit]
 
 
@@ -99,7 +140,7 @@ def post_json(url, payload):
     request = urllib.request.Request(
         url.rstrip("/") + "/api/agent-events",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **_wmux_auth_headers()},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=15):

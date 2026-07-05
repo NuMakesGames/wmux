@@ -1,0 +1,124 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, UnauthorizedError } from "./api";
+import { writeBrowserClipboard } from "./clipboard";
+import { withTokenParam } from "./token";
+import type { BootstrapPayload, TerminalMedia, TerminalNotification } from "./types";
+
+export type ServiceConnection = "connecting" | "online" | "offline";
+
+interface UseEventStreamCallbacks {
+  // Receives the freshly fetched bootstrap payload on every coalesced resync.
+  onResync: (payload: BootstrapPayload) => void;
+  onAuthRequired: () => void;
+  onError: (message: string) => void;
+}
+
+// Owns the /ws/events socket: connection lifecycle with reconnect, the
+// coalesced full-bootstrap resync, browser notifications, the media shelf
+// feed, and clipboard pushes from wmux-copy.
+export function useEventStream(callbacks: UseEventStreamCallbacks) {
+  const [serviceConnection, setServiceConnection] = useState<ServiceConnection>("connecting");
+  const [mediaItems, setMediaItems] = useState<TerminalMedia[]>([]);
+  const socketRef = useRef<WebSocket | null>(null);
+  // Latest callbacks without resubscribing the socket effect.
+  const callbacksRef = useRef(callbacks);
+  callbacksRef.current = callbacks;
+
+  useEffect(() => {
+    let closed = false;
+    let reconnectTimer: number | undefined;
+    let resyncTimer: number | undefined;
+    let socket: WebSocket | null = null;
+    // Coalesce the full-bootstrap refetch: a burst of state/notification events
+    // (or a reconnect) collapses into a single trailing refresh instead of one
+    // network round-trip per event.
+    const scheduleResync = () => {
+      if (resyncTimer) return;
+      resyncTimer = window.setTimeout(() => {
+        resyncTimer = undefined;
+        if (closed) return;
+        api
+          .bootstrap()
+          .then((payload) => callbacksRef.current.onResync(payload))
+          .catch((nextError) => {
+            if (nextError instanceof UnauthorizedError) callbacksRef.current.onAuthRequired();
+            else callbacksRef.current.onError(String(nextError));
+          });
+      }, 60);
+    };
+    const connect = () => {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      setServiceConnection("connecting");
+      const ws = new WebSocket(withTokenParam(`${protocol}//${window.location.host}/ws/events`));
+      socket = ws;
+      socketRef.current = ws;
+      ws.onopen = () => {
+        setServiceConnection("online");
+        // Re-bootstrap on every (re)connect so state that changed while the
+        // socket was down — including a full server restart — is picked up
+        // instead of leaving the UI stale until the next incidental event.
+        scheduleResync();
+      };
+      ws.onmessage = (event) => {
+        let message: { type?: string; notification?: unknown; media?: unknown; clipboard?: unknown };
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (message.type === "notification") {
+          showBrowserNotification(message.notification as TerminalNotification);
+        }
+        if (message.type === "media") {
+          const media = message.media as TerminalMedia;
+          setMediaItems((items) => [media, ...items.filter((item) => item.id !== media.id)].slice(0, 20));
+        }
+        if (message.type === "clipboard") {
+          const clipboard = message.clipboard as { text?: string };
+          if (typeof clipboard.text === "string") void writeBrowserClipboard(clipboard.text).catch(() => undefined);
+        }
+        if (message.type === "state" || message.type === "notification") {
+          scheduleResync();
+        }
+      };
+      ws.onclose = () => {
+        if (socketRef.current === ws) socketRef.current = null;
+        if (!closed) {
+          setServiceConnection("offline");
+          reconnectTimer = window.setTimeout(connect, 1500);
+        }
+      };
+      ws.onerror = () => setServiceConnection("offline");
+    };
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (resyncTimer) window.clearTimeout(resyncTimer);
+      if (socketRef.current === socket) socketRef.current = null;
+      socket?.close();
+    };
+  }, []);
+
+  const sendEventSocketMessage = useCallback((message: unknown): boolean => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify(message));
+    return true;
+  }, []);
+
+  const dismissMedia = useCallback((mediaId: string) => {
+    setMediaItems((items) => items.filter((item) => item.id !== mediaId));
+  }, []);
+
+  return { serviceConnection, mediaItems, dismissMedia, sendEventSocketMessage };
+}
+
+const showBrowserNotification = (notification: TerminalNotification): void => {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const title = notification.subtitle ? `${notification.title}: ${notification.subtitle}` : notification.title;
+  new Notification(title, {
+    body: notification.body,
+    tag: notification.id,
+  });
+};

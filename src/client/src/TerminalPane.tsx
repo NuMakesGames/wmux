@@ -18,6 +18,7 @@ import {
 import { ensureWmuxFonts, WMUX_MONO_FONT_FAMILY } from "./fonts";
 import { ensureGhostty } from "./terminal-loader";
 import { OpenTuiPaneToolbar } from "./OpenTuiPaneToolbar";
+import { withTokenParam } from "./token";
 import type { MachineStatus, PaneState, SplitDirection, TerminalMedia, TerminalRun } from "./types";
 
 interface Props {
@@ -143,6 +144,10 @@ export function TerminalPane({
     let terminalOutputTimer: number | undefined;
     let queuedTerminalOutput = "";
     let reconnectDelayMs = 350;
+    // The server preserves a pane whose process died abnormally instead of
+    // deleting it, so a keypress here re-attaches (and re-spawns) on demand
+    // rather than looping against a down host.
+    let awaitingRestart = false;
     kittyParserRef.current = new KittyGraphicsParser();
     kittyPlaceholderStripRef.current.pendingPlaceholderMarks = false;
     kittyImageCacheRef.current.clear();
@@ -402,7 +407,9 @@ export function TerminalPane({
       if (cancelled || removed || !term) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(
-        `${protocol}//${window.location.host}/ws/panes/${pane.id}?cols=${safeCols(term.cols)}&rows=${safeRows(term.rows)}`,
+        withTokenParam(
+          `${protocol}//${window.location.host}/ws/panes/${pane.id}?cols=${safeCols(term.cols)}&rows=${safeRows(term.rows)}`,
+        ),
       );
       socketRef.current = ws;
 
@@ -447,7 +454,8 @@ export function TerminalPane({
         }
         if (message.type === "exit") {
           flushQueuedTerminalText(term);
-          term.write(`\r\n[wmux] process exited with code ${message.code}\r\n`);
+          term.write(`\r\n[wmux] process exited with code ${message.code}. Press any key to restart.\r\n`);
+          awaitingRestart = true;
         }
         if (message.type === "removed") {
           flushQueuedTerminalText(term);
@@ -561,6 +569,18 @@ export function TerminalPane({
       });
 
       term.onData((data) => {
+        if (awaitingRestart) {
+          awaitingRestart = false;
+          term.write("\r\n[wmux] restarting…\r\n");
+          reconnectDelayMs = 350;
+          const stale = socketRef.current;
+          socketRef.current = null;
+          // Closing triggers onclose → scheduleReconnect, which re-attaches and
+          // re-spawns the pane process on the server.
+          stale?.close();
+          if (!stale) connect();
+          return;
+        }
         if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
         if (term.getViewportY() > 0) term.scrollToBottom();
         sendInput(socketRef.current, data);

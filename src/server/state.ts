@@ -75,8 +75,16 @@ interface SetAutoTitleInput {
   tabOnlyIfMultiple?: boolean;
 }
 
+// Terminal title/cwd updates stream from the PTY constantly, so persistence is
+// debounced: mutations mark the store dirty and emit "change" immediately (so
+// the UI stays live), and the actual disk write is coalesced onto this trailing
+// window. flush() forces a synchronous write for shutdown/tests.
+const WRITE_DEBOUNCE_MS = 150;
+
 export class StateStore extends EventEmitter {
   private state: PersistedState;
+  private writeTimer: ReturnType<typeof setTimeout> | null = null;
+  private dirty = false;
 
   constructor(
     machines: MachineConfig[],
@@ -84,7 +92,7 @@ export class StateStore extends EventEmitter {
   ) {
     super();
     this.state = this.load(machines);
-    this.save();
+    this.flush();
   }
 
   snapshot(): PersistedState {
@@ -92,9 +100,33 @@ export class StateStore extends EventEmitter {
   }
 
   save(): void {
-    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2));
+    this.dirty = true;
     this.emit("change");
+    if (this.writeTimer) return;
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = null;
+      this.flush();
+    }, WRITE_DEBOUNCE_MS);
+  }
+
+  /** Persist any pending changes synchronously, cancelling the debounce timer. */
+  flush(): void {
+    if (this.writeTimer) {
+      clearTimeout(this.writeTimer);
+      this.writeTimer = null;
+    }
+    if (!this.dirty && fs.existsSync(this.filePath)) return;
+    this.writeToDisk();
+    this.dirty = false;
+  }
+
+  private writeToDisk(): void {
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+    // Write to a temp file and rename so a crash or ENOSPC mid-write can never
+    // truncate the live state file — rename is atomic on the same filesystem.
+    const tempPath = `${this.filePath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(this.state, null, 2));
+    fs.renameSync(tempPath, this.filePath);
   }
 
   createWorkspace(machineId = "local", cwd?: string): Workspace {
@@ -563,8 +595,11 @@ export class StateStore extends EventEmitter {
 
   private load(machines: MachineConfig[]): PersistedState {
     if (fs.existsSync(this.filePath)) {
-      const raw = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as PersistedState;
-      return { ...this.normalizeRestoredState(raw), machines };
+      const restored = this.tryLoadPersisted();
+      if (restored) return { ...this.normalizeRestoredState(restored), machines };
+      // Corrupt/unreadable state: quarantine the bad file rather than crashing
+      // startup, then fall through to a fresh workspace below.
+      this.quarantineStateFile();
     }
     const state: PersistedState = {
       machines,
@@ -577,6 +612,29 @@ export class StateStore extends EventEmitter {
     this.state = state;
     const workspace = this.createWorkspace("local");
     return { ...state, activeWorkspaceId: workspace.id };
+  }
+
+  private tryLoadPersisted(): PersistedState | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as unknown;
+      if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as PersistedState).workspaces)) {
+        return null;
+      }
+      return parsed as PersistedState;
+    } catch {
+      return null;
+    }
+  }
+
+  private quarantineStateFile(): void {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const quarantinePath = `${this.filePath}.corrupt-${stamp}`;
+      fs.renameSync(this.filePath, quarantinePath);
+      console.error(`wmux: unreadable state file quarantined to ${quarantinePath}; starting fresh`);
+    } catch (error) {
+      console.error(`wmux: failed to quarantine unreadable state file: ${error instanceof Error ? error.message : error}`);
+    }
   }
 
   private createPane(machineId: string, cwd?: string): PaneState {
@@ -641,8 +699,15 @@ export class StateStore extends EventEmitter {
       workspace.nameSource ??= isDefaultWorkspaceName(workspace.name, workspace.machineId) ? "default" : "user";
       workspace.descriptor ??= this.machineDescriptor(workspace.machineId, state.machines ?? []);
       workspace.descriptorSource ??= "default";
+      // Retroactively scrub markup that older builds let into agent-derived
+      // names, but never touch a title the user set by hand.
+      if (workspace.nameSource !== "user") workspace.name = cleanTitle(workspace.name, workspace.name);
+      if (workspace.descriptorSource !== "user" && workspace.descriptor) {
+        workspace.descriptor = cleanDescriptor(workspace.descriptor, workspace.descriptor);
+      }
       for (const tab of workspace.tabs) {
         tab.titleSource ??= tab.title === "Shell" ? "default" : "user";
+        if (tab.titleSource !== "user") tab.title = cleanTitle(tab.title, tab.title);
         for (const pane of tab.panes) {
           if (pane.status === "running") {
             pane.status = "idle";
@@ -694,18 +759,44 @@ const clampSplitRatio = (value: number): number => {
   return Math.min(0.85, Math.max(0.15, numeric));
 };
 
+// Titles/descriptors are frequently derived from agent prompt/transcript text,
+// which carries Claude Code's injected XML-ish wrappers (system reminders, slash
+// command envelopes, local command output). Drop those noise blocks and any
+// stray tags so they never leak into workspace/tab names.
+const NOISE_BLOCK_TAGS = [
+  "system-reminder",
+  "command-name",
+  "command-message",
+  "command-args",
+  "local-command-stdout",
+  "local-command-stderr",
+  "local-command-caveat",
+  "function_calls",
+  "function_results",
+];
+
+export const stripMarkup = (value: string): string => {
+  let result = value;
+  for (const tag of NOISE_BLOCK_TAGS) {
+    result = result.replace(new RegExp(`<${tag}(?:\\s[^>]*)?>[\\s\\S]*?</${tag}>`, "gi"), " ");
+  }
+  // Remove any remaining opening/closing tags (keep their inner text).
+  result = result.replace(/<\/?[a-zA-Z][^>]*>/g, " ");
+  return result;
+};
+
 const cleanText = (value: string, fallback: string): string => {
-  const cleaned = value.replace(/\s+/g, " ").trim();
+  const cleaned = stripMarkup(value).replace(/\s+/g, " ").trim();
   return (cleaned || fallback).slice(0, 500);
 };
 
 const cleanTitle = (value: string, fallback: string): string => {
-  const cleaned = value.replace(/\s+/g, " ").replace(/[.!?。]+$/u, "").trim();
+  const cleaned = stripMarkup(value).replace(/\s+/g, " ").replace(/[.!?。]+$/u, "").trim();
   return (cleaned || fallback).slice(0, 50);
 };
 
 const cleanDescriptor = (value: string, fallback: string): string => {
-  const cleaned = value.replace(/\s+/g, " ").trim();
+  const cleaned = stripMarkup(value).replace(/\s+/g, " ").trim();
   return (cleaned || fallback).slice(0, 120);
 };
 

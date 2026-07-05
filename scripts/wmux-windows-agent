@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import hmac
 import json
 import os
 import re
@@ -86,36 +87,50 @@ def is_private_bind_host(host: str) -> bool:
     return first == 100 and 64 <= second <= 127
 
 
-def powershell_bootstrap(cwd: str) -> str:
-    escaped_cwd = cwd.replace("'", "''")
-    return f"""
-$ErrorActionPreference = 'Continue'
-function global:__wmuxFileUriPath([string]$PathValue) {{
-  $Normalized = $PathValue -replace '\\\\', '/'
-  if ($Normalized -match '^[A-Za-z]:') {{ $Normalized = '/' + $Normalized }}
+# Byte-identical copy of scripts/windows/wmux-cwd-prompt.ps1. The agent runs
+# standalone on the Windows host, so it cannot read the wmux checkout; wmux's
+# test/osc7.test.ts asserts this constant matches the canonical file.
+CWD_PROMPT_PS1 = r"""function global:__wmuxFileUriPath([string]$PathValue) {
+  $Normalized = $PathValue -replace '\\', '/'
+  if ($Normalized -match '^[A-Za-z]:') {
+    $Normalized = '/' + $Normalized
+  }
   $Segments = $Normalized.Split([char]'/', [System.StringSplitOptions]::None)
-  return (($Segments | ForEach-Object {{ [System.Uri]::EscapeDataString($_) }}) -join '/')
-}}
-function global:__wmuxEmitCwd {{
-  try {{
-    if ($PWD.Provider.Name -ne 'FileSystem') {{ return }}
-    $HostName = if ($env:COMPUTERNAME) {{ $env:COMPUTERNAME }} else {{ 'windows' }}
+  return (($Segments | ForEach-Object { [System.Uri]::EscapeDataString($_) }) -join '/')
+}
+
+function global:__wmuxEmitCwd {
+  try {
+    if ($PWD.Provider.Name -ne 'FileSystem') { return }
+    $HostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'windows' }
     $PathPart = __wmuxFileUriPath $PWD.ProviderPath
     [Console]::Write("$([char]27)]7;file://$HostName$PathPart$([char]7)")
-  }} catch {{}}
-}}
-function global:prompt {{
+  } catch {}
+}
+
+function global:prompt {
   __wmuxEmitCwd
   "PS $($executionContext.SessionState.Path.CurrentLocation)> "
-}}
-try {{
+}
+
+try {
   Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue
-}} catch {{}}
+} catch {}
+"""
+
+
+def powershell_bootstrap(cwd: str) -> str:
+    escaped_cwd = cwd.replace("'", "''")
+    return (
+        "\n$ErrorActionPreference = 'Continue'\n"
+        + CWD_PROMPT_PS1
+        + f"""
 if ('{escaped_cwd}') {{
   Set-Location -LiteralPath '{escaped_cwd}' -ErrorAction SilentlyContinue
 }}
 __wmuxEmitCwd
 """
+    )
 
 
 def powershell_command(shell: str, cwd: str) -> list[str]:
@@ -432,6 +447,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, message: str, *args: Any) -> None:
         print(f"wmux-windows-agent: {self.address_string()} {message % args}", file=sys.stderr)
 
+    def authorized(self) -> bool:
+        expected = str(self.state.config.get("token") or os.environ.get("WMUX_AGENT_TOKEN") or "")
+        if not expected:
+            return True
+        header = self.headers.get("authorization") or ""
+        match = re.match(r"^Bearer\s+(.+)$", header.strip(), re.IGNORECASE)
+        presented = match.group(1).strip() if match else ""
+        # Length-independent compare_digest guards against timing discovery.
+        return bool(presented) and hmac.compare_digest(presented, expected)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
@@ -449,6 +474,9 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if not self.authorized():
+            self.send_json({"error": "unauthorized"}, status=401)
+            return
         if parts == ["sessions"]:
             self.send_json({"sessions": self.state.list_sessions()})
             return
@@ -464,6 +492,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
+        if not self.authorized():
+            self.send_json({"error": "unauthorized"}, status=401)
+            return
         parsed = urlparse(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
         if len(parts) == 2 and parts[0] == "sessions":
@@ -494,6 +525,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"error": "not_found"}, status=404)
 
     def do_DELETE(self) -> None:
+        if not self.authorized():
+            self.send_json({"error": "unauthorized"}, status=401)
+            return
         parsed = urlparse(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
         if len(parts) == 2 and parts[0] == "sessions":

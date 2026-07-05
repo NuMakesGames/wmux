@@ -57,6 +57,9 @@ export const buildWindowsPowerShellBootstrapUrl = (
   for (const [key, value] of Object.entries(extraEnv)) {
     if (value && windowsBootstrapEnvKeys.has(key)) url.searchParams.set(key, value);
   }
+  // The helper endpoints are token-gated; the WS/one-liner fetch can only carry
+  // the token on the query string.
+  if (extraEnv.WMUX_TOKEN) url.searchParams.set("token", extraEnv.WMUX_TOKEN);
   return url.toString();
 };
 
@@ -100,8 +103,10 @@ New-Item -ItemType Directory -Force -Path $HelperDir, $StateDir, $LogDir | Out-N
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 $BundleUrl = ${psSingleQuote(bundleUrl)}
+$WmuxHeaders = @{}
+if ($env:WMUX_TOKEN) { $WmuxHeaders['Authorization'] = "Bearer $($env:WMUX_TOKEN)" }
 try {
-  $Bundle = Invoke-RestMethod -Method Get -Uri $BundleUrl -TimeoutSec 20
+  $Bundle = Invoke-RestMethod -Method Get -Uri $BundleUrl -Headers $WmuxHeaders -TimeoutSec 20
   foreach ($File in @($Bundle.files)) {
     $Target = Join-Path $HelperDir ([string]$File.name)
     [System.IO.File]::WriteAllBytes($Target, [Convert]::FromBase64String([string]$File.dataBase64))
@@ -171,33 +176,7 @@ function global:__wmuxNormalizeStartCwd([string]$PathValue) {
   return $PathValue
 }
 
-function global:__wmuxFileUriPath([string]$PathValue) {
-  $Normalized = $PathValue -replace '\\\\', '/'
-  if ($Normalized -match '^[A-Za-z]:') {
-    $Normalized = '/' + $Normalized
-  }
-  $Segments = $Normalized.Split([char]'/', [System.StringSplitOptions]::None)
-  return (($Segments | ForEach-Object { [System.Uri]::EscapeDataString($_) }) -join '/')
-}
-
-function global:__wmuxEmitCwd {
-  try {
-    if ($PWD.Provider.Name -ne 'FileSystem') { return }
-    $HostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'windows' }
-    $PathPart = __wmuxFileUriPath $PWD.ProviderPath
-    [Console]::Write("$([char]27)]7;file://$HostName$PathPart$([char]7)")
-  } catch {}
-}
-
-function global:prompt {
-  __wmuxEmitCwd
-  "PS $($executionContext.SessionState.Path.CurrentLocation)> "
-}
-
-try {
-  Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue
-} catch {}
-
+${windowsCwdPromptSnippet()}
 $StartCwd = __wmuxNormalizeStartCwd $env:WMUX_START_CWD
 if ($StartCwd) {
   Set-Location -LiteralPath $StartCwd -ErrorAction SilentlyContinue
@@ -352,7 +331,15 @@ const windowsAgentConfig = (machine: MachineConfig): Record<string, unknown> => 
   helperDir: "%LOCALAPPDATA%\\wmux\\bin",
   maxReplayBytes: 2 * 1024 * 1024,
   backend: "conpty",
+  // When set, the agent requires this bearer token on every request, closing
+  // the unauthenticated-RCE exposure to other hosts on the tailnet.
+  ...(machine.agentToken ? { token: machine.agentToken } : {}),
 });
+
+// Canonical OSC 7 cwd-reporting prompt snippet. scripts/wmux-windows-agent
+// embeds a byte-identical copy (it must run standalone on the Windows host);
+// test/osc7.test.ts asserts the two never drift.
+export const windowsCwdPromptSnippet = (): string => localWindowsHelperScript("wmux-cwd-prompt.ps1");
 
 const localWindowsHelperScript = (name: string): string => {
   try {

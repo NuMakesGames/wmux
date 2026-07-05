@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, GripVertical, Link2, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
-import { api } from "./api";
+import { api, UnauthorizedError } from "./api";
 import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
 import { LayoutView } from "./LayoutView";
+import { LoginView } from "./LoginView";
 import { MobileAgentSurface } from "./MobileAgentSurface";
 import { OpenTuiActivityPanel } from "./OpenTuiActivityPanel";
 import type { OpenTuiActivityRow } from "./OpenTuiActivityPanel";
@@ -11,7 +12,14 @@ import { OpenTuiSettingsModal } from "./OpenTuiSettingsModal";
 import { OpenTuiSidebar } from "./OpenTuiSidebar";
 import type { OpenTuiSidebarMachine, OpenTuiSidebarWorkspace } from "./OpenTuiSidebar";
 import { OpenTuiTopbar } from "./OpenTuiTopbar";
+import { applyRouteTargetToState, parseRouteTarget, workspaceTabPath } from "./route-state";
 import { ScreenStreamViewer } from "./ScreenStream";
+import { Toasts, useToasts } from "./Toasts";
+import { useAppRouting } from "./useAppRouting";
+import { useEventStream } from "./useEventStream";
+import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
+import { maxSidebarWidth, useSidebar } from "./useSidebar";
+import { writeBrowserClipboard } from "./clipboard";
 import type {
   AgentActivity,
   BootstrapPayload,
@@ -26,7 +34,6 @@ import type {
   WmuxSettings,
 } from "./types";
 
-type ServiceConnection = "connecting" | "online" | "offline";
 type MobileSurfaceMode = "agent" | "terminal";
 type SettingsSurface = "opentui" | "dom";
 
@@ -47,11 +54,6 @@ const defaultSettings: WmuxSettings = {
   machineAliases: {},
 };
 
-const sidebarWidthStorageKey = "wmux.sidebarWidth";
-const defaultSidebarWidth = 288;
-const minSidebarWidth = 220;
-const maxSidebarWidth = 520;
-const collapseSidebarDragThreshold = 128;
 const maxMountedTabViews = 6;
 
 interface MobileViewportState {
@@ -72,12 +74,6 @@ interface MountedTabView {
   tab: SurfaceTab;
 }
 
-interface PendingActiveRoute {
-  requestId: number;
-  workspaceId: string;
-  tabId: string;
-}
-
 interface TerminalFocusRequest {
   key: string;
   token: number;
@@ -89,15 +85,21 @@ export function App() {
   const [state, setState] = useState<BootstrapPayload | null>(null);
   const [newMachineId, setNewMachineId] = useState("local");
   const [error, setError] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia("(max-width: 800px)").matches);
-  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
-  const [mediaItems, setMediaItems] = useState<TerminalMedia[]>([]);
+  const [authRequired, setAuthRequired] = useState(false);
+  const { toasts, pushToast, dismissToast } = useToasts();
+  const {
+    sidebarCollapsed,
+    sidebarWidth,
+    toggleSidebar,
+    collapseSidebar,
+    startSidebarResize,
+    onSidebarResizerKeyDown,
+  } = useSidebar(mobileViewport.isMobile);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSurface, setSettingsSurface] = useState<SettingsSurface>("dom");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
   const [previewSettings, setPreviewSettings] = useState<WmuxSettings | null>(null);
-  const [serviceConnection, setServiceConnection] = useState<ServiceConnection>("connecting");
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
   const [activityOpen, setActivityOpen] = useState(false);
   const [streamOpen, setStreamOpen] = useState(false);
@@ -105,87 +107,35 @@ export function App() {
   const [bellPaneIds, setBellPaneIds] = useState<Set<string>>(() => new Set());
   const [mountedTabKeys, setMountedTabKeys] = useState<string[]>([]);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState<TerminalFocusRequest | null>(null);
-  const eventsSocketRef = useRef<WebSocket | null>(null);
   const stateRef = useRef<BootstrapPayload | null>(null);
-  const seenNotificationIds = useRef(new Set<string>());
-  const lastSyncedPath = useRef("");
-  const activeRouteRequestId = useRef(0);
-  const pendingActiveRoute = useRef<PendingActiveRoute | null>(null);
   const terminalFocusToken = useRef(0);
-  const previousMobileViewport = useRef(mobileViewport.isMobile);
-
-  useEffect(() => {
-    if (mobileViewport.isMobile && !previousMobileViewport.current) setSidebarCollapsed(true);
-    if (!mobileViewport.isMobile && previousMobileViewport.current) setSidebarCollapsed(false);
-    previousMobileViewport.current = mobileViewport.isMobile;
-  }, [mobileViewport.isMobile]);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  useEffect(() => {
-    window.localStorage.setItem(sidebarWidthStorageKey, String(sidebarWidth));
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    api
-      .bootstrap()
-      .then(async (payload) => {
-        for (const notification of payload.notifications) seenNotificationIds.current.add(notification.id);
-        const routed = await activateRouteTarget(payload);
-        setState(routed);
-      })
-      .catch((nextError) => setError(String(nextError)));
+  const loadBootstrap = useCallback(async () => {
+    try {
+      const payload = await api.bootstrap();
+      const routed = await activateRouteTarget(payload);
+      setAuthRequired(false);
+      setState(routed);
+    } catch (nextError) {
+      // An auth failure routes to the login screen instead of the fatal overlay.
+      if (nextError instanceof UnauthorizedError) setAuthRequired(true);
+      else setError(String(nextError));
+    }
   }, []);
 
   useEffect(() => {
-    let closed = false;
-    let reconnectTimer: number | undefined;
-    let socket: WebSocket | null = null;
-    const connect = () => {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      setServiceConnection("connecting");
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/events`);
-      socket = ws;
-      eventsSocketRef.current = ws;
-      ws.onopen = () => setServiceConnection("online");
-      ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        if (message.type === "notification") {
-          const notification = message.notification as TerminalNotification;
-          seenNotificationIds.current.add(notification.id);
-          showBrowserNotification(notification);
-        }
-        if (message.type === "media") {
-          const media = message.media as TerminalMedia;
-          setMediaItems((items) => [media, ...items.filter((item) => item.id !== media.id)].slice(0, 20));
-        }
-        if (message.type === "clipboard") {
-          const clipboard = message.clipboard as { text?: string };
-          if (typeof clipboard.text === "string") void writeBrowserClipboard(clipboard.text).catch(() => undefined);
-        }
-        if (message.type === "state" || message.type === "notification") {
-          api.bootstrap().then((payload) => refresh(payload)).catch((nextError) => setError(String(nextError)));
-        }
-      };
-      ws.onclose = () => {
-        if (eventsSocketRef.current === ws) eventsSocketRef.current = null;
-        if (!closed) {
-          setServiceConnection("offline");
-          reconnectTimer = window.setTimeout(connect, 1500);
-        }
-      };
-      ws.onerror = () => setServiceConnection("offline");
-    };
-    connect();
-    return () => {
-      closed = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      if (eventsSocketRef.current === socket) eventsSocketRef.current = null;
-      socket?.close();
-    };
-  }, []);
+    void loadBootstrap();
+  }, [loadBootstrap]);
+
+  const { serviceConnection, mediaItems, dismissMedia, sendEventSocketMessage } = useEventStream({
+    onResync: (payload) => void refresh(payload),
+    onAuthRequired: () => setAuthRequired(true),
+    onError: (message) => setError(message),
+  });
 
   useEffect(() => {
     if (!state) return;
@@ -371,13 +321,38 @@ export function App() {
     [displayMachines, state],
   );
 
-  const refresh = async (nextState?: BootstrapPayload) => {
-    const incoming = nextState ?? (await api.bootstrap());
-    const pending = pendingActiveRoute.current;
-    const applied = applyRouteTargetToState(incoming, pending ?? parseRouteTarget());
-    stateRef.current = applied;
-    setState(applied);
-  };
+  const clearBellPanes = useCallback((paneIds: string[]) => {
+    if (paneIds.length === 0) return;
+    setBellPaneIds((current) => {
+      if (paneIds.every((paneId) => !current.has(paneId))) return current;
+      const next = new Set(current);
+      for (const paneId of paneIds) next.delete(paneId);
+      return next;
+    });
+  }, []);
+
+  const requestTerminalFocus = useCallback((workspaceId: string, tabId: string) => {
+    setTerminalFocusRequest({
+      key: mountedTabViewKey(workspaceId, tabId),
+      token: ++terminalFocusToken.current,
+    });
+  }, []);
+
+  const { refresh, activateWorkspaceTab, chromePath } = useAppRouting({
+    stateRef,
+    setState,
+    openTuiMode,
+    activeWorkspace,
+    activeTab,
+    onError: (message) => setError(message),
+    onMobileNavigate: () => {
+      collapseSidebar();
+      settleMobileViewportAfterNavigation();
+    },
+    isMobile: mobileViewport.isMobile,
+    clearBellPanes,
+    requestTerminalFocus,
+  });
 
   const updateSettings = async (nextSettings: WmuxSettings) => {
     const response = await api.updateSettings(nextSettings);
@@ -396,8 +371,6 @@ export function App() {
     setSettingsOpen(false);
   };
 
-  const chromePath = (path: string) => (openTuiMode ? path : `${path}?legacy=1`);
-  const currentChromePath = () => `${window.location.pathname}${window.location.search}`;
   const switchChromeMode = (enabled: boolean) => {
     const params = new URLSearchParams(window.location.search);
     params.delete("opentui");
@@ -406,123 +379,6 @@ export function App() {
     const query = params.toString();
     window.location.assign(`${window.location.pathname}${query ? `?${query}` : ""}`);
   };
-
-  const requestTerminalFocus = (workspaceId: string, tabId: string) => {
-    setTerminalFocusRequest({
-      key: mountedTabViewKey(workspaceId, tabId),
-      token: ++terminalFocusToken.current,
-    });
-  };
-
-  const persistActiveRoute = async (
-    workspaceId: string,
-    tabId: string,
-    requestId: number,
-    shouldActivateWorkspace: boolean,
-    shouldActivateTab: boolean,
-  ) => {
-    let nextState: BootstrapPayload | null = null;
-    try {
-      if (shouldActivateWorkspace) nextState = await api.activateWorkspace(workspaceId);
-      if (shouldActivateTab) nextState = await api.activateTab(workspaceId, tabId);
-    } catch (nextError) {
-      if (activeRouteRequestId.current === requestId) {
-        pendingActiveRoute.current = null;
-        setError(String(nextError));
-        void refresh();
-      }
-      return;
-    }
-
-    if (activeRouteRequestId.current !== requestId) return;
-    pendingActiveRoute.current = null;
-    if (nextState) {
-      const applied = activateWorkspaceTabInState(nextState, workspaceId, tabId);
-      stateRef.current = applied;
-      setState(applied);
-    }
-  };
-
-  const activateWorkspaceTab = (
-    workspaceId: string,
-    tabId: string | undefined,
-    options: { focusTerminal?: boolean; replaceHistory?: boolean } = {},
-  ) => {
-    const current = stateRef.current;
-    if (!current) return;
-    const target = findWorkspaceTab(current, workspaceId, tabId);
-    if (!target) return;
-    const shouldMarkWorkspaceRead = current.notifications.some(
-      (notification) => notification.workspaceId === workspaceId && !notification.read,
-    );
-
-    const nextPath = chromePath(workspaceTabPath(workspaceId, target.tab.id));
-    if (currentChromePath() !== nextPath) {
-      window.history[options.replaceHistory ? "replaceState" : "pushState"](null, "", nextPath);
-      lastSyncedPath.current = nextPath;
-    }
-    if (mobileViewport.isMobile) {
-      setSidebarCollapsed(true);
-      settleMobileViewportAfterNavigation();
-    }
-    clearBellPanes(target.tab.panes.map((pane) => pane.id));
-
-    const optimistic = activateWorkspaceTabInState(current, workspaceId, target.tab.id);
-    stateRef.current = optimistic;
-    setState((snapshot) => {
-      if (!snapshot) return snapshot;
-      const next = activateWorkspaceTabInState(snapshot, workspaceId, target.tab.id);
-      stateRef.current = next;
-      return next;
-    });
-    if (options.focusTerminal) requestTerminalFocus(workspaceId, target.tab.id);
-
-    const shouldActivateWorkspace = current.activeWorkspaceId !== workspaceId;
-    const shouldActivateTab = target.workspace.activeTabId !== target.tab.id;
-    if (!shouldActivateWorkspace && !shouldActivateTab) {
-      if (shouldMarkWorkspaceRead) {
-        void api.markWorkspaceNotificationsRead(workspaceId)
-          .then((payload) => refresh(activateWorkspaceTabInState(payload, workspaceId, target.tab.id)))
-          .catch((nextError) => setError(String(nextError)));
-      }
-      return;
-    }
-
-    const requestId = ++activeRouteRequestId.current;
-    pendingActiveRoute.current = { requestId, workspaceId, tabId: target.tab.id };
-    void persistActiveRoute(workspaceId, target.tab.id, requestId, shouldActivateWorkspace, shouldActivateTab);
-  };
-
-  useEffect(() => {
-    if (!state) return;
-    if (!activeWorkspace || !activeTab) {
-      const nextPath = chromePath("/");
-      if (currentChromePath() !== nextPath) {
-        window.history.replaceState(null, "", nextPath);
-        lastSyncedPath.current = nextPath;
-      }
-      return;
-    }
-    const nextPath = workspaceTabPath(activeWorkspace.id, activeTab.id);
-    const nextChromePath = chromePath(nextPath);
-    const currentPath = currentChromePath();
-    if (currentPath === nextChromePath) {
-      lastSyncedPath.current = nextChromePath;
-      return;
-    }
-    const replace = lastSyncedPath.current === "" || currentPath !== lastSyncedPath.current;
-    window.history[replace ? "replaceState" : "pushState"](null, "", nextChromePath);
-    lastSyncedPath.current = nextChromePath;
-  }, [state, activeWorkspace, activeTab, openTuiMode]);
-
-  useEffect(() => {
-    const onPopState = () => {
-      const target = parseRouteTarget();
-      if (target) activateWorkspaceTab(target.workspaceId, target.tabId, { replaceHistory: true });
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
 
   const selectedMachine = displayMachines.find((machine) => machine.id === newMachineId) ?? displayMachines[0];
   const activeStreamMachineId = activeWorkspace?.machineId ?? selectedMachine?.id ?? newMachineId;
@@ -552,20 +408,6 @@ export function App() {
     .filter(Boolean)
     .join(" / ");
 
-  const toggleSidebar = useCallback(() => {
-    setSidebarCollapsed((value) => !value);
-  }, []);
-
-  const clearBellPanes = useCallback((paneIds: string[]) => {
-    if (paneIds.length === 0) return;
-    setBellPaneIds((current) => {
-      if (paneIds.every((paneId) => !current.has(paneId))) return current;
-      const next = new Set(current);
-      for (const paneId of paneIds) next.delete(paneId);
-      return next;
-    });
-  }, []);
-
   const recordPaneBell = useCallback((paneId: string) => {
     const snapshot = stateRef.current;
     if (!snapshot) return;
@@ -583,68 +425,22 @@ export function App() {
     });
   }, []);
 
-  const startSidebarResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (mobileViewport.isMobile || event.button !== 0) return;
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = sidebarCollapsed ? 0 : sidebarWidth;
-    let latestWidth = sidebarWidth;
-
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const rawWidth = startWidth + moveEvent.clientX - startX;
-      if (rawWidth < collapseSidebarDragThreshold) {
-        setSidebarCollapsed(true);
-        return;
+  // Wrap a mutating action so a transient API failure surfaces as a toast
+  // instead of an unhandled rejection that silently drops the action.
+  const guard = <A extends unknown[]>(label: string, fn: (...args: A) => Promise<void>) => (
+    async (...args: A): Promise<void> => {
+      try {
+        await fn(...args);
+      } catch (nextError) {
+        pushToast(`${label} failed: ${describeActionError(nextError)}`);
       }
-      const nextWidth = clampSidebarWidth(rawWidth);
-      latestWidth = nextWidth;
-      setSidebarCollapsed(false);
-      setSidebarWidth(nextWidth);
-    };
-    const stopResize = () => {
-      document.body.classList.remove("sidebar-resizing");
-      window.localStorage.setItem(sidebarWidthStorageKey, String(latestWidth));
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", stopResize);
-      window.removeEventListener("pointercancel", stopResize);
-    };
-
-    document.body.classList.add("sidebar-resizing");
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", stopResize, { once: true });
-    window.addEventListener("pointercancel", stopResize, { once: true });
-  }, [mobileViewport.isMobile, sidebarCollapsed, sidebarWidth]);
-
-  const onSidebarResizerKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (mobileViewport.isMobile) return;
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      toggleSidebar();
-      return;
     }
-    if (event.key === "Home") {
-      event.preventDefault();
-      setSidebarCollapsed(true);
-      return;
-    }
-    if (event.key === "End") {
-      event.preventDefault();
-      setSidebarCollapsed(false);
-      setSidebarWidth(maxSidebarWidth);
-      return;
-    }
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    event.preventDefault();
-    const delta = event.shiftKey ? 48 : 16;
-    const nextWidth = clampSidebarWidth(sidebarWidth + (event.key === "ArrowRight" ? delta : -delta));
-    setSidebarCollapsed(false);
-    setSidebarWidth(nextWidth);
-  }, [mobileViewport.isMobile, sidebarWidth, toggleSidebar]);
+  );
 
-  const createWorkspace = async (machineId: string) => {
+  const createWorkspace = guard("Create workspace", async (machineId: string) => {
     const response = await api.createWorkspace(machineId);
     await refresh(response.state);
-  };
+  });
 
   const activateWorkspaceLink = (
     event: React.MouseEvent<HTMLAnchorElement>,
@@ -674,45 +470,45 @@ export function App() {
     await writeBrowserClipboard(url.toString());
   };
 
-  const createTab = async (machineId: string) => {
+  const createTab = guard("Create tab", async (machineId: string) => {
     if (!activeWorkspace) return;
     const response = await api.createTab(activeWorkspace.id, machineId);
     await refresh(response.state);
-  };
+  });
 
-  const splitPane = async (paneId: string, direction: SplitDirection, machineId?: string) => {
+  const splitPane = guard("Split pane", async (paneId: string, direction: SplitDirection, machineId?: string) => {
     if (!activeTab) return;
     const response = await api.splitPane(activeTab.id, paneId, direction, machineId);
     await refresh(response.state);
-  };
+  });
 
-  const resizeSplit = async (path: string, ratio: number) => {
+  const resizeSplit = guard("Resize split", async (path: string, ratio: number) => {
     if (!activeTab) return;
     const response = await api.updateSplitRatio(activeTab.id, path, ratio);
     await refresh(response.state);
-  };
+  });
 
-  const closePane = async (paneId: string) => {
+  const closePane = guard("Close pane", async (paneId: string) => {
     if (!activeTab) return;
     const response = await api.closePane(activeTab.id, paneId);
     await refresh(response.state);
-  };
+  });
 
-  const closeActiveTab = async () => {
+  const closeActiveTab = guard("Close tab", async () => {
     if (!activeWorkspace || !activeTab) return;
     const response = await api.closeTab(activeWorkspace.id, activeTab.id);
     await refresh(response.state);
-  };
+  });
 
-  const closeActiveWorkspace = async () => {
+  const closeActiveWorkspace = guard("Close workspace", async () => {
     if (!state || !activeWorkspace) return;
     const response = await api.closeWorkspace(activeWorkspace.id);
     await refresh(response.state);
-  };
+  });
 
-  const sendPaneInput = async (paneId: string, data: string) => {
+  const sendPaneInput = guard("Send input", async (paneId: string, data: string) => {
     await refresh(await api.sendPaneInput(paneId, data));
-  };
+  });
 
   const activateWorkspaceAt = (index: number) => {
     if (!state) return;
@@ -759,95 +555,34 @@ export function App() {
     await refresh(await api.activatePane(latest.tabId, latest.paneId));
   };
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase();
-      const primary = event.metaKey || event.ctrlKey;
-      const primaryOnly = primary && !event.altKey && !(event.metaKey && event.ctrlKey);
-      const primaryWithAlt = primary && event.altKey && !(event.metaKey && event.ctrlKey);
+  const openCommandPalette = () => {
+    setCommandPaletteQuery("");
+    setCommandPaletteOpen(true);
+  };
 
-      const run = (action: () => void | Promise<void>) => {
-        event.preventDefault();
-        event.stopPropagation();
-        void action();
-      };
-
-      if (!settingsOpen && !commandPaletteOpen && primaryOnly && key === "k") {
-        run(openCommandPalette);
-        return;
-      }
-
-      if (settingsOpen || commandPaletteOpen) return;
-      const target = event.target as HTMLElement | null;
-      if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
-      const digit = /^[1-9]$/.test(key) ? Number(key) : null;
-
-      if (primaryOnly && key === "b") {
-        run(toggleSidebar);
-        return;
-      }
-
-      if (primaryOnly && !event.shiftKey && key === "n") {
-        run(() => createWorkspace(newMachineId));
-        return;
-      }
-
-      if (primaryOnly && !event.shiftKey && key === "t") {
-        run(() => createTab(newMachineId));
-        return;
-      }
-
-      if (primaryOnly && key === "w") {
-        run(() => (event.shiftKey ? closeActiveWorkspace() : closeActiveTab()));
-        return;
-      }
-
-      if (primaryOnly && key === "d") {
-        const pane = activeTab?.panes.find((candidate) => candidate.id === activeTab.activePaneId);
-        if (!pane) return;
-        run(() => splitPane(pane.id, event.shiftKey ? "horizontal" : "vertical"));
-        return;
-      }
-
-      if (primaryWithAlt && key.startsWith("arrow")) {
-        run(() => focusPaneRelative(key === "arrowleft" || key === "arrowup" ? -1 : 1));
-        return;
-      }
-
-      if (((event.metaKey && event.ctrlKey) || (event.altKey && event.ctrlKey && !event.metaKey)) && (event.key === "]" || event.key === "[")) {
-        run(() => activateWorkspaceRelative(event.key === "]" ? 1 : -1));
-        return;
-      }
-
-      if (primaryOnly && event.shiftKey && (event.key === "]" || event.key === "[")) {
-        run(() => activateTabRelative(event.key === "]" ? 1 : -1));
-        return;
-      }
-
-      if (event.ctrlKey && !event.metaKey && !event.altKey && key === "tab") {
-        run(() => activateTabRelative(event.shiftKey ? -1 : 1));
-        return;
-      }
-
-      if (primaryOnly && digit !== null) {
-        if (!state) return;
-        run(() => activateWorkspaceAt(digit === 9 ? state.workspaces.length - 1 : digit - 1));
-        return;
-      }
-
-      if (event.altKey && !event.metaKey && digit !== null) {
-        if (!activeWorkspace) return;
-        run(() => activateTabAt(digit === 9 ? activeWorkspace.tabs.length - 1 : digit - 1));
-        return;
-      }
-
-      if (primaryOnly && event.shiftKey && key === "u") {
-        run(jumpLatestUnread);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown, { capture: true });
-    return () => window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [activeTab, activeWorkspace, state, newMachineId, notifications, settingsOpen, commandPaletteOpen]);
+  const activePaneForSplit = activeTab?.panes.find((candidate) => candidate.id === activeTab.activePaneId);
+  useKeyboardShortcuts({
+    modalOpen: settingsOpen || commandPaletteOpen,
+    openCommandPalette,
+    toggleSidebar,
+    createWorkspace: () => createWorkspace(newMachineId),
+    createTab: () => createTab(newMachineId),
+    closeActiveTab,
+    closeActiveWorkspace,
+    splitActivePane: activePaneForSplit
+      ? (direction) => splitPane(activePaneForSplit.id, direction)
+      : null,
+    focusPaneRelative,
+    activateWorkspaceRelative,
+    activateTabRelative,
+    activateWorkspaceAtDigit: state
+      ? (digit) => activateWorkspaceAt(digit === 9 ? state.workspaces.length - 1 : digit - 1)
+      : null,
+    activateTabAtDigit: activeWorkspace
+      ? (digit) => activateTabAt(digit === 9 ? activeWorkspace.tabs.length - 1 : digit - 1)
+      : null,
+    jumpLatestUnread,
+  });
 
   const enableBrowserNotifications = async () => {
     if (!("Notification" in window) || Notification.permission !== "default") return;
@@ -858,18 +593,6 @@ export function App() {
     if (!activeWorkspace) return;
     await refresh(await api.markWorkspaceNotificationsRead(activeWorkspace.id));
   };
-
-  const openCommandPalette = () => {
-    setCommandPaletteQuery("");
-    setCommandPaletteOpen(true);
-  };
-
-  const sendEventSocketMessage = useCallback((message: unknown): boolean => {
-    const socket = eventsSocketRef.current;
-    if (socket?.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify(message));
-    return true;
-  }, []);
 
   const requestStream = useCallback(
     (machineId: string, requestId: string, ttlMs: number) => {
@@ -1166,6 +889,7 @@ export function App() {
     unreadNotifications.length,
   ]);
 
+  if (authRequired) return <LoginView onAuthenticated={() => void loadBootstrap()} />;
   if (error) return <div className="load-state">wmux failed to load: {error}</div>;
   if (!state) return <div className="load-state">Loading wmux...</div>;
 
@@ -1181,6 +905,7 @@ export function App() {
 
   return (
     <main className={appClassName} style={appStyle}>
+      <Toasts toasts={toasts} dismissToast={dismissToast} />
       {openTuiMode ? (
         <OpenTuiSidebar
           targetMachineId={newMachineId}
@@ -1349,7 +1074,7 @@ export function App() {
               type="button"
               className="mobile-sidebar-backdrop"
               aria-label="Close navigation"
-              onClick={() => setSidebarCollapsed(true)}
+              onClick={collapseSidebar}
             />
           ) : null}
         </>
@@ -1574,7 +1299,7 @@ export function App() {
                       const response = await api.closePane(view.tabId, paneId);
                       await refresh(response.state);
                     }}
-                    onDismissMedia={(mediaId) => setMediaItems((items) => items.filter((item) => item.id !== mediaId))}
+                    onDismissMedia={dismissMedia}
                     runsByPaneId={latestRunByPaneId}
                   />
                 </div>
@@ -1823,26 +1548,6 @@ const formatBytes = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 };
 
-const writeBrowserClipboard = async (text: string): Promise<void> => {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.top = "0";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) throw new Error("clipboard write blocked");
-};
 
 function CommandPalette({
   commands,
@@ -2397,15 +2102,6 @@ const clampScrollbackRows = (value: number): number => {
   return Math.min(200_000, Math.max(1_000, Math.round(numeric)));
 };
 
-const loadSidebarWidth = (): number => {
-  const stored = window.localStorage.getItem(sidebarWidthStorageKey);
-  const numeric = stored === null ? defaultSidebarWidth : Number(stored);
-  return clampSidebarWidth(Number.isFinite(numeric) ? numeric : defaultSidebarWidth);
-};
-
-const clampSidebarWidth = (value: number): number =>
-  Math.min(maxSidebarWidth, Math.max(minSidebarWidth, Math.round(value)));
-
 const cleanAlias = (value: string): string => value.replace(/\s+/g, " ").trim().slice(0, 40);
 
 const mountedTabViewKey = (workspaceId: string, tabId: string): string => `${workspaceId}:${tabId}`;
@@ -2413,66 +2109,14 @@ const mountedTabViewKey = (workspaceId: string, tabId: string): string => `${wor
 const sameStringList = (first: string[], second: string[]): boolean =>
   first.length === second.length && first.every((value, index) => value === second[index]);
 
-const workspaceTabPath = (workspaceId: string, tabId: string): string =>
-  `/workspaces/${encodeURIComponent(workspaceId)}/tabs/${encodeURIComponent(tabId)}`;
-
-const parseRouteTarget = (): { workspaceId: string; tabId?: string } | null => {
-  const match = window.location.pathname.match(/^\/workspaces\/([^/]+)(?:\/tabs\/([^/]+))?\/?$/);
-  if (!match) return null;
-  return {
-    workspaceId: decodeURIComponent(match[1]),
-    tabId: match[2] ? decodeURIComponent(match[2]) : undefined,
-  };
-};
-
-const findWorkspaceTab = (
-  payload: BootstrapPayload,
-  workspaceId: string,
-  tabId?: string,
-): { workspace: BootstrapPayload["workspaces"][number]; tab: SurfaceTab } | null => {
-  const workspace = payload.workspaces.find((candidate) => candidate.id === workspaceId);
-  if (!workspace) return null;
-  const tab = tabId
-    ? workspace.tabs.find((candidate) => candidate.id === tabId)
-    : workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId) ?? workspace.tabs[0];
-  return tab ? { workspace, tab } : null;
-};
-
-const activateWorkspaceTabInState = (payload: BootstrapPayload, workspaceId: string, tabId: string): BootstrapPayload => {
-  const target = findWorkspaceTab(payload, workspaceId, tabId);
-  if (!target) return payload;
-  const nextPayload = markWorkspaceNotificationsReadInState(payload, workspaceId);
-  if (nextPayload.activeWorkspaceId === workspaceId && target.workspace.activeTabId === tabId) return nextPayload;
-  return {
-    ...nextPayload,
-    activeWorkspaceId: workspaceId,
-    workspaces: nextPayload.workspaces.map((workspace) =>
-      workspace.id === workspaceId ? { ...workspace, activeTabId: tabId } : workspace,
-    ),
-  };
-};
-
-const markWorkspaceNotificationsReadInState = (payload: BootstrapPayload, workspaceId: string): BootstrapPayload => {
-  let changed = false;
-  const notifications = payload.notifications.map((notification) => {
-    if (notification.workspaceId !== workspaceId || notification.read) return notification;
-    changed = true;
-    return { ...notification, read: true };
-  });
-  return changed ? { ...payload, notifications } : payload;
+const describeActionError = (error: unknown): string => {
+  if (error instanceof UnauthorizedError) return "access token rejected — reopen the URL with ?token=…";
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 160 ? `${message.slice(0, 157)}…` : message;
 };
 
 const activateRouteTarget = async (payload: BootstrapPayload): Promise<BootstrapPayload> => {
-  return applyRouteTargetToState(payload, parseRouteTarget());
-};
-
-const applyRouteTargetToState = (
-  payload: BootstrapPayload,
-  target: { workspaceId: string; tabId?: string } | null,
-): BootstrapPayload => {
-  if (!target) return payload;
-  const route = findWorkspaceTab(payload, target.workspaceId, target.tabId);
-  return route ? activateWorkspaceTabInState(payload, route.workspace.id, route.tab.id) : payload;
+  return applyRouteTargetToState(payload, parseRouteTarget(window.location.pathname));
 };
 
 const countUnreadBy = (
@@ -2526,15 +2170,6 @@ const groupMediaByPane = (items: TerminalMedia[]): Map<string, TerminalMedia[]> 
     grouped.set(item.paneId, [...(grouped.get(item.paneId) ?? []), item]);
   }
   return grouped;
-};
-
-const showBrowserNotification = (notification: TerminalNotification): void => {
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
-  const title = notification.subtitle ? `${notification.title}: ${notification.subtitle}` : notification.title;
-  new Notification(title, {
-    body: notification.body,
-    tag: notification.id,
-  });
 };
 
 const modulo = (value: number, length: number): number => ((value % length) + length) % length;

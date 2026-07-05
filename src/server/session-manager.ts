@@ -23,6 +23,27 @@ interface SocketState {
 
 type ManagedSession = PtySession | WindowsAgentSession;
 
+// A session that exits cleanly (code 0) after running at least this long is
+// treated as a deliberate shell exit, which collapses the pane/tab/workspace.
+// Anything faster or with a non-zero code is treated as a spawn/connection
+// failure (e.g. an unreachable SSH host) and the pane is preserved as "exited"
+// so a transient failure never destroys persisted workspace state.
+const MIN_DELIBERATE_EXIT_UPTIME_MS = 3000;
+
+/**
+ * A deliberate shell exit (which collapses the pane/tab/workspace) is a clean
+ * exit code after the session ran long enough to be a real session. Everything
+ * else — non-zero codes, near-instant deaths — is a spawn/connection failure
+ * and must preserve the pane.
+ */
+export const isDeliberateExit = (code: number | null, uptimeMs: number): boolean =>
+  code === 0 && uptimeMs >= MIN_DELIBERATE_EXIT_UPTIME_MS;
+
+// Pause the PTY when a consumer socket's outbound buffer exceeds the high-water
+// mark; resume once every consumer drains below the low-water mark.
+const BACKPRESSURE_HIGH_WATER = 4 * 1024 * 1024;
+const BACKPRESSURE_LOW_WATER = 1 * 1024 * 1024;
+
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private sockets = new Map<string, Set<WebSocket>>();
@@ -30,10 +51,13 @@ export class SessionManager {
   private resizeOwners = new Map<string, WebSocket>();
   private socketState = new Map<WebSocket, SocketState>();
   private ignoredSessionExits = new WeakSet<ManagedSession>();
+  private pausedSessions = new Map<string, ReturnType<typeof setInterval>>();
+  private durableRefreshTimers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly state: StateStore,
     private readonly machines: MachineConfig[],
+    private readonly accessToken = "",
   ) {}
 
   attach(paneId: string, socket: WebSocket, cols: number, rows: number): void {
@@ -104,7 +128,13 @@ export class SessionManager {
       return;
     }
     const size = normalizeSize(cols, rows);
-    const session = this.ensureSession(pane, size.cols, size.rows);
+    let session: ManagedSession;
+    try {
+      session = this.ensureSession(pane, size.cols, size.rows);
+    } catch (error) {
+      socket.close(1011, error instanceof Error ? error.message : "session start failed");
+      return;
+    }
     if (!this.outputWatchers.has(paneId)) this.outputWatchers.set(paneId, new Set());
     this.outputWatchers.get(paneId)?.add(socket);
 
@@ -180,6 +210,7 @@ export class SessionManager {
       WMUX_TAB_ID: context?.tab.id ?? "",
       WMUX_TAB_TITLE: context?.tab.title ?? "",
       WMUX_PANE_ID: pane.id,
+      WMUX_TOKEN: this.accessToken,
       WMUX_START_CWD: pane.cwd ?? "",
       WMUX_STREAM_HOST: streamHost,
       WMUX_STREAM_PATH: streamPath,
@@ -190,10 +221,14 @@ export class SessionManager {
     const session = shouldUseWindowsAgent(machine)
       ? new WindowsAgentSession(pane, machine, cols, rows, sessionEnv)
       : new PtySession(pane, machine, cols, rows, sessionEnv);
+    const startedAt = Date.now();
     this.sessions.set(pane.id, session);
     this.state.updatePane(pane.id, { status: "running", exitCode: undefined, title: pane.title });
 
-    session.on("output", (data) => this.broadcast(pane.id, { type: "output", paneId: pane.id, data }));
+    session.on("output", (data) => {
+      this.broadcast(pane.id, { type: "output", paneId: pane.id, data });
+      this.applyBackpressure(pane.id, session);
+    });
     session.on("title", (title) => {
       this.state.updatePane(pane.id, { title });
       this.broadcast(pane.id, { type: "title", paneId: pane.id, title });
@@ -208,6 +243,16 @@ export class SessionManager {
       this.resizeOwners.delete(pane.id);
       const context = this.state.findPaneContext(pane.id);
       if (!context) return;
+
+      const uptimeMs = Date.now() - startedAt;
+      if (!isDeliberateExit(code, uptimeMs)) {
+        // Spawn/connection failure or a very fast exit: preserve the pane so a
+        // flaky SSH host or transient error never deletes the workspace. The
+        // pane is re-spawned when a client next attaches.
+        this.state.updatePane(pane.id, { status: "exited", exitCode: code ?? null });
+        return;
+      }
+
       if (context.tab.panes.length > 1) {
         this.state.removePane(pane.id);
       } else if (context.workspace.tabs.length > 1) {
@@ -229,6 +274,43 @@ export class SessionManager {
     }
   }
 
+  // Flow control: a fast PTY (e.g. `yes`) feeding a slow client would grow the
+  // outbound socket buffer without bound. Pause the PTY when any consumer's
+  // buffer crosses the high-water mark, and resume once every buffer drains.
+  private applyBackpressure(paneId: string, session: ManagedSession): void {
+    if (this.pausedSessions.has(paneId)) return;
+    if (this.maxBufferedFor(paneId) <= BACKPRESSURE_HIGH_WATER) return;
+    session.pause();
+    const timer = setInterval(() => {
+      if (this.maxBufferedFor(paneId) > BACKPRESSURE_LOW_WATER && !session.isExited) return;
+      clearInterval(timer);
+      this.pausedSessions.delete(paneId);
+      if (!session.isExited) session.resume();
+    }, 50);
+    timer.unref?.();
+    this.pausedSessions.set(paneId, timer);
+  }
+
+  private maxBufferedFor(paneId: string): number {
+    let max = 0;
+    for (const socket of this.sockets.get(paneId) ?? []) max = Math.max(max, socket.bufferedAmount);
+    for (const socket of this.outputWatchers.get(paneId) ?? []) max = Math.max(max, socket.bufferedAmount);
+    return max;
+  }
+
+  /** Kill every live session and clear timers. Called on process shutdown. */
+  disposeAll(): void {
+    for (const timer of this.durableRefreshTimers) clearTimeout(timer);
+    this.durableRefreshTimers.clear();
+    for (const timer of this.pausedSessions.values()) clearInterval(timer);
+    this.pausedSessions.clear();
+    for (const session of this.sessions.values()) {
+      this.ignoredSessionExits.add(session);
+      session.kill();
+    }
+    this.sessions.clear();
+  }
+
   private replayOutputFor(pane: PaneState, session: ManagedSession): string {
     return this.shouldUseDurableClientRefresh(pane) ? "" : session.replayOutput;
   }
@@ -236,11 +318,14 @@ export class SessionManager {
   private scheduleDurableClientRefresh(pane: PaneState, socket: WebSocket): void {
     if (!this.shouldUseDurableClientRefresh(pane)) return;
     for (const delayMs of [120, 500]) {
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        this.durableRefreshTimers.delete(timer);
         if (socket.readyState !== socket.OPEN) return;
         const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
         if (machine) refreshDurableSessionClient(machine, pane.id);
       }, delayMs);
+      timer.unref?.();
+      this.durableRefreshTimers.add(timer);
     }
   }
 

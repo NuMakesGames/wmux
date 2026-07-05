@@ -1,3 +1,4 @@
+import { loadAuthConfig } from "./auth.js";
 import { isAllowedBindHost } from "./bind.js";
 import { loadConfig } from "./config.js";
 import { createHttpServer } from "./http.js";
@@ -22,13 +23,36 @@ const main = async (): Promise<void> => {
   }
 
   const config = loadConfig();
+  const auth = loadAuthConfig();
   const state = new StateStore(config.machines);
   const settings = new SettingsStore();
-  const sessionManager = new SessionManager(state, config.machines);
-  const server = await createHttpServer(host, state, config.machines, sessionManager, settings, { dev });
+  const sessionManager = new SessionManager(state, config.machines, auth.token);
+  const server = await createHttpServer(host, state, config.machines, sessionManager, settings, { dev, auth });
   server.listen(port, host, () => {
     console.log(`wmux listening on http://${host}:${port}${dev ? " (dev)" : ""}`);
+    if (auth.enabled) {
+      console.log(`wmux: access requires a token. Open http://${host}:${port}/?token=${auth.token} once per browser.`);
+    } else {
+      console.log("wmux: authentication disabled (WMUX_DISABLE_AUTH=1); relying on network boundary only.");
+    }
   });
+
+  let shuttingDown = false;
+  const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`wmux: received ${signal}, shutting down`);
+    // Persist pending state and reap non-durable child processes so a restart
+    // doesn't orphan raw PTYs / ssh clients or lose debounced writes.
+    state.flush();
+    sessionManager.disposeAll();
+    server.close(() => process.exit(0));
+    // Backstop if connections keep the server open past the grace period.
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => shutdown(signal));
+  }
 };
 
 main().catch((error) => {

@@ -10,6 +10,25 @@ import uuid
 import urllib.request
 
 
+def _wmux_token():
+    token = os.environ.get("WMUX_TOKEN")
+    if token:
+        return token
+    # Fall back to the server's local token file so hooks in existing/durable
+    # local panes authenticate even when WMUX_TOKEN was never in their env.
+    path = os.environ.get("WMUX_TOKEN_PATH") or os.path.expanduser("~/.wmux/token")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _wmux_auth_headers():
+    token = _wmux_token()
+    return {"authorization": "Bearer " + token} if token else {}
+
+
 def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -22,7 +41,7 @@ def post_json(url, payload):
     request = urllib.request.Request(
         url.rstrip("/") + "/api/run-events",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **_wmux_auth_headers()},
         method="POST",
     )
     try:

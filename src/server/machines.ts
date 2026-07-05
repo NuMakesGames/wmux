@@ -38,39 +38,53 @@ export const defaultShell = (): string => {
   return process.env.SHELL ?? "/bin/bash";
 };
 
-export const buildSpawnSpec = (
-  machine: MachineConfig,
-  cols: number,
-  rows: number,
-  extraEnv: Record<string, string> = {},
-): PtySpawnSpec => {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  env.TERM = DEFAULT_TERM;
-  env.COLORTERM = "truecolor";
-  env.WMUX_MACHINE_ID = machine.id;
-  env.WMUX_MACHINE_NAME = machine.name;
-  env.PATH = `${process.cwd()}/scripts${path.delimiter}${env.PATH ?? ""}`;
-  for (const [key, value] of Object.entries(extraEnv)) {
-    env[key] = value;
-  }
+/** Everything a backend needs to build a spawn spec, computed once up front. */
+interface SpawnContext {
+  cols: number;
+  rows: number;
+  extraEnv: Record<string, string>;
+  env: Record<string, string>;
+  /** cwd honoring WMUX_START_CWD (used by pty/durable/command transports). */
+  startCwd: string;
+  /** cwd ignoring WMUX_START_CWD (used by the powershell WSMan transport). */
+  configuredCwd: string;
+}
 
-  const configuredCwd = machine.cwd ?? os.homedir();
-  const startCwd = sanitizeCwd(extraEnv.WMUX_START_CWD) ?? configuredCwd;
-  if (machine.command?.length) {
-    return {
-      file: machine.command[0],
-      args: machine.command.slice(1),
-      cwd: startCwd,
-      env,
-      title: machine.name,
-      trackProcessTitle: true,
-    };
-  }
+/**
+ * A transport backend owns the per-kind behavior that used to be re-derived as
+ * scattered `machine.kind === … && backend === …` branches. `resolveBackend`
+ * performs the single kind/command dispatch; every call site goes through it.
+ */
+interface Backend {
+  spawnSpec(machine: MachineConfig, ctx: SpawnContext): PtySpawnSpec;
+  readCwd(machine: MachineConfig, paneId: string): string | undefined;
+  canRefreshClient(machine: MachineConfig): boolean;
+  refreshClient(machine: MachineConfig, paneId: string): boolean;
+  dispose(machine: MachineConfig, paneId: string): void;
+}
 
-  if (machine.kind === "ssh") {
+// Defaults for transports that are not restart-durable.
+const nonDurableBackend = {
+  readCwd: (): undefined => undefined,
+  canRefreshClient: (): boolean => false,
+  refreshClient: (): boolean => false,
+  dispose: (): void => undefined,
+};
+
+const commandBackend: Backend = {
+  ...nonDurableBackend,
+  spawnSpec: (machine, { startCwd, env }) => ({
+    file: machine.command![0],
+    args: machine.command!.slice(1),
+    cwd: startCwd,
+    env,
+    title: machine.name,
+    trackProcessTitle: true,
+  }),
+};
+
+const sshBackend: Backend = {
+  spawnSpec: (machine, { cols, rows, extraEnv, env, startCwd }) => {
     const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
     if (!target) throw new Error(`Machine ${machine.id} is missing host`);
     const args = ["-t"];
@@ -100,9 +114,16 @@ export const buildSpawnSpec = (
       });
     args.push(`/bin/sh -lc ${shellQuote(remoteCommand)}`);
     return { file: "ssh", args, cwd: os.homedir(), env, title: machine.name, trackProcessTitle: false };
-  }
+  },
+  readCwd: (machine, paneId) => durableSessionCwdImpl(machine, paneId),
+  canRefreshClient: () => false,
+  refreshClient: () => false,
+  dispose: (machine, paneId) => disposeDurableSessionImpl(machine, paneId),
+};
 
-  if (machine.kind === "powershell") {
+const powershellBackend: Backend = {
+  ...nonDurableBackend,
+  spawnSpec: (machine, { env, configuredCwd }) => {
     if (!machine.host) throw new Error(`Machine ${machine.id} is missing host`);
     const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
     const args = [
@@ -112,9 +133,12 @@ export const buildSpawnSpec = (
       `Enter-PSSession -ComputerName ${JSON.stringify(machine.host)}`,
     ];
     return { file: shell, args, cwd: configuredCwd, env, title: machine.name, trackProcessTitle: true };
-  }
+  },
+};
 
-  if (machine.kind === "powershell-ssh") {
+const powershellSshBackend: Backend = {
+  ...nonDurableBackend,
+  spawnSpec: (machine, { extraEnv, env, startCwd }) => {
     if (!machine.host) throw new Error(`Machine ${machine.id} is missing host`);
     const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
     const args = ["-tt"];
@@ -133,45 +157,102 @@ export const buildSpawnSpec = (
       encodePowerShellCommand(bootstrapCommand),
     );
     return { file: "ssh", args, cwd: os.homedir(), env, title: machine.name, trackProcessTitle: false };
-  }
+  },
+};
 
-  if (machine.kind === "service") {
+const serviceBackend: Backend = {
+  ...nonDurableBackend,
+  spawnSpec: () => {
     throw new Error("Remote wmux service machines are not implemented yet");
-  }
+  },
+};
 
-  const backend = machine.sessionBackend ?? "auto";
-  if (machine.kind === "local" && backend !== "pty") {
-    const sessionName = durableSessionName(extraEnv.WMUX_PANE_ID);
-    const innerScript = durableShellScript({
-      backend,
-      sessionName,
-      cwd: startCwd,
-      cols,
-      rows,
-      shellCommand: interactiveShellCommand(shellQuote(machine.shell ?? defaultShell()), sessionName),
-      extraEnv,
-      helperPathExport: `export PATH=${shellQuote(`${process.cwd()}/scripts`)}":$PATH";`,
-      useSystemdScope: false,
-    });
-    const launchScript = localScopeScript(sessionName, innerScript);
+const localBackend: Backend = {
+  spawnSpec: (machine, { cols, rows, extraEnv, env, startCwd }) => {
+    const backend = machine.sessionBackend ?? "auto";
+    if (backend !== "pty") {
+      const sessionName = durableSessionName(extraEnv.WMUX_PANE_ID);
+      const innerScript = durableShellScript({
+        backend,
+        sessionName,
+        cwd: startCwd,
+        cols,
+        rows,
+        shellCommand: interactiveShellCommand(shellQuote(machine.shell ?? defaultShell()), sessionName),
+        extraEnv,
+        helperPathExport: `export PATH=${shellQuote(`${process.cwd()}/scripts`)}":$PATH";`,
+        useSystemdScope: false,
+      });
+      const launchScript = localScopeScript(sessionName, innerScript);
+      return {
+        file: "/bin/sh",
+        args: ["-lc", launchScript],
+        cwd: startCwd,
+        env,
+        title: machine.name,
+        trackProcessTitle: false,
+      };
+    }
     return {
-      file: "/bin/sh",
-      args: ["-lc", launchScript],
+      file: machine.shell ?? defaultShell(),
+      args: [],
       cwd: startCwd,
       env,
-      title: machine.name,
-      trackProcessTitle: false,
+      title: path.basename(machine.shell ?? defaultShell()),
+      trackProcessTitle: true,
     };
-  }
+  },
+  readCwd: (machine, paneId) => durableSessionCwdImpl(machine, paneId),
+  canRefreshClient: (machine) => {
+    const backend = machine.sessionBackend ?? "auto";
+    return !machine.command?.length && (backend === "auto" || backend === "tmux");
+  },
+  refreshClient: (machine, paneId) => refreshDurableSessionClientImpl(machine, paneId),
+  dispose: (machine, paneId) => disposeDurableSessionImpl(machine, paneId),
+};
 
-  return {
-    file: machine.shell ?? defaultShell(),
-    args: [],
-    cwd: startCwd,
-    env,
-    title: path.basename(machine.shell ?? defaultShell()),
-    trackProcessTitle: true,
-  };
+const resolveBackend = (machine: MachineConfig): Backend => {
+  if (machine.command?.length) return commandBackend;
+  switch (machine.kind) {
+    case "ssh":
+      return sshBackend;
+    case "powershell":
+      return powershellBackend;
+    case "powershell-ssh":
+      return powershellSshBackend;
+    case "service":
+      return serviceBackend;
+    default:
+      return localBackend;
+  }
+};
+
+const buildSpawnEnv = (machine: MachineConfig, extraEnv: Record<string, string>): Record<string, string> => {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  env.TERM = DEFAULT_TERM;
+  env.COLORTERM = "truecolor";
+  env.WMUX_MACHINE_ID = machine.id;
+  env.WMUX_MACHINE_NAME = machine.name;
+  env.PATH = `${process.cwd()}/scripts${path.delimiter}${env.PATH ?? ""}`;
+  for (const [key, value] of Object.entries(extraEnv)) {
+    env[key] = value;
+  }
+  return env;
+};
+
+export const buildSpawnSpec = (
+  machine: MachineConfig,
+  cols: number,
+  rows: number,
+  extraEnv: Record<string, string> = {},
+): PtySpawnSpec => {
+  const env = buildSpawnEnv(machine, extraEnv);
+  const configuredCwd = machine.cwd ?? os.homedir();
+  const startCwd = sanitizeCwd(extraEnv.WMUX_START_CWD) ?? configuredCwd;
+  return resolveBackend(machine).spawnSpec(machine, { cols, rows, extraEnv, env, startCwd, configuredCwd });
 };
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
@@ -433,7 +514,10 @@ esac
 `;
 };
 
-export const readDurableSessionCwd = (machine: MachineConfig, paneId: string): string | undefined => {
+export const readDurableSessionCwd = (machine: MachineConfig, paneId: string): string | undefined =>
+  resolveBackend(machine).readCwd(machine, paneId);
+
+const durableSessionCwdImpl = (machine: MachineConfig, paneId: string): string | undefined => {
   const backend = machine.sessionBackend ?? "auto";
   if (backend === "screen" || backend === "pty" || backend === "agent" || machine.command?.length) return undefined;
   if (machine.kind !== "local" && machine.kind !== "ssh") return undefined;
@@ -451,12 +535,13 @@ export const readDurableSessionCwd = (machine: MachineConfig, paneId: string): s
   return sanitizeCwd(result.stdout.split(/\r?\n/)[0]);
 };
 
-export const canRefreshDurableSessionClient = (machine: MachineConfig): boolean => {
-  const backend = machine.sessionBackend ?? "auto";
-  return machine.kind === "local" && !machine.command?.length && (backend === "auto" || backend === "tmux");
-};
+export const canRefreshDurableSessionClient = (machine: MachineConfig): boolean =>
+  resolveBackend(machine).canRefreshClient(machine);
 
-export const refreshDurableSessionClient = (machine: MachineConfig, paneId: string): boolean => {
+export const refreshDurableSessionClient = (machine: MachineConfig, paneId: string): boolean =>
+  resolveBackend(machine).refreshClient(machine, paneId);
+
+const refreshDurableSessionClientImpl = (machine: MachineConfig, paneId: string): boolean => {
   if (!canRefreshDurableSessionClient(machine)) return false;
   const sessionName = durableSessionName(paneId);
   const clients = spawnSync("tmux", ["list-clients", "-t", sessionName, "-F", "#{client_name}"], {
@@ -587,7 +672,10 @@ const localScopeScript = (sessionName: string, innerScript: string): string => {
   return `if command -v systemd-run >/dev/null 2>&1 && [ -n "\${XDG_RUNTIME_DIR:-}" ]; then ${scoped} && exit $?; fi; exec /bin/sh -lc ${shellQuote(innerScript)}`;
 };
 
-export const disposeDurableSession = (machine: MachineConfig, paneId: string): void => {
+export const disposeDurableSession = (machine: MachineConfig, paneId: string): void =>
+  resolveBackend(machine).dispose(machine, paneId);
+
+const disposeDurableSessionImpl = (machine: MachineConfig, paneId: string): void => {
   const backend = machine.sessionBackend ?? "auto";
   if (backend === "pty" || backend === "agent" || machine.command?.length) return;
   if (machine.kind !== "local" && machine.kind !== "ssh") return;
@@ -803,7 +891,7 @@ if args.tab:
 request = urllib.request.Request(
     args.url.rstrip("/") + "/api/media",
     data=json.dumps(payload).encode("utf-8"),
-    headers={"content-type": "application/json"},
+    headers={"content-type": "application/json", **({"authorization": "Bearer " + os.environ["WMUX_TOKEN"]} if os.environ.get("WMUX_TOKEN") else {})},
     method="POST",
 )
 with urllib.request.urlopen(request, timeout=15):
@@ -838,7 +926,7 @@ if args.tab:
 request = urllib.request.Request(
     args.url.rstrip("/") + "/api/notifications",
     data=json.dumps(payload).encode("utf-8"),
-    headers={"content-type": "application/json"},
+    headers={"content-type": "application/json", **({"authorization": "Bearer " + os.environ["WMUX_TOKEN"]} if os.environ.get("WMUX_TOKEN") else {})},
     method="POST",
 )
 with urllib.request.urlopen(request, timeout=15):
@@ -880,7 +968,7 @@ else:
 request = urllib.request.Request(
     args.url.rstrip("/") + path,
     data=json.dumps(payload).encode("utf-8"),
-    headers={"content-type": "application/json"},
+    headers={"content-type": "application/json", **({"authorization": "Bearer " + os.environ["WMUX_TOKEN"]} if os.environ.get("WMUX_TOKEN") else {})},
     method="POST",
 )
 with urllib.request.urlopen(request, timeout=15):
@@ -1137,7 +1225,7 @@ const localBackendDetail = (machine: MachineConfig): string => {
   return `${backend} backend; ${tmux}; ${screen}`;
 };
 
-const backendDetail = (machine: MachineConfig): string => {
+export const backendDetail = (machine: MachineConfig): string => {
   const backend = machine.sessionBackend ?? "auto";
   if (machine.kind === "ssh") return `SSH client; ${backend} durable backend on attach`;
   if (machine.kind === "powershell") return "PowerShell remoting; no durable backend";

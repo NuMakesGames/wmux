@@ -1,5 +1,5 @@
 import { ExternalLink, ScreenShare, X } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { Fragment, useEffect, useMemo } from "react";
 import type { MachineStatus, StreamStatus } from "./types";
 
 interface ScreenStreamViewerProps {
@@ -13,27 +13,63 @@ interface ScreenStreamViewerProps {
 const STREAM_REQUEST_TTL_MS = 20_000;
 const STREAM_REQUEST_HEARTBEAT_MS = 5_000;
 
+// All provider-specific UI in one place; adding a stream provider means adding
+// one descriptor here plus a StreamProviderBackend on the server.
+interface StreamProviderUi {
+  frameUrl: (stream: StreamStatus) => string;
+  frameTitle: string;
+  openTitle: string;
+  stateLabel: (stream: StreamStatus) => string;
+  offlineTitle: (stream: StreamStatus) => string;
+  offlineHint: (machineName: string) => string;
+  hint: (stream: StreamStatus) => Array<{ label: string; value: string }>;
+}
+
+const mediaMtxUi: StreamProviderUi = {
+  frameUrl: (stream) => `${stream.openUrl}?controls=false&muted=true&autoplay=true&playsInline=true`,
+  frameTitle: "WebRTC stream",
+  openTitle: "Open MediaMTX stream",
+  stateLabel: (stream) => (stream.live ? "live" : stream.requested ? "starting agent" : "requesting stream"),
+  offlineTitle: (stream) => (stream.requested ? "Starting pixel stream" : "No active pixel stream"),
+  offlineHint: (machineName) =>
+    `Keep wmux-stream-agent-service running on ${machineName}; capture starts only while this dialog is open.`,
+  hint: (stream) =>
+    stream.publishRtspUrl && stream.publishWhipUrl
+      ? [
+          { label: "RTSP publish", value: stream.publishRtspUrl },
+          { label: "WHIP publish", value: stream.publishWhipUrl },
+        ]
+      : [],
+};
+
+const moonlightGatewayUi: StreamProviderUi = {
+  frameUrl: (stream) => stream.openUrl,
+  frameTitle: "Moonlight gateway",
+  openTitle: "Open Moonlight gateway",
+  stateLabel: (stream) => (stream.live ? "gateway ready" : stream.reason ? "upstream offline" : "gateway offline"),
+  offlineTitle: (stream) => (stream.reason ? "Moonlight upstream unavailable" : "Moonlight gateway unavailable"),
+  offlineHint: (machineName) =>
+    `Run wmux-moonlight-gateway for ${machineName}; Sunshine and the gateway own the remote-control stream.`,
+  hint: (stream) => [
+    { label: "gateway", value: stream.gatewayUrl ?? stream.openUrl },
+    {
+      label: "control",
+      value: stream.inputEnabled
+        ? "keyboard, pointer, touch, and gamepad flow through the browser gateway"
+        : "view only",
+    },
+  ],
+};
+
+const streamProviderUi = (stream: StreamStatus | undefined): StreamProviderUi =>
+  stream?.provider === "moonlight-gateway" ? moonlightGatewayUi : mediaMtxUi;
+
 export function ScreenStreamViewer({ machine, stream, onRequest, onRelease, onClose }: ScreenStreamViewerProps) {
   const machineId = machine?.id ?? stream?.machineId ?? "unknown";
   const machineName = machine?.name ?? machineId;
   const requestId = useMemo(() => createRequestId(), []);
-  const isMoonlightGateway = stream?.provider === "moonlight-gateway";
-  const streamUrl = stream
-    ? isMoonlightGateway
-      ? stream.openUrl
-      : `${stream.openUrl}?controls=false&muted=true&autoplay=true&playsInline=true`
-    : "";
-  const streamStateLabel = isMoonlightGateway
-    ? stream?.live
-      ? "gateway ready"
-      : stream?.reason
-        ? "upstream offline"
-        : "gateway offline"
-    : stream?.live
-      ? "live"
-      : stream?.requested
-        ? "starting agent"
-        : "requesting stream";
+  const ui = streamProviderUi(stream);
+  const hints = stream ? ui.hint(stream) : [];
 
   useEffect(() => {
     if (!machineId || machineId === "unknown") return;
@@ -54,19 +90,13 @@ export function ScreenStreamViewer({ machine, stream, onRequest, onRelease, onCl
           <div>
             <h2>{machineName} stream</h2>
             <span className={`stream-status ${stream?.live ? "live" : "waiting"}`}>
-              {streamStateLabel}
+              {stream ? ui.stateLabel(stream) : "requesting stream"}
               {stream ? ` / ${stream.viewerCount} viewer${stream.viewerCount === 1 ? "" : "s"}` : ""}
             </span>
           </div>
           <div className="stream-actions">
             {stream ? (
-              <a
-                className="stream-link"
-                href={stream.openUrl}
-                target="_blank"
-                rel="noreferrer"
-                title={isMoonlightGateway ? "Open Moonlight gateway" : "Open MediaMTX stream"}
-              >
+              <a className="stream-link" href={stream.openUrl} target="_blank" rel="noreferrer" title={ui.openTitle}>
                 <ExternalLink size={15} />
                 <span>open</span>
               </a>
@@ -80,44 +110,27 @@ export function ScreenStreamViewer({ machine, stream, onRequest, onRelease, onCl
           {stream?.live ? (
             <iframe
               className="stream-frame"
-              src={streamUrl}
-              title={`${machineName} ${isMoonlightGateway ? "Moonlight gateway" : "WebRTC stream"}`}
+              src={ui.frameUrl(stream)}
+              title={`${machineName} ${ui.frameTitle}`}
               allow="autoplay; fullscreen; picture-in-picture; gamepad; clipboard-read; clipboard-write"
             />
           ) : (
             <div className="stream-empty">
               <ScreenShare size={30} />
-              <strong>
-                {isMoonlightGateway
-                  ? stream?.reason
-                    ? "Moonlight upstream unavailable"
-                    : "Moonlight gateway unavailable"
-                  : stream?.requested
-                    ? "Starting pixel stream"
-                    : "No active pixel stream"}
-              </strong>
-              <span>
-                {isMoonlightGateway
-                  ? `Run wmux-moonlight-gateway for ${machineName}; Sunshine and the gateway own the remote-control stream.`
-                  : `Keep wmux-stream-agent-service running on ${machineName}; capture starts only while this dialog is open.`}
-              </span>
+              <strong>{stream ? ui.offlineTitle(stream) : "No active pixel stream"}</strong>
+              <span>{ui.offlineHint(machineName)}</span>
               {stream?.reason ? <span>{stream.reason}</span> : null}
             </div>
           )}
         </div>
-        {stream && isMoonlightGateway ? (
+        {hints.length > 0 ? (
           <div className="stream-agent-hint">
-            <span>gateway</span>
-            <code>{stream.gatewayUrl ?? stream.openUrl}</code>
-            <span>control</span>
-            <code>{stream.inputEnabled ? "keyboard, pointer, touch, and gamepad flow through the browser gateway" : "view only"}</code>
-          </div>
-        ) : stream && stream.publishRtspUrl && stream.publishWhipUrl ? (
-          <div className="stream-agent-hint">
-            <span>RTSP publish</span>
-            <code>{stream.publishRtspUrl}</code>
-            <span>WHIP publish</span>
-            <code>{stream.publishWhipUrl}</code>
+            {hints.map((hint) => (
+              <Fragment key={hint.label}>
+                <span>{hint.label}</span>
+                <code>{hint.value}</code>
+              </Fragment>
+            ))}
           </div>
         ) : null}
       </section>

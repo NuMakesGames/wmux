@@ -67,7 +67,18 @@ if [[ -n "${tab_id}" ]]; then
 fi
 payload="${payload}}"
 
+wmux_token="${WMUX_TOKEN:-}"
+if [[ -z "${wmux_token}" ]]; then
+  token_file="${WMUX_TOKEN_PATH:-${HOME}/.wmux/token}"
+  [[ -r "${token_file}" ]] && wmux_token="$(tr -d '[:space:]' < "${token_file}")"
+fi
+auth_header=()
+if [[ -n "${wmux_token}" ]]; then
+  auth_header=(-H "Authorization: Bearer ${wmux_token}")
+fi
+
 curl -fsS \
   -H "content-type: application/json" \
+  "${auth_header[@]}" \
   -d "${payload}" \
   "${wmux_url%/}/api/notifications" >/dev/null
