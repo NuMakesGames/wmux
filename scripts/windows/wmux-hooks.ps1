@@ -70,6 +70,7 @@ if ($Command -eq 'install' -and $Target -eq 'claude') {
   $SettingsPath = Join-Path $HOME '.claude\settings.json'
   $Settings = Read-JsonFile $SettingsPath
   $Changed = @(
+    Add-HookCommand $Settings 'UserPromptSubmit' $ClaudeHookCommand @{}
     Add-HookCommand $Settings 'Stop' $ClaudeHookCommand @{}
     Add-HookCommand $Settings 'Notification' $ClaudeHookCommand @{}
   ) -contains $true
@@ -98,7 +99,7 @@ if ($Command -eq 'status') {
   $ClaudeSettings = Read-JsonFile $ClaudePath
   $CodexPath = Join-Path $HOME '.codex\hooks.json'
   $CodexSettings = Read-JsonFile $CodexPath
-  $ClaudeInstalled = (Test-HookCommand $ClaudeSettings.hooks.Stop $ClaudeHookCommand) -and (Test-HookCommand $ClaudeSettings.hooks.Notification $ClaudeHookCommand)
+  $ClaudeInstalled = (Test-HookCommand $ClaudeSettings.hooks.UserPromptSubmit $ClaudeHookCommand) -and (Test-HookCommand $ClaudeSettings.hooks.Stop $ClaudeHookCommand) -and (Test-HookCommand $ClaudeSettings.hooks.Notification $ClaudeHookCommand)
   $CodexInstalled = (Test-HookCommand $CodexSettings.hooks.UserPromptSubmit $CodexHookCommand) -and (Test-HookCommand $CodexSettings.hooks.Stop $CodexHookCommand)
   [ordered]@{
     claude = if ($ClaudeInstalled) { 'installed' } else { 'not_installed' }

@@ -120,6 +120,12 @@ $StateDir = Join-Path $HOME '.wmux'
 $LogDir = Join-Path $StateDir 'logs'
 New-Item -ItemType Directory -Force -Path $HelperDir, $StateDir, $LogDir | Out-Null
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+if ($env:WMUX_TOKEN) {
+  [System.IO.File]::WriteAllText((Join-Path $StateDir 'token'), [string]::Concat($env:WMUX_TOKEN, [Environment]::NewLine), $Utf8NoBom)
+}
+if ($env:WMUX_URL) {
+  [System.IO.File]::WriteAllText((Join-Path $StateDir 'url'), [string]::Concat($env:WMUX_URL, [Environment]::NewLine), $Utf8NoBom)
+}
 
 $BundleUrl = ${psSingleQuote(bundleUrl)}
 $WmuxHeaders = @{}

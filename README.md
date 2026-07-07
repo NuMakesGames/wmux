@@ -177,7 +177,7 @@ wmux-hooks install claude
 wmux-hooks install codex
 ```
 
-This merges `Stop` and `Notification` hooks into `~/.claude/settings.json`. Claude Stop hooks read the transcript path from hook input, derive a short workspace title from the latest user prompt, derive the descriptor from the latest assistant text, and create a completion notification. Restart Claude Code after installing hooks.
+This merges `UserPromptSubmit`, `Stop`, and `Notification` hooks into `~/.claude/settings.json`. Claude `UserPromptSubmit` marks the workspace as running for the sidebar activity spinner. Claude Stop hooks read the transcript path from hook input, derive a short workspace title from the latest user prompt, derive the descriptor from the latest assistant text, and create a completion notification. Restart Claude Code after installing hooks.
 
 The Codex installer merges `UserPromptSubmit` and `Stop` hooks into `~/.codex/hooks.json`. Codex requires you to run `/hooks` inside Codex and trust the new command hook before it will run. Start a new Codex session after installing or trusting hooks if an existing session does not pick up the config.
 

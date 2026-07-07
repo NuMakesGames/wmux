@@ -5,6 +5,7 @@ import type { StateStore } from "./state.js";
 import {
   canRefreshDurableSessionClient,
   disposeDurableSession,
+  readDurableSessionCwd,
   refreshDurableSessionClient,
 } from "./machines.js";
 import { streamPathForMachine } from "./streams.js";
@@ -197,9 +198,11 @@ export class SessionManager {
 
   private ensureSession(pane: PaneState, cols: number, rows: number): ManagedSession {
     const existing = this.sessions.get(pane.id);
-    if (existing && !existing.isExited) return existing;
     const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
     if (!machine) throw new Error(`machine ${pane.machineId} not found`);
+    const refreshedCwd = this.refreshPaneCwdFromBackend(pane, machine);
+    pane = refreshedCwd && refreshedCwd !== pane.cwd ? { ...pane, cwd: refreshedCwd } : pane;
+    if (existing && !existing.isExited) return existing;
     const context = this.state.findPaneContext(pane.id);
     const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
     const streamPath = streamPathForMachine(machine.id);
@@ -263,6 +266,12 @@ export class SessionManager {
     });
 
     return session;
+  }
+
+  private refreshPaneCwdFromBackend(pane: PaneState, machine: MachineConfig): string | undefined {
+    const cwd = readDurableSessionCwd(machine, pane.id);
+    if (cwd && cwd !== pane.cwd) this.state.updatePane(pane.id, { cwd });
+    return cwd;
   }
 
   private broadcast(paneId: string, payload: unknown): void {

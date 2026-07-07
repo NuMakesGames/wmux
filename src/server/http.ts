@@ -171,6 +171,7 @@ export const createHttpServer = (
           const value = url.searchParams.get(key);
           if (value) extraEnv[key] = value;
         }
+        if (auth.token) extraEnv.WMUX_TOKEN = auth.token;
         response.writeHead(200, {
           "content-type": "text/plain; charset=utf-8",
           "cache-control": "no-store",

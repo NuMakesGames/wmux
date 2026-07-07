@@ -1,5 +1,28 @@
 $ErrorActionPreference = 'Stop'
 
+function Read-WmuxFileValue([string]$PathValue) {
+  if (-not $PathValue) { return '' }
+  try {
+    if (Test-Path -LiteralPath $PathValue -PathType Leaf) {
+      return ([System.IO.File]::ReadAllText($PathValue)).Trim()
+    }
+  } catch {}
+  return ''
+}
+
+function Get-WmuxUrl {
+  if ($env:WMUX_URL) { return $env:WMUX_URL }
+  $StateUrl = Read-WmuxFileValue (Join-Path $HOME '.wmux\url')
+  if ($StateUrl) { return $StateUrl }
+  return 'http://127.0.0.1:3478'
+}
+
+function Get-WmuxToken {
+  if ($env:WMUX_TOKEN) { return $env:WMUX_TOKEN }
+  $TokenPath = if ($env:WMUX_TOKEN_PATH) { $env:WMUX_TOKEN_PATH } else { Join-Path $HOME '.wmux\token' }
+  return Read-WmuxFileValue $TokenPath
+}
+
 function Clean-Text([string]$Value, [int]$Limit) {
   if (-not $Value) { return '' }
   $Cleaned = ($Value -replace '\s+', ' ').Trim()
@@ -79,8 +102,7 @@ function Read-TranscriptSummary([string]$PathValue) {
   return $Result
 }
 
-$WmuxUrl = $env:WMUX_URL
-if (-not $WmuxUrl) { $WmuxUrl = 'http://127.0.0.1:3478' }
+$WmuxUrl = Get-WmuxUrl
 $Agent = $env:WMUX_AGENT_NAME
 if (-not $Agent) { $Agent = 'agent' }
 $Status = 'completed'
@@ -127,7 +149,16 @@ $TranscriptResult = Read-TranscriptSummary $Transcript
 if (-not $Title) { $Title = $TranscriptResult.title }
 if (-not $Summary) { $Summary = if ($Body) { $Body } else { $TranscriptResult.summary } }
 
-if ($ClaudeHook) {
+if ($ClaudeHook -and $HookInput) {
+  $HookEvent = [string]$HookInput.hook_event_name
+  if ($HookEvent -eq 'UserPromptSubmit') {
+    $Status = 'running'
+    if (-not $Summary) { $Summary = 'claude running' }
+  } elseif ($HookEvent) {
+    $Status = 'completed'
+    if (-not $Summary) { $Summary = 'claude completed' }
+  }
+} elseif ($ClaudeHook) {
   $Status = 'completed'
 }
 if ($CodexHook -and $HookInput) {
@@ -157,4 +188,11 @@ if ($WorkspaceId) { $Payload.workspaceId = $WorkspaceId }
 if ($TabId) { $Payload.tabId = $TabId }
 
 $Json = $Payload | ConvertTo-Json -Depth 8 -Compress
-Invoke-RestMethod -Method Post -Uri ($WmuxUrl.TrimEnd('/') + '/api/agent-events') -ContentType 'application/json' -Body $Json | Out-Null
+$Headers = @{}
+$WmuxToken = Get-WmuxToken
+if ($WmuxToken) { $Headers['Authorization'] = "Bearer $WmuxToken" }
+try {
+  Invoke-RestMethod -Method Post -Uri ($WmuxUrl.TrimEnd('/') + '/api/agent-events') -Headers $Headers -ContentType 'application/json' -Body $Json | Out-Null
+} catch {
+  [Console]::Error.WriteLine("wmux-agent-event: delivery failed: $($_.Exception.Message)")
+}

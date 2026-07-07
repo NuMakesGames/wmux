@@ -14,6 +14,7 @@ import {
   type RGBA,
 } from "./opentui-grid";
 import { WMUX_MONO_FONT_FAMILY } from "./fonts";
+import { compactMiddlePath } from "./path-display";
 
 export interface OpenTuiSidebarWorkspace {
   id: string;
@@ -21,10 +22,11 @@ export interface OpenTuiSidebarWorkspace {
   title: string;
   descriptor: string;
   host: string;
+  cwd?: string;
   reachable: boolean;
   active: boolean;
   unreadCount: number;
-  agentLabel?: string;
+  agentName?: string;
   agentStatus?: "running" | "completed" | "failed" | "updated";
   bell?: boolean;
 }
@@ -219,6 +221,20 @@ const drawSidebarGrid = (
     if (row < 0 || row >= rows || col >= cols) return;
     writeText(grid, row, col, fitText(text, Math.max(0, cols - col - 1)), color, weight >= 700 ? 1 : 0);
   };
+  const writeCompactPath = (row: number, col: number, pathValue: string) => {
+    const maxPathCells = Math.max(0, cols - col - 1);
+    const compact = compactMiddlePath(pathValue, maxPathCells);
+    let cursor = col;
+    if (!compact.compacted) {
+      write(row, cursor, compact.text, rgba.muted, 700);
+      return;
+    }
+    write(row, cursor, compact.prefix, rgba.muted, 700);
+    cursor += compact.prefix.length;
+    write(row, cursor, compact.marker, rgba.faint, 600);
+    cursor += compact.marker.length;
+    write(row, cursor, compact.suffix, rgba.muted, 700);
+  };
   const section = (row: number, label: string) => {
     write(row, 1, label.toUpperCase(), rgba.goldDim, 700);
   };
@@ -273,9 +289,11 @@ const drawSidebarGrid = (
     row += 2;
   } else {
     for (const workspace of model.workspaces) {
-      const meta = workspace.agentLabel ? `${workspace.agentLabel}  ${workspace.descriptor}` : workspace.descriptor;
-      const descriptionLines = wrapText(meta || "No description", Math.max(8, cols - 7), 3);
-      const itemRows = 1 + descriptionLines.length + 1;
+      const meta = workspace.descriptor;
+      const hostContext = workspace.agentName ? `${workspace.host} / ${workspace.agentName}` : workspace.host;
+      const descriptionLines = wrapText(meta || (workspace.agentName ? "" : "No description"), Math.max(8, cols - 7), 3);
+      const cwd = workspace.cwd?.trim() ?? "";
+      const itemRows = 1 + descriptionLines.length + 1 + (cwd ? 1 : 0);
       if (row + itemRows >= workspaceEndRow) break;
       const itemStart = row;
       const statusColor = workspace.agentStatus === "completed"
@@ -307,8 +325,12 @@ const drawSidebarGrid = (
         write(row, 5, line, rgba.muted);
         row++;
       }
-      write(row, 5, `host ${workspace.host}`, rgba.faint);
+      write(row, 5, `host ${hostContext}`, rgba.faint);
       row++;
+      if (cwd) {
+        writeCompactPath(row, 5, cwd);
+        row++;
+      }
       actionRows(itemStart, itemRows, workspace.title, { type: "workspace", workspaceId: workspace.id, tabId: workspace.tabId });
       visibleWorkspaceCount++;
     }

@@ -189,7 +189,14 @@ def main():
     summary = args.summary or args.body or hook_summary or transcript_summary_text
     status = args.status
     if args.claude_hook:
-        status = "completed"
+        if hook_event == "UserPromptSubmit":
+            status = "running"
+            summary = summary or "claude running"
+        elif hook_event:
+            status = "completed"
+            summary = summary or "claude completed"
+        else:
+            status = "completed"
     if args.codex_hook:
         if hook_event == "UserPromptSubmit":
             status = "running"

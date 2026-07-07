@@ -51,6 +51,7 @@ const installClaude = () => {
   const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
   const settings = readJson(settingsPath);
   const changed = [
+    addHook(settings, "UserPromptSubmit", claudeHookCommand),
     addHook(settings, "Stop", claudeHookCommand),
     addHook(settings, "Notification", claudeHookCommand),
   ].some(Boolean);
@@ -79,7 +80,7 @@ const installCodex = () => {
 const status = () => {
   const claudePath = path.join(os.homedir(), ".claude", "settings.json");
   const claudeSettings = readJson(claudePath);
-  const claudeInstalled = ["Stop", "Notification"].every((eventName) =>
+  const claudeInstalled = ["UserPromptSubmit", "Stop", "Notification"].every((eventName) =>
     hasCommand(claudeSettings.hooks?.[eventName] ?? [], claudeHookCommand),
   );
   const codexPath = path.join(os.homedir(), ".codex", "hooks.json");

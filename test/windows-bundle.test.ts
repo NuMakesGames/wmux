@@ -24,11 +24,41 @@ test("bundle files carry correct sha256 digests and a stable version", () => {
   assert.equal(buildWindowsHelperBundle(machine).bundleVersion, bundle.bundleVersion);
 });
 
+test("clipboard helper sends bearer auth and reads staged fallback files", () => {
+  const bundle = buildWindowsHelperBundle(machine);
+  const helper = bundle.files.find((file) => file.name === "wmux-copy.ps1");
+  assert.ok(helper, "bundle includes wmux-copy.ps1");
+  const content = Buffer.from(helper.dataBase64, "base64").toString("utf8");
+  assert.ok(content.includes("Authorization"), "clipboard helper must send an auth header");
+  assert.ok(content.includes("WMUX_TOKEN_PATH"), "clipboard helper must respect token path overrides");
+  assert.ok(content.includes(".wmux\\token"), "clipboard helper must fall back to the staged token");
+  assert.ok(content.includes(".wmux\\url"), "clipboard helper must fall back to the staged URL");
+});
+
+test("agent-event helper sends bearer auth and maps Claude start hooks to running", () => {
+  const bundle = buildWindowsHelperBundle(machine);
+  const helper = bundle.files.find((file) => file.name === "wmux-agent-event.ps1");
+  assert.ok(helper, "bundle includes wmux-agent-event.ps1");
+  const content = Buffer.from(helper.dataBase64, "base64").toString("utf8");
+  assert.ok(content.includes("Authorization"), "agent-event helper must send an auth header");
+  assert.ok(content.includes("WMUX_TOKEN_PATH"), "agent-event helper must respect token path overrides");
+  assert.ok(content.includes(".wmux\\token"), "agent-event helper must fall back to the staged token");
+  assert.ok(content.includes(".wmux\\url"), "agent-event helper must fall back to the staged URL");
+  assert.ok(content.includes("$HookEvent -eq 'UserPromptSubmit'"), "Claude start hooks must be recognized");
+  assert.ok(content.includes("$Summary = 'claude running'"), "Claude start hooks must emit a running summary fallback");
+});
+
 test("bootstrap stages, verifies, then swaps and records the bundle version", () => {
   const script = buildWindowsPowerShellBootstrap(machine, undefined, {});
   assert.ok(script.includes(".staging-"), "bootstrap must stage into a scratch directory");
   assert.ok(script.includes("failed hash verification"), "bootstrap must verify file hashes");
   assert.ok(script.includes("bundle-version.json"), "bootstrap must record the staged bundle version");
+});
+
+test("bootstrap persists wmux auth fallback files for Windows helpers", () => {
+  const script = buildWindowsPowerShellBootstrap(machine, undefined, { WMUX_TOKEN: "fixed-token" });
+  assert.ok(script.includes("Join-Path $StateDir 'token'"), "bootstrap must write the token fallback file");
+  assert.ok(script.includes("Join-Path $StateDir 'url'"), "bootstrap must write the URL fallback file");
 });
 
 test("health probe reports the staged and expected bundle versions", () => {

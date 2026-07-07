@@ -283,10 +283,10 @@ button.active-tool {
   position: relative;
   display: grid;
   grid-template-columns: 10px minmax(0, 1fr);
-  grid-template-rows: 18px 16px;
+  grid-template-rows: 18px 16px 14px;
   column-gap: 8px;
   width: 100%;
-  height: 46px;
+  height: 60px;
   padding: 6px 9px 6px 8px;
   text-align: left;
   background: transparent;
@@ -423,37 +423,6 @@ button.active-tool {
   text-overflow: ellipsis;
 }
 
-.agent-pill {
-  flex: 0 0 auto;
-  max-width: 86px;
-  overflow: hidden;
-  border: 1px solid rgba(212, 180, 95, 0.18);
-  border-radius: 3px;
-  padding: 1px 4px;
-  color: var(--muted);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-pill.running {
-  color: var(--blue);
-  border-color: rgba(90, 169, 255, 0.32);
-  background: rgba(90, 169, 255, 0.08);
-}
-
-.agent-pill.completed {
-  color: #b7d8bf;
-  border-color: rgba(71, 211, 124, 0.25);
-  background: rgba(71, 211, 124, 0.06);
-}
-
-.agent-pill.failed {
-  color: var(--red);
-  border-color: rgba(217, 74, 61, 0.36);
-  background: rgba(217, 74, 61, 0.1);
-}
-
 .workspace-host {
   flex: 0 0 auto;
   color: #8b8375;
@@ -466,6 +435,28 @@ button.active-tool {
   content: "/";
   margin-right: 7px;
   color: #5d574d;
+}
+
+.workspace-cwd {
+  grid-column: 2;
+  grid-row: 3;
+  min-width: 0;
+  overflow: hidden;
+  color: #756f64;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-cwd-edge {
+  color: #a59c8b;
+  font-weight: 700;
+}
+
+.workspace-cwd-marker {
+  color: #5d574d;
+  font-weight: 500;
 }
 
 .machine-list {

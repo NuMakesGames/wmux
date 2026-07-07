@@ -17,6 +17,7 @@ import { OpenTuiSidebar } from "./OpenTuiSidebar";
 import type { OpenTuiSidebarMachine, OpenTuiSidebarWorkspace } from "./OpenTuiSidebar";
 import { OpenTuiTopbar } from "./OpenTuiTopbar";
 import { applyRouteTargetToState, parseRouteTarget, workspaceTabPath } from "./route-state";
+import { compactMiddlePath, normalizeUserPath } from "./path-display";
 import { ScreenStreamViewer } from "./ScreenStream";
 import { Toasts, useToasts } from "./Toasts";
 import { useAppRouting } from "./useAppRouting";
@@ -235,15 +236,21 @@ export function App() {
         const unreadCount = unreadByWorkspaceId.get(workspace.id) ?? 0;
         const latestUnread = latestUnreadByWorkspaceId.get(workspace.id);
         const latestAgent = latestAgentByWorkspaceId.get(workspace.id);
-        const descriptor =
-          latestUnread?.body ||
-          latestUnread?.subtitle ||
-          latestAgent?.summary ||
-          displayWorkspaceDescriptor(workspace.descriptor, machine, sourceMachine, workspace.machineId);
-        const host = displayWorkspaceHost(machine, sourceMachine, workspace.machineId);
-        const visibleDescriptor = compactWorkspaceDescription(descriptor, 72);
+        const latestAgentName = latestAgent ? workspaceAgentName(latestAgent) : undefined;
+        const latestAgentStatusLabel = latestAgent ? workspaceAgentStatusLabel(latestAgent) : undefined;
         const tab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId) ?? workspace.tabs[0];
         if (!tab) return [];
+        const pane = tab.panes.find((candidate) => candidate.id === tab.activePaneId) ?? tab.panes[0];
+        const cwd = normalizeUserPath(pane?.cwd);
+        const descriptor = dedupeAgentDescriptor(
+          latestUnread?.body ||
+            latestUnread?.subtitle ||
+            workspaceAgentSummary(latestAgent) ||
+            displayWorkspaceDescriptor(workspace.descriptor, machine, sourceMachine, workspace.machineId),
+          latestAgentStatusLabel,
+        );
+        const host = displayWorkspaceHost(machine, sourceMachine, workspace.machineId);
+        const visibleDescriptor = compactWorkspaceDescription(descriptor, 72);
         return [
           {
             id: workspace.id,
@@ -251,10 +258,11 @@ export function App() {
             title: workspace.name,
             descriptor: visibleDescriptor && visibleDescriptor !== host ? visibleDescriptor : "",
             host,
+            cwd,
             reachable: Boolean(machine?.reachable),
             active: workspace.id === activeWorkspace?.id,
             unreadCount,
-            agentLabel: latestAgent ? `${latestAgent.agent} ${latestAgent.status}` : undefined,
+            agentName: latestAgentName,
             agentStatus: latestAgent ? agentStatusClass(latestAgent.status) : undefined,
             bell: bellByWorkspaceId.has(workspace.id),
           },
@@ -984,17 +992,26 @@ export function App() {
               const unreadCount = unreadByWorkspaceId.get(workspace.id) ?? 0;
               const latestUnread = latestUnreadByWorkspaceId.get(workspace.id);
               const latestAgent = latestAgentByWorkspaceId.get(workspace.id);
-              const descriptor =
+              const latestAgentName = latestAgent ? workspaceAgentName(latestAgent) : undefined;
+              const latestAgentStatusLabel = latestAgent ? workspaceAgentStatusLabel(latestAgent) : undefined;
+              const tab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId) ?? workspace.tabs[0];
+              if (!tab) return null;
+              const pane = tab.panes.find((candidate) => candidate.id === tab.activePaneId) ?? tab.panes[0];
+              const cwd = normalizeUserPath(pane?.cwd);
+              const cwdDisplay = cwd ? compactMiddlePath(cwd, 24) : undefined;
+              const descriptor = dedupeAgentDescriptor(
                 latestUnread?.body ||
-                latestUnread?.subtitle ||
-                latestAgent?.summary ||
-                displayWorkspaceDescriptor(workspace.descriptor, machine, sourceMachine, workspace.machineId);
+                  latestUnread?.subtitle ||
+                  workspaceAgentSummary(latestAgent) ||
+                  displayWorkspaceDescriptor(workspace.descriptor, machine, sourceMachine, workspace.machineId),
+                latestAgentStatusLabel,
+              );
               const host = displayWorkspaceHost(machine, sourceMachine, workspace.machineId);
+              const hostContext = latestAgentName ? `${host} / ${latestAgentName}` : host;
               const visibleDescriptor = compactWorkspaceDescription(descriptor, 72);
               const tooltipDescriptor = compactWorkspaceDescription(descriptor, 200);
-              const showDescriptor = visibleDescriptor && visibleDescriptor !== host;
-              const tooltip = [workspace.name, showDescriptor ? tooltipDescriptor : "", host].filter(Boolean).join(" / ");
-              const tab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId) ?? workspace.tabs[0];
+              const showDescriptor = visibleDescriptor && visibleDescriptor !== host && visibleDescriptor !== hostContext;
+              const tooltip = [workspace.name, showDescriptor ? tooltipDescriptor : "", hostContext, cwd].filter(Boolean).join(" / ");
               const latestAgentStatus = latestAgent ? agentStatusClass(latestAgent.status) : "";
               const hasBell = bellByWorkspaceId.has(workspace.id);
               const workspaceStateClass = latestAgentStatus || (machine?.reachable ? "reachable" : "offline");
@@ -1003,7 +1020,6 @@ export function App() {
                 : machine?.reachable
                   ? "Host reachable"
                   : "Host offline";
-              if (!tab) return null;
               return (
               <a
                 key={workspace.id}
@@ -1019,10 +1035,16 @@ export function App() {
                   <span className="workspace-title">{workspace.name}</span>
                   {unreadCount > 0 ? <span className="badge workspace-badge">{unreadCount}</span> : null}
                   <span className="workspace-meta">
-                    {latestAgent ? <span className={`agent-pill ${latestAgentStatus}`}>{latestAgent.agent} {latestAgent.status}</span> : null}
                     {showDescriptor ? <span className="workspace-descriptor">{visibleDescriptor}</span> : null}
-                    <span className="workspace-host">{host}</span>
+                    <span className="workspace-host">{hostContext}</span>
                   </span>
+                  {cwdDisplay ? (
+                    <span className="workspace-cwd" title={cwdDisplay.full}>
+                      <span className="workspace-cwd-edge">{cwdDisplay.prefix}</span>
+                      {cwdDisplay.marker ? <span className="workspace-cwd-marker">{cwdDisplay.marker}</span> : null}
+                      {cwdDisplay.suffix ? <span className="workspace-cwd-edge">{cwdDisplay.suffix}</span> : null}
+                    </span>
+                  ) : null}
                 </a>
               );
             })}
@@ -1495,6 +1517,22 @@ const latestAgentByWorkspace = (events: AgentActivity[]): Map<string, AgentActiv
     if (!latest.has(event.workspaceId)) latest.set(event.workspaceId, event);
   }
   return latest;
+};
+
+const workspaceAgentName = (event: AgentActivity): string => event.agent.trim();
+
+const workspaceAgentStatusLabel = (event: AgentActivity): string => `${event.agent} ${event.status}`.trim();
+
+const workspaceAgentSummary = (event: AgentActivity | undefined): string => {
+  if (!event?.summary) return "";
+  const summary = event.summary.trim();
+  return summary.toLowerCase() === workspaceAgentStatusLabel(event).toLowerCase() ? "" : summary;
+};
+
+const dedupeAgentDescriptor = (descriptor: string, agentStatusLabel: string | undefined): string => {
+  const cleaned = descriptor.trim();
+  if (!agentStatusLabel) return cleaned;
+  return cleaned.toLowerCase() === agentStatusLabel.trim().toLowerCase() ? "" : cleaned;
 };
 
 const latestRunByPane = (runs: TerminalRun[]): Map<string, TerminalRun> => {
