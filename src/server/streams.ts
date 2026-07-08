@@ -30,6 +30,13 @@ interface MoonlightGatewayHealth {
     status?: number;
     reason?: string;
   };
+  target?: {
+    ok?: boolean;
+    status?: number;
+    reason?: string;
+    hostId?: number;
+    appId?: number;
+  };
 }
 
 const DEFAULT_REQUEST_TTL_MS = 20_000;
@@ -177,6 +184,7 @@ const mediaMtxBackend: StreamProviderBackend = {
         publishWhipUrl: `${base.webRtcOrigin}/${path}/whip`,
         inputEnabled: false,
         reason: live ? undefined : errorReason,
+        reasonKind: !live && errorReason ? "provider" : undefined,
       };
     });
   },
@@ -197,12 +205,20 @@ const moonlightGatewayBackend: StreamProviderBackend = {
           error: error instanceof Error ? error.message : "Moonlight gateway status unavailable",
         }));
         const path = streamPathForMachine(machine.id);
-        const live = "ok" in health ? Boolean(health.ok) && health.upstream?.ok !== false : false;
+        const live =
+          "ok" in health
+            ? Boolean(health.ok) && health.upstream?.ok !== false && health.target?.ok !== false
+            : false;
         const upstreamReason =
           "ok" in health && health.upstream && health.upstream.ok === false
             ? health.upstream.reason ?? `Moonlight Web upstream returned ${health.upstream.status ?? "an error"}`
             : undefined;
+        const targetReason =
+          "ok" in health && health.target && health.target.ok === false
+            ? health.target.reason ?? `Moonlight target returned ${health.target.status ?? "an error"}`
+            : undefined;
         const errorReason = "error" in health ? health.error : undefined;
+        const reasonKind = errorReason ? "gateway" : upstreamReason ? "upstream" : targetReason ? "target" : undefined;
         return {
           machineId: machine.id,
           provider: "moonlight-gateway" as const,
@@ -217,7 +233,8 @@ const moonlightGatewayBackend: StreamProviderBackend = {
           openUrl,
           gatewayUrl,
           inputEnabled: true,
-          reason: errorReason ?? upstreamReason,
+          reason: errorReason ?? upstreamReason ?? targetReason,
+          reasonKind,
         };
       }),
     );

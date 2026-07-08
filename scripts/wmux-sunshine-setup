@@ -105,15 +105,54 @@ process_pid() {
   pgrep -f '[s]unshine' 2>/dev/null | head -n 1 || true
 }
 
+sql_escape() {
+  sed "s/'/''/g"
+}
+
+screen_recording_permission() {
+  local app bin bundle_id db app_sql bin_sql bundle_sql value saw_denied
+  command -v sqlite3 >/dev/null 2>&1 || {
+    printf 'unknown'
+    return
+  }
+  app="$(find_sunshine_app 2>/dev/null || true)"
+  bin="$(find_sunshine_bin 2>/dev/null || true)"
+  bundle_id=""
+  if [[ -n "${app}" ]]; then
+    bundle_id="$(defaults read "${app}/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+  fi
+  app_sql="$(printf '%s' "${app}" | sql_escape)"
+  bin_sql="$(printf '%s' "${bin}" | sql_escape)"
+  bundle_sql="$(printf '%s' "${bundle_id}" | sql_escape)"
+  saw_denied=0
+  for db in \
+    "${HOME}/Library/Application Support/com.apple.TCC/TCC.db" \
+    "/Library/Application Support/com.apple.TCC/TCC.db"; do
+    [[ -r "${db}" ]] || continue
+    value="$(sqlite3 "${db}" "select auth_value from access where service = 'kTCCServiceScreenCapture' and client in ('${app_sql}', '${bin_sql}', '${bundle_sql}') order by last_modified desc limit 1;" 2>/dev/null || true)"
+    case "${value}" in
+      2) printf 'granted'; return ;;
+      "") ;;
+      *) saw_denied=1 ;;
+    esac
+  done
+  if [[ "${saw_denied}" -eq 1 ]]; then
+    printf 'denied'
+  else
+    printf 'missing'
+  fi
+}
+
 status_json() {
   require_macos
-  local app bin brew state pid api app_json bin_json brew_json state_json pid_json api_json url_json
+  local app bin brew state pid api screen_recording app_json bin_json brew_json state_json pid_json api_json url_json screen_recording_json
   app="$(find_sunshine_app 2>/dev/null || true)"
   bin="$(find_sunshine_bin 2>/dev/null || true)"
   brew="$(find_brew)"
   state="$(launch_state || true)"
   pid="$(process_pid)"
   api="$(api_status)"
+  screen_recording="$(screen_recording_permission)"
   app_json="$(printf '%s' "${app}" | json_escape)"
   bin_json="$(printf '%s' "${bin}" | json_escape)"
   brew_json="$(printf '%s' "${brew}" | json_escape)"
@@ -121,6 +160,7 @@ status_json() {
   pid_json="$(printf '%s' "${pid}" | json_escape)"
   api_json="$(printf '%s' "${api}" | json_escape)"
   url_json="$(printf '%s' "${sunshine_url}" | json_escape)"
+  screen_recording_json="$(printf '%s' "${screen_recording}" | json_escape)"
   cat <<EOF
 {
   "platform": "macos",
@@ -141,6 +181,9 @@ status_json() {
   "api": {
     "url": ${url_json},
     "status": ${api_json}
+  },
+  "permissions": {
+    "screenRecording": ${screen_recording_json}
   },
   "permissionsHint": "Grant Screen Recording, Accessibility/Input Monitoring, and Local Network permissions to Sunshine if macOS prompts for them."
 }

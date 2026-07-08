@@ -13,8 +13,8 @@ import { shouldUseWindowsAgent, WindowsAgentSession } from "./windows-agent.js";
 
 type ClientMessage =
   | { type: "input"; data: string }
-  | { type: "resize"; cols: number; rows: number }
-  | { type: "activate"; cols: number; rows: number };
+  | { type: "resize"; cols: number; rows: number; foreground?: boolean }
+  | { type: "activate"; cols: number; rows: number; foreground?: boolean };
 
 interface SocketState {
   paneId: string;
@@ -95,11 +95,19 @@ export class SessionManager {
       if (message.type === "resize") {
         const size = normalizeSize(message.cols, message.rows);
         this.socketState.set(socket, { paneId, ...size });
+        if (message.foreground === false) {
+          this.releaseResizeOwner(paneId, socket);
+          return;
+        }
         if (this.resizeOwners.get(paneId) === socket) session.resize(size.cols, size.rows);
       }
       if (message.type === "activate") {
         const size = normalizeSize(message.cols, message.rows);
         this.socketState.set(socket, { paneId, ...size });
+        if (message.foreground === false) {
+          this.releaseResizeOwner(paneId, socket);
+          return;
+        }
         this.activateResizeOwner(paneId, socket, session);
       }
     });
@@ -388,6 +396,10 @@ export class SessionManager {
     session.resize(state.cols, state.rows);
   }
 
+  private releaseResizeOwner(paneId: string, socket: WebSocket): void {
+    if (this.resizeOwners.get(paneId) === socket) this.resizeOwners.delete(paneId);
+  }
+
   private reassignResizeOwner(paneId: string, closedSocket: WebSocket, session: ManagedSession): void {
     if (this.resizeOwners.get(paneId) !== closedSocket) {
       this.deleteEmptySocketSet(paneId);
@@ -452,14 +464,21 @@ export class SessionManager {
 
   private parse(raw: string): ClientMessage | null {
     try {
-      const parsed = JSON.parse(raw) as ClientMessage;
-      if (parsed.type === "input" && typeof parsed.data === "string") return parsed;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (parsed.type === "input" && typeof parsed.data === "string") {
+        return { type: "input", data: parsed.data };
+      }
       if (
         (parsed.type === "resize" || parsed.type === "activate") &&
         Number.isFinite(parsed.cols) &&
         Number.isFinite(parsed.rows)
       ) {
-        return parsed;
+        return {
+          type: parsed.type,
+          cols: Number(parsed.cols),
+          rows: Number(parsed.rows),
+          ...(typeof parsed.foreground === "boolean" ? { foreground: parsed.foreground } : {}),
+        };
       }
     } catch {
       return null;

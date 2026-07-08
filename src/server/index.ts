@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import type { ServerOptions as HttpsServerOptions } from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { loadAuthConfig } from "./auth.js";
@@ -15,10 +16,39 @@ const arg = (name: string, fallback: string): string => {
   return process.argv[index + 1] ?? fallback;
 };
 
+const stringOption = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+const optionalArg = (name: string, fallback?: string): string | undefined => {
+  const index = process.argv.indexOf(name);
+  if (index === -1) return stringOption(fallback);
+  return stringOption(process.argv[index + 1]) ?? stringOption(fallback);
+};
+
+const loadTlsOptions = (): HttpsServerOptions | undefined => {
+  const certFile = optionalArg("--cert-file", process.env.WMUX_CERT_FILE);
+  const keyFile = optionalArg("--key-file", process.env.WMUX_KEY_FILE);
+  if (!certFile && !keyFile) return undefined;
+  if (!certFile || !keyFile) {
+    throw new Error("Both WMUX_CERT_FILE and WMUX_KEY_FILE are required for HTTPS.");
+  }
+  return {
+    cert: fs.readFileSync(certFile),
+    key: fs.readFileSync(keyFile),
+  };
+};
+
 const main = async (): Promise<void> => {
   const host = arg("--host", process.env.WMUX_HOST ?? "127.0.0.1");
   const port = Number(arg("--port", process.env.WMUX_PORT ?? "3478"));
   const dev = process.argv.includes("--dev");
+  const tls = loadTlsOptions();
+  const protocol = tls ? "https" : "http";
+  const configuredPublicUrl = stringOption(process.env.WMUX_PUBLIC_URL);
+  const publicUrl = configuredPublicUrl ?? `${protocol}://${host}:${port}`;
+  if (!configuredPublicUrl) process.env.WMUX_PUBLIC_URL = publicUrl;
   if (!isAllowedBindHost(host)) {
     throw new Error(
       `Refusing to bind ${host}. Use loopback, Tailscale 100.64.0.0/10, or an RFC1918/internal interface.`,
@@ -30,23 +60,22 @@ const main = async (): Promise<void> => {
   const state = new StateStore(config.machines);
   const settings = new SettingsStore();
   const sessionManager = new SessionManager(state, config.machines, auth.token);
-  const server = await createHttpServer(host, state, config.machines, sessionManager, settings, { dev, auth });
+  const server = await createHttpServer(host, state, config.machines, sessionManager, settings, { dev, auth, tls });
   // Persist the reachable URL next to ~/.wmux/token: helpers and agent hooks
   // running without WMUX_URL in their env (existing durable panes) read this
   // instead of assuming localhost, which is wrong on non-loopback binds.
   try {
     const wmuxDir = path.join(os.homedir(), ".wmux");
     fs.mkdirSync(wmuxDir, { recursive: true });
-    const publicUrl = process.env.WMUX_PUBLIC_URL ?? `http://${host}:${port}`;
     fs.writeFileSync(path.join(wmuxDir, "url"), `${publicUrl}\n`, { mode: 0o600 });
   } catch {
     // Best-effort; helpers fall back to their localhost default.
   }
 
   server.listen(port, host, () => {
-    console.log(`wmux listening on http://${host}:${port}${dev ? " (dev)" : ""}`);
+    console.log(`wmux listening on ${protocol}://${host}:${port}${dev ? " (dev)" : ""}`);
     if (auth.enabled) {
-      console.log(`wmux: access requires a token. Open http://${host}:${port}/?token=${auth.token} once per browser.`);
+      console.log(`wmux: access requires a token. Open ${publicUrl}/?token=${auth.token} once per browser.`);
     } else {
       console.log("wmux: authentication disabled (WMUX_DISABLE_AUTH=1); relying on network boundary only.");
     }

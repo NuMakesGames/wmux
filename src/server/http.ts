@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,18 +61,21 @@ const clientRoot = (): string => {
   return path.resolve(here, "../client");
 };
 
+type WmuxHttpServer = http.Server | https.Server;
+
 export const createHttpServer = (
   bindHost: string,
   state: StateStore,
   machines: MachineConfig[],
   sessions: SessionManager,
   settings: SettingsStore,
-  options: { dev?: boolean; auth: AuthConfig },
-): Promise<http.Server> => {
+  options: { dev?: boolean; auth: AuthConfig; tls?: https.ServerOptions },
+): Promise<WmuxHttpServer> => {
   const { auth } = options;
   const root = clientRoot();
   const streamRequests = new StreamRequestStore();
   let vite: ViteDevServer | undefined;
+  const protocol = options.tls ? "https" : "http";
   const bootstrap = async () => {
     const snapshot = state.snapshot();
     return {
@@ -86,7 +90,7 @@ export const createHttpServer = (
     };
   };
 
-  const server = http.createServer(async (request, response) => {
+  const handleRequest = async (request: http.IncomingMessage, response: http.ServerResponse): Promise<void> => {
     if (
       !isAllowedRequestHost(request.headers.host, bindHost) ||
       !isAllowedOrigin(request.headers.origin, bindHost)
@@ -95,7 +99,7 @@ export const createHttpServer = (
       return;
     }
 
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? bindHost}`);
+    const url = new URL(request.url ?? "/", `${protocol}://${request.headers.host ?? bindHost}`);
 
     // Token gate: everything under /api requires a valid token, except the
     // unauthenticated bootstrap endpoints (liveness, auth capability probe, and
@@ -650,7 +654,9 @@ export const createHttpServer = (
       console.error("wmux: request handler error:", error);
       sendJson(response, 500, { error: "server_error" });
     }
-  });
+  };
+
+  const server = options.tls ? https.createServer(options.tls, handleRequest) : http.createServer(handleRequest);
 
   const setupDevServer = async (): Promise<void> => {
     if (!options.dev) return;
@@ -704,7 +710,7 @@ export const createHttpServer = (
       socket.destroy();
       return;
     }
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? bindHost}`);
+    const url = new URL(request.url ?? "/", `${protocol}://${request.headers.host ?? bindHost}`);
     if (options.dev && url.pathname === "/ws/vite-hmr") return;
     // WebSockets can't set an Authorization header from the browser, so the
     // token rides on the query string; enforce it before any handshake.

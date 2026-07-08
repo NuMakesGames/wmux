@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${WMUX_HOST:-}"
 PORT="${WMUX_PORT:-3478}"
+CERT_FILE="${WMUX_CERT_FILE:-}"
+KEY_FILE="${WMUX_KEY_FILE:-}"
+PUBLIC_URL="${WMUX_PUBLIC_URL:-}"
 
 if [[ -z "${HOST}" ]] && command -v tailscale >/dev/null 2>&1; then
   HOST="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
@@ -11,6 +14,19 @@ fi
 
 if [[ -z "${HOST}" ]]; then
   HOST="127.0.0.1"
+fi
+
+PROTOCOL="http"
+if [[ -n "${CERT_FILE}" || -n "${KEY_FILE}" ]]; then
+  if [[ -z "${CERT_FILE}" || -z "${KEY_FILE}" ]]; then
+    echo "WMUX_CERT_FILE and WMUX_KEY_FILE must both be set for HTTPS" >&2
+    exit 1
+  fi
+  PROTOCOL="https"
+fi
+
+if [[ -z "${PUBLIC_URL}" ]]; then
+  PUBLIC_URL="${PROTOCOL}://${HOST}:${PORT}"
 fi
 
 mkdir -p "${HOME}/.config/systemd/user"
@@ -26,7 +42,7 @@ cat > "${HOME}/.wmux/stream-agent.defaults.json" <<EOF
 {
   "machine": "local",
   "server": "${HOST}",
-  "wmuxUrl": "http://${HOST}:${PORT}",
+  "wmuxUrl": "${PUBLIC_URL}",
   "rtspUrl": "rtsp://${HOST}:8554/wmux-local",
   "onDemand": true,
   "pollInterval": 2
@@ -66,11 +82,14 @@ sed \
   -e "s#WorkingDirectory=.*#WorkingDirectory=${ROOT_DIR}#" \
   -e "s#Environment=WMUX_HOST=.*#Environment=WMUX_HOST=${HOST}#" \
   -e "s#Environment=WMUX_PORT=.*#Environment=WMUX_PORT=${PORT}#" \
+  -e "s#Environment=WMUX_CERT_FILE=.*#Environment=WMUX_CERT_FILE=${CERT_FILE}#" \
+  -e "s#Environment=WMUX_KEY_FILE=.*#Environment=WMUX_KEY_FILE=${KEY_FILE}#" \
+  -e "s#Environment=WMUX_PUBLIC_URL=.*#Environment=WMUX_PUBLIC_URL=${PUBLIC_URL}#" \
   "${ROOT_DIR}/deploy/wmux.service.example" > "${HOME}/.config/systemd/user/wmux.service"
 
 systemctl --user daemon-reload
 systemctl --user enable wmux.service
 systemctl --user restart wmux.service
 
-echo "wmux.service installed and started on http://${HOST}:${PORT}"
+echo "wmux.service installed and started on ${PUBLIC_URL}"
 echo "wmux helper shims installed in ${HOME}/.local/bin"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "wmux"
+  short_description: "Orchestrate tasks across wmux machines"
+  default_prompt: "Use $wmux to run a visible task on the right remote machine."

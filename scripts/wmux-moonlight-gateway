@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -11,10 +12,11 @@ const DEFAULT_UPSTREAM = "http://127.0.0.1:8080";
 const DEFAULT_SUNSHINE_URL = "https://127.0.0.1:47990";
 const DEFAULT_SUNSHINE_HTTP_PORT = 47989;
 const DEFAULT_SETUP_TIMEOUT_MS = 60_000;
+const DEFAULT_TARGET_HEALTH_TIMEOUT_MS = 5_000;
 const DEFAULT_MOONLIGHT_PAIR_DEVICE_NAME = "roth";
 const DEFAULT_SUNSHINE_PIN_DELAY_MS = 3500;
 const DEFAULT_MOONLIGHT_APP_TITLE = "Desktop";
-const DEFAULT_MOONLIGHT_DATA_TRANSPORT = "websocket";
+const DEFAULT_MOONLIGHT_DATA_TRANSPORT = "auto";
 
 const startedAt = new Date().toISOString();
 const options = parseArgs(process.argv.slice(2));
@@ -28,6 +30,15 @@ const managedBin = options.bin || process.env.WMUX_MOONLIGHT_WEB_BIN || "";
 // otherwise-unauthenticated proxy that hands out an authenticated Moonlight
 // session. Left empty for backward compatibility with unconfigured setups.
 const gatewayToken = String(options.token || process.env.WMUX_MOONLIGHT_GATEWAY_TOKEN || "").trim();
+const gatewayCertFile = stringOption(options["cert-file"] || process.env.WMUX_MOONLIGHT_GATEWAY_CERT_FILE);
+const gatewayKeyFile = stringOption(options["key-file"] || process.env.WMUX_MOONLIGHT_GATEWAY_KEY_FILE);
+const gatewayTls = gatewayTlsOptions();
+const gatewayProtocol = gatewayTls ? "https" : "http";
+const targetHealthTimeoutMs = intOption(
+  process.env.WMUX_MOONLIGHT_TARGET_HEALTH_TIMEOUT_MS,
+  DEFAULT_TARGET_HEALTH_TIMEOUT_MS,
+);
+const disableAudioDecoder = boolOption(process.env.WMUX_MOONLIGHT_DISABLE_AUDIO_DECODER, false);
 const managedArgs = [
   ...envArgs(process.env.WMUX_MOONLIGHT_WEB_ARGS),
   ...arrayOption(options["bin-arg"]),
@@ -53,7 +64,8 @@ if (managedBin) {
   });
 }
 
-const server = http.createServer((request, response) => {
+const server = (gatewayTls ? https.createServer(gatewayTls) : http.createServer());
+server.on("request", (request, response) => {
   void handleRequest(request, response).catch((error) => {
     sendJson(response, 500, { error: "gateway_error", message: error instanceof Error ? error.message : String(error) });
   });
@@ -67,7 +79,7 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`wmux-moonlight-gateway listening on http://${host}:${port}`);
+  console.log(`wmux-moonlight-gateway listening on ${gatewayProtocol}://${host}:${port}`);
   console.log(`proxying Moonlight Web upstream at ${upstreamUrl}`);
 });
 
@@ -91,7 +103,7 @@ function timingSafeEqualStr(a, b) {
 }
 
 async function handleRequest(request, response) {
-  const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
+  const url = new URL(request.url || "/", `${gatewayProtocol}://${request.headers.host || `${host}:${port}`}`);
   if (url.pathname === "/api/wmux/health" && request.method === "GET") {
     sendJson(response, 200, await healthPayload());
     return;
@@ -115,7 +127,7 @@ async function handleRequest(request, response) {
   }
   if (url.pathname === "/api/wmux/config" && request.method === "GET") {
     sendJson(response, 200, {
-      bind: { host, port },
+      bind: { host, port, protocol: gatewayProtocol },
       upstream: upstreamUrl,
       managedProcess: processSummary(),
       setup: setupSummary(),
@@ -143,15 +155,22 @@ async function handleRequest(request, response) {
 }
 
 async function healthPayload() {
+  const setup = setupSummary();
+  const [upstream, target] = await Promise.all([
+    checkUpstream(),
+    checkConfiguredTarget(setup),
+  ]);
   return {
-    ok: true,
+    ok: upstream.ok !== false && target.ok !== false,
     service: "wmux-moonlight-gateway",
     startedAt,
     bind: { host, port },
-    upstream: await checkUpstream(),
+    protocol: gatewayProtocol,
+    upstream,
+    target,
     managedProcess: processSummary(),
     viewerCount: activeWebSockets,
-    setup: setupSummary(),
+    setup,
   };
 }
 
@@ -166,6 +185,7 @@ function processSummary() {
 }
 
 function setupSummary() {
+  const launchSettings = moonlightLaunchSettings();
   return {
     moonlightWebConfigured: Boolean(process.env.WMUX_MOONLIGHT_WEB_USER && process.env.WMUX_MOONLIGHT_WEB_PASSWORD),
     sunshineConfigured: Boolean(process.env.WMUX_SUNSHINE_USER && process.env.WMUX_SUNSHINE_PASSWORD),
@@ -176,20 +196,29 @@ function setupSummary() {
     moonlightPairDeviceName: process.env.WMUX_MOONLIGHT_PAIR_DEVICE_NAME || DEFAULT_MOONLIGHT_PAIR_DEVICE_NAME,
     moonlightAppTitle: process.env.WMUX_MOONLIGHT_APP_TITLE || DEFAULT_MOONLIGHT_APP_TITLE,
     moonlightAppId: intOption(process.env.WMUX_MOONLIGHT_APP_ID, 0) || undefined,
-    moonlightDataTransport: moonlightDataTransport(),
+    moonlightDataTransport: launchSettings.dataTransport,
+    moonlightLaunchSettings: launchSettings,
+    moonlightTargetHealthTimeoutMs: targetHealthTimeoutMs,
+    moonlightDisableAudioDecoder: disableAudioDecoder,
   };
 }
 
 async function setupStatus() {
   const setup = setupSummary();
-  return {
-    ok: true,
-    setup,
-    upstream: await checkUpstream(),
-    sunshine: await checkSunshine(setup.sunshineUrl).catch((error) => ({
+  const [upstream, sunshine, target] = await Promise.all([
+    checkUpstream(),
+    checkSunshine(setup.sunshineUrl).catch((error) => ({
       ok: false,
       reason: error instanceof Error ? error.message : String(error),
     })),
+    checkConfiguredTarget(setup),
+  ]);
+  return {
+    ok: upstream.ok !== false && sunshine.ok !== false && target.ok !== false,
+    setup,
+    upstream,
+    sunshine,
+    target,
   };
 }
 
@@ -555,16 +584,80 @@ async function checkSunshine(sunshineUrl) {
     method: "GET",
     insecure: boolOption(process.env.WMUX_SUNSHINE_INSECURE, isLocalUrl(sunshineUrl)),
     expectJson: false,
+    timeoutMs: 1_500,
   });
   return { ok: response.statusCode >= 200 && response.statusCode < 500, status: response.statusCode };
+}
+
+async function checkConfiguredTarget(setup) {
+  let hostId = setup.moonlightHostId;
+  const appId = setup.moonlightAppId;
+  try {
+    const cookie = await authenticatedProxyCookie();
+    if (!hostId) {
+      if (!cookie) {
+        return {
+          ok: false,
+          reason: "Moonlight Web credentials or WMUX_MOONLIGHT_HOST_ID are required for target health checks",
+        };
+      }
+      const hostResult = await ensureMoonlightHost(cookie, setup.moonlightHost, setup.moonlightHostHttpPort);
+      hostId = Number(hostResult.host?.host_id);
+    }
+    if (!Number.isFinite(hostId) || hostId <= 0) {
+      return { ok: false, reason: "Moonlight host id is not configured" };
+    }
+    await upstreamJsonRequest(`/api/host?host_id=${encodeURIComponent(hostId)}`, {
+      method: "GET",
+      cookie,
+      expectJson: false,
+      timeoutMs: targetHealthTimeoutMs,
+    });
+    if (appId) {
+      await upstreamJsonRequest(`/api/apps?host_id=${encodeURIComponent(hostId)}`, {
+        method: "GET",
+        cookie,
+        expectJson: false,
+        timeoutMs: targetHealthTimeoutMs,
+      });
+    }
+    return {
+      ok: true,
+      hostId,
+      appId: appId || undefined,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      hostId: hostId || undefined,
+      appId: appId || undefined,
+      reason: describeTargetError(error, setup),
+    };
+  }
+}
+
+function describeTargetError(error, setup) {
+  const message = error instanceof Error ? error.message : String(error);
+  const target = `${setup.moonlightHost}:${setup.moonlightHostHttpPort}`;
+  if (/connection\s*refused|connectionre|code:\s*111|tcp connect error/i.test(message)) {
+    return `Moonlight Web cannot reach Sunshine at ${target} (connection refused)`;
+  }
+  if (/timed out|timeout/i.test(message)) {
+    return `Moonlight Web target check timed out for ${target}`;
+  }
+  return `Moonlight target check failed for ${target}: ${message.slice(0, 180)}`;
 }
 
 function proxyHttp(request, response) {
   return new Promise((resolve, reject) => {
     const target = targetUrl(request.url || "/");
     const client = target.protocol === "https:" ? https : http;
+    const injectAudioDecoderShim = shouldInjectAudioDecoderShim(request, target);
     authenticatedProxyHeaders(request.headers, target)
       .then((headers) => {
+        if (injectAudioDecoderShim) {
+          delete headers["accept-encoding"];
+        }
         const proxyRequest = client.request(
           target,
           {
@@ -572,6 +665,19 @@ function proxyHttp(request, response) {
             headers,
           },
           (proxyResponse) => {
+            if (injectAudioDecoderShim && isHtmlResponse(proxyResponse)) {
+              const chunks = [];
+              proxyResponse.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+              proxyResponse.on("end", () => {
+                const html = Buffer.concat(chunks).toString("utf8");
+                const body = injectAudioDecoderShimHtml(html);
+                response.writeHead(proxyResponse.statusCode || 502, responseHeaders(proxyResponse.headers, { generatedBody: true }));
+                response.end(body);
+                resolve();
+              });
+              proxyResponse.on("error", reject);
+              return;
+            }
             response.writeHead(proxyResponse.statusCode || 502, responseHeaders(proxyResponse.headers));
             proxyResponse.pipe(response);
             proxyResponse.on("end", resolve);
@@ -596,13 +702,45 @@ function proxyHttp(request, response) {
   });
 }
 
+function shouldInjectAudioDecoderShim(request, target) {
+  return disableAudioDecoder &&
+    request.method === "GET" &&
+    target.pathname.replace(/\/+$/, "") === "/stream.html";
+}
+
+function isHtmlResponse(response) {
+  return String(response.headers["content-type"] || "").toLowerCase().includes("text/html");
+}
+
+function injectAudioDecoderShimHtml(html) {
+  const marker = "</head>";
+  const shim = `<script>
+(() => {
+  try {
+    const unsupportedAudioDecoder = { isConfigSupported: async () => ({ supported: false }) };
+    Object.defineProperty(window, "AudioDecoder", {
+      configurable: true,
+      writable: true,
+      value: unsupportedAudioDecoder,
+    });
+  } catch {
+    try {
+      window.AudioDecoder = { isConfigSupported: async () => ({ supported: false }) };
+    } catch {}
+  }
+})();
+</script>`;
+  if (html.includes(marker)) return html.replace(marker, `${shim}\n${marker}`);
+  return `${shim}\n${html}`;
+}
+
 async function handleUpgrade(request, socket, head) {
   if (request.url && request.url.startsWith("/api/wmux/")) {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
     socket.destroy();
     return;
   }
-  const upgradeUrl = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
+  const upgradeUrl = new URL(request.url || "/", `${gatewayProtocol}://${request.headers.host || `${host}:${port}`}`);
   if (!gatewayAuthorized(request, upgradeUrl)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
@@ -685,10 +823,17 @@ async function authenticatedProxyHeaders(headers, target) {
   };
 }
 
-function responseHeaders(headers) {
+function responseHeaders(headers, options = {}) {
   const copy = { ...headers };
   delete copy["x-frame-options"];
   delete copy["content-security-policy"];
+  if (options.generatedBody) {
+    delete copy["content-length"];
+    delete copy["content-encoding"];
+    delete copy.etag;
+    delete copy["last-modified"];
+    copy["cache-control"] = "no-store";
+  }
   return copy;
 }
 
@@ -824,6 +969,11 @@ function rawJsonRequest(target, options = {}, onResponse) {
       onResponse(response);
     },
   );
+  if (options.timeoutMs) {
+    request.setTimeout(Number(options.timeoutMs), () => {
+      request.destroy(new Error(`request timed out after ${Number(options.timeoutMs)}ms`));
+    });
+  }
   if (jsonBody) request.write(jsonBody);
   request.end();
   return request;
@@ -892,9 +1042,7 @@ function fallbackPage(error) {
 }
 
 function streamLaunchPage(next) {
-  const settings = {
-    dataTransport: moonlightDataTransport(),
-  };
+  const settings = moonlightLaunchSettings();
   return `<!doctype html>
 <html>
   <head>
@@ -908,9 +1056,24 @@ function streamLaunchPage(next) {
         try {
           const raw = localStorage.getItem("mlSettings");
           const existing = raw ? JSON.parse(raw) : {};
-          localStorage.setItem("mlSettings", JSON.stringify({ ...existing, ...settingsPatch }));
+          const effectiveSettings = { ...settingsPatch };
+          if (!window.isSecureContext && effectiveSettings.canvasRenderer === true) {
+            effectiveSettings.canvasRenderer = false;
+          }
+          localStorage.setItem("mlSettings", JSON.stringify(mergeSettings(existing, effectiveSettings)));
         } catch {}
         location.replace(next);
+        function mergeSettings(target, patch) {
+          const output = { ...(target && typeof target === "object" ? target : {}) };
+          for (const [key, value] of Object.entries(patch)) {
+            if (value && typeof value === "object" && !Array.isArray(value)) {
+              output[key] = mergeSettings(output[key], value);
+            } else {
+              output[key] = value;
+            }
+          }
+          return output;
+        }
       })();
     </script>
   </head>
@@ -992,9 +1155,92 @@ function boolOption(value, fallback = false) {
   return fallback;
 }
 
+function gatewayTlsOptions() {
+  if (!gatewayCertFile && !gatewayKeyFile) return null;
+  if (!gatewayCertFile || !gatewayKeyFile) {
+    throw new Error("Both WMUX_MOONLIGHT_GATEWAY_CERT_FILE and WMUX_MOONLIGHT_GATEWAY_KEY_FILE are required for HTTPS");
+  }
+  return {
+    cert: fs.readFileSync(gatewayCertFile),
+    key: fs.readFileSync(gatewayKeyFile),
+  };
+}
+
 function moonlightDataTransport() {
   const value = stringOption(process.env.WMUX_MOONLIGHT_DATA_TRANSPORT || DEFAULT_MOONLIGHT_DATA_TRANSPORT).toLowerCase();
   return ["auto", "webrtc", "websocket"].includes(value) ? value : DEFAULT_MOONLIGHT_DATA_TRANSPORT;
+}
+
+function moonlightLaunchSettings() {
+  const jsonSettings = jsonObjectOption(process.env.WMUX_MOONLIGHT_SETTINGS_JSON);
+  const settings = {
+    ...jsonSettings,
+    dataTransport: moonlightDataTransport(),
+  };
+  assignIntSetting(settings, "bitrate", envIntOption("WMUX_MOONLIGHT_BITRATE_KBPS", "WMUX_MOONLIGHT_BITRATE"));
+  assignIntSetting(settings, "fps", envIntOption("WMUX_MOONLIGHT_FPS"));
+  assignIntSetting(settings, "videoFrameQueueSize", envIntOption("WMUX_MOONLIGHT_VIDEO_FRAME_QUEUE_SIZE"));
+  assignIntSetting(settings, "audioSampleQueueSize", envIntOption("WMUX_MOONLIGHT_AUDIO_SAMPLE_QUEUE_SIZE"));
+  assignEnumSetting(settings, "videoSize", process.env.WMUX_MOONLIGHT_VIDEO_SIZE, ["720p", "1080p", "1440p", "4k", "native", "custom"]);
+  assignEnumSetting(settings, "videoCodec", process.env.WMUX_MOONLIGHT_VIDEO_CODEC, ["auto", "h264", "h265", "av1"]);
+  assignBoolSetting(settings, "canvasRenderer", envBoolOption("WMUX_MOONLIGHT_CANVAS_RENDERER"));
+  assignBoolSetting(settings, "canvasVsync", envBoolOption("WMUX_MOONLIGHT_CANVAS_VSYNC"));
+  assignBoolSetting(settings, "forceVideoElementRenderer", envBoolOption("WMUX_MOONLIGHT_FORCE_VIDEO_ELEMENT_RENDERER"));
+  assignBoolSetting(settings, "playAudioLocal", envBoolOption("WMUX_MOONLIGHT_PLAY_AUDIO_LOCAL"));
+  const width = envIntOption("WMUX_MOONLIGHT_VIDEO_WIDTH");
+  const height = envIntOption("WMUX_MOONLIGHT_VIDEO_HEIGHT");
+  if (width || height) {
+    const existingCustom = settings.videoSizeCustom && typeof settings.videoSizeCustom === "object" ? settings.videoSizeCustom : {};
+    settings.videoSizeCustom = {
+      ...existingCustom,
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
+    };
+    if (width && height && !settings.videoSize) settings.videoSize = "custom";
+  }
+  return settings;
+}
+
+function jsonObjectOption(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function assignIntSetting(settings, key, value) {
+  if (value) settings[key] = value;
+}
+
+function assignEnumSetting(settings, key, value, allowed) {
+  const normalized = stringOption(value).toLowerCase();
+  if (allowed.includes(normalized)) settings[key] = normalized;
+}
+
+function assignBoolSetting(settings, key, value) {
+  if (value !== undefined) settings[key] = value;
+}
+
+function envIntOption(...names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value === undefined || value === null || value === "") continue;
+    const parsed = Number.parseInt(String(value), 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+function envBoolOption(name) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === "") return undefined;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(text)) return true;
+  if (["0", "false", "no", "off"].includes(text)) return false;
+  return undefined;
 }
 
 function sleep(ms) {

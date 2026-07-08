@@ -140,6 +140,10 @@ export const TerminalPane = memo(function TerminalPane({
     let contextMenuListener: ((event: MouseEvent) => void) | undefined;
     let copyListener: ((event: ClipboardEvent) => void) | undefined;
     let pasteListener: ((event: ClipboardEvent) => void) | undefined;
+    let windowFocusListener: (() => void) | undefined;
+    let windowBlurListener: (() => void) | undefined;
+    let pageShowListener: (() => void) | undefined;
+    let visibilityChangeListener: (() => void) | undefined;
     let contextMenuSelection = "";
     let pendingCursorPlacement: { sequence: string; x: number; y: number } | null = null;
     let contextCopyBridge: HTMLTextAreaElement | undefined;
@@ -464,6 +468,17 @@ export const TerminalPane = memo(function TerminalPane({
       reconnectDelayMs = Math.min(3000, Math.round(reconnectDelayMs * 1.6));
     };
 
+    const foreground = () => isForegroundTerminal(activeRef.current);
+
+    const announceResizeState = () => {
+      const term = terminalRef.current;
+      if (!term) return;
+      if (activeRef.current && document.visibilityState === "visible") fitAddonRef.current?.fit();
+      sendResizeMessage(socketRef.current, activeRef.current ? "activate" : "resize", term, foreground());
+    };
+
+    const announceResizeStateSoon = () => requestAnimationFrame(announceResizeState);
+
     const connect = () => {
       const term = terminalRef.current;
       if (cancelled || removed || !term) return;
@@ -482,7 +497,7 @@ export const TerminalPane = memo(function TerminalPane({
         }
         reconnectDelayMs = 350;
         setConnected(true);
-        sendResizeMessage(ws, activeRef.current ? "activate" : "resize", term);
+        sendResizeMessage(ws, activeRef.current ? "activate" : "resize", term, foreground());
       };
       ws.onclose = () => {
         if (cancelled) return;
@@ -619,6 +634,17 @@ export const TerminalPane = memo(function TerminalPane({
       };
       term.element?.addEventListener("copy", copyListener, { capture: true });
       term.element?.addEventListener("paste", pasteListener, { capture: true });
+      windowFocusListener = announceResizeStateSoon;
+      windowBlurListener = announceResizeState;
+      pageShowListener = announceResizeStateSoon;
+      visibilityChangeListener = () => {
+        if (document.visibilityState === "visible") announceResizeStateSoon();
+        else announceResizeState();
+      };
+      window.addEventListener("focus", windowFocusListener);
+      window.addEventListener("blur", windowBlurListener);
+      window.addEventListener("pageshow", pageShowListener);
+      document.addEventListener("visibilitychange", visibilityChangeListener);
 
       term.attachCustomKeyEventHandler((event) => {
         if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
@@ -661,10 +687,10 @@ export const TerminalPane = memo(function TerminalPane({
         if (term.getViewportY() > 0) term.scrollToBottom();
         sendInput(socketRef.current, data);
       });
-      term.onResize((size) => {
+      term.onResize(() => {
         const ws = socketRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: activeRef.current ? "activate" : "resize", cols: size.cols, rows: size.rows }));
+          sendResizeMessage(ws, activeRef.current ? "activate" : "resize", term, foreground());
         }
       });
       connect();
@@ -684,6 +710,10 @@ export const TerminalPane = memo(function TerminalPane({
       if (contextMenuListener) terminalRef.current?.element?.removeEventListener("contextmenu", contextMenuListener, { capture: true });
       if (copyListener) terminalRef.current?.element?.removeEventListener("copy", copyListener, { capture: true });
       if (pasteListener) terminalRef.current?.element?.removeEventListener("paste", pasteListener, { capture: true });
+      if (windowFocusListener) window.removeEventListener("focus", windowFocusListener);
+      if (windowBlurListener) window.removeEventListener("blur", windowBlurListener);
+      if (pageShowListener) window.removeEventListener("pageshow", pageShowListener);
+      if (visibilityChangeListener) document.removeEventListener("visibilitychange", visibilityChangeListener);
       socketRef.current?.close();
       resetSynchronizedOutput(synchronizedOutputRef.current);
       fitAddon?.dispose();
@@ -698,9 +728,9 @@ export const TerminalPane = memo(function TerminalPane({
     const term = terminalRef.current;
     if (!active || !term) return;
     requestAnimationFrame(() => {
-      fitAddonRef.current?.fit();
-      sendResizeMessage(socketRef.current, "activate", term);
       if (focusSignal > 0) term.focus();
+      fitAddonRef.current?.fit();
+      sendResizeMessage(socketRef.current, "activate", term, isForegroundTerminal(activeRef.current));
     });
   }, [active, focusSignal]);
 
@@ -858,10 +888,18 @@ const sendInput = (ws: WebSocket | null, data: string): void => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
 };
 
-const sendResizeMessage = (ws: WebSocket | null, type: "resize" | "activate", term: Terminal): void => {
+const sendResizeMessage = (
+  ws: WebSocket | null,
+  type: "resize" | "activate",
+  term: Terminal,
+  foreground = false,
+): void => {
   if (ws?.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type, cols: safeCols(term.cols), rows: safeRows(term.rows) }));
+  ws.send(JSON.stringify({ type: foreground ? type : "resize", cols: safeCols(term.cols), rows: safeRows(term.rows), foreground }));
 };
+
+const isForegroundTerminal = (active: boolean): boolean =>
+  active && document.visibilityState === "visible" && document.hasFocus();
 
 const inputMayLeaveShellPrompt = (data: string): boolean => data.includes("\r") || data.includes("\n") || data.includes("\x04");
 

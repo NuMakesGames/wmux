@@ -1,6 +1,7 @@
 export type MachineKind = "local" | "ssh" | "powershell" | "powershell-ssh" | "service";
 export type SessionBackend = "auto" | "pty" | "tmux" | "screen" | "agent";
 export type StreamProvider = "mediamtx" | "moonlight-gateway";
+export type StreamReasonKind = "provider" | "gateway" | "upstream" | "target";
 
 export interface MachineStreamConfig {
   provider?: StreamProvider;
@@ -141,6 +142,7 @@ export interface StreamStatus {
   publishWhipUrl?: string;
   inputEnabled?: boolean;
   reason?: string;
+  reasonKind?: StreamReasonKind;
 }
 
 export interface WmuxSettings {

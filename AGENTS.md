@@ -108,6 +108,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - `wmux-hooks install codex` mutates `~/.codex/hooks.json` outside the repo. Codex command hooks require the user to review/trust them with `/hooks` before they run.
 - `wmux-stream-agent` publishes the local display with ffmpeg to the machine's `WMUX_STREAM_RTSP_URL`. It should normally run as a service with `onDemand: true`, polling wmux and starting actual capture only while a stream dialog is open. It must run in the graphical login session of the machine being captured. On macOS, the owning app needs System Settings -> Privacy & Security -> Screen Recording permission. On Windows, the validated path is `wmux-windows-setup install-stream`, which creates a per-user Scheduled Task that runs under the logged-in user session.
 - Remote hooks/helpers are not auto-installed retroactively into already-running shell sessions. Start a new wmux pane or ensure the staged helper directory is on `PATH` on the remote host.
+- The Codex skill lives under `skills/wmux` and should stay aligned with wmux API routes, helper behavior, and `wmux.config.json`. On dogfood hosts, expose it through `~/.codex/skills/wmux` as a symlink to this repo copy rather than maintaining a separate personal copy.
 
 ## Current Gaps To Preserve In Docs
 

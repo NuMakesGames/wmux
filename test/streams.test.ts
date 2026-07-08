@@ -78,6 +78,19 @@ test("reports upstream failure reasons for a live gateway with a dead upstream",
       const [status] = await resolveStreamStatuses([moonlightMachine], "127.0.0.1");
       assert.equal(status.live, false);
       assert.ok(status.reason?.includes("502"), `expected upstream reason, got ${status.reason}`);
+      assert.equal(status.reasonKind, "upstream");
+    },
+  );
+});
+
+test("reports target failure reasons for a live gateway with a dead Moonlight target", async () => {
+  await withStubbedFetch(
+    { "/api/wmux/health": { ok: false, upstream: { ok: true }, target: { ok: false, reason: "host probe timed out" } } },
+    async () => {
+      const [status] = await resolveStreamStatuses([moonlightMachine], "127.0.0.1");
+      assert.equal(status.live, false);
+      assert.equal(status.reason, "host probe timed out");
+      assert.equal(status.reasonKind, "target");
     },
   );
 });
@@ -87,5 +100,6 @@ test("surfaces MediaMTX unavailability as a reason on offline streams", async ()
     const [status] = await resolveStreamStatuses([localMachine], "127.0.0.1");
     assert.equal(status.live, false);
     assert.ok(status.reason);
+    assert.equal(status.reasonKind, "provider");
   });
 });

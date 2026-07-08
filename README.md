@@ -26,6 +26,17 @@ npm run start -- --host 100.x.y.z --port 3478
 
 The server refuses public bind hosts. Use loopback, Tailscale `100.64.0.0/10`, or an RFC1918/internal address.
 
+To serve wmux over HTTPS with a Tailscale certificate, point wmux at the certificate and key and set the public URL to the certificate name:
+
+```bash
+WMUX_CERT_FILE=~/.wmux/certs/homelab.tailnet.ts.net.crt \
+WMUX_KEY_FILE=~/.wmux/certs/homelab.tailnet.ts.net.key \
+WMUX_PUBLIC_URL=https://homelab.tailnet.ts.net:3478 \
+npm run start -- --host 100.x.y.z --port 3478
+```
+
+The HTTPS top-level page is required for browser secure-context APIs used by the Moonlight desktop streaming path. Serving only the gateway over HTTPS is not enough if wmux itself is loaded over plain HTTP.
+
 ## Run As A User Service
 
 Install and start the systemd user service:
@@ -39,6 +50,8 @@ This chooses the first Tailscale IPv4 address when available. Override it with:
 ```bash
 WMUX_HOST=100.x.y.z WMUX_PORT=3478 scripts/install-user-service.sh
 ```
+
+The service installer also preserves `WMUX_CERT_FILE`, `WMUX_KEY_FILE`, and `WMUX_PUBLIC_URL` when they are set.
 
 Useful service commands:
 
@@ -183,6 +196,21 @@ The Codex installer merges `UserPromptSubmit` and `Stop` hooks into `~/.codex/ho
 
 OpenCode wrappers can call `wmux-agent-event` manually until wmux has verified a stable hook config surface for that tool.
 
+## Codex Skill
+
+The bundled Codex skill lives in `skills/wmux`. It teaches agents how to use
+the wmux API, helper commands, and current machine ids for visible remote task
+orchestration. On this host it is exposed to Codex by symlinking it into the
+personal skill directory:
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -sfnT "$(pwd)/skills/wmux" "${CODEX_HOME:-$HOME/.codex}/skills/wmux"
+```
+
+Keep the skill in sync when wmux API routes, helper behavior, or machine
+configuration changes.
+
 ## Activity And Run Metadata
 
 The activity drawer in the top bar shows recent agent events and tracked command runs with workspace, tab, host, duration, and exit status context. Use `wmux-run` when you want a command to appear there:
@@ -285,7 +313,7 @@ WMUX_MOONLIGHT_WEB_URL=http://127.0.0.1:8080 \
   scripts/wmux-moonlight-gateway --host 100.x.y.z --port 3490
 ```
 
-The gateway exposes `/api/wmux/health` for wmux and proxies HTTP/WebSocket traffic to the Moonlight Web upstream. See [docs/MOONLIGHT_GATEWAY.md](docs/MOONLIGHT_GATEWAY.md) for setup notes and the implementation risks found while reviewing Moonlight Web Stream.
+The gateway exposes `/api/wmux/health` for wmux and proxies HTTP/WebSocket traffic to the Moonlight Web upstream. It can also patch Moonlight Web launch settings such as transport, bitrate, codec, and renderer choice. Prefer serving the gateway over HTTPS so Moonlight Web can use WebCodecs/canvas; over plain HTTP, keep the canvas renderer disabled and use conservative H.264 bitrate/FPS settings. See [docs/MOONLIGHT_GATEWAY.md](docs/MOONLIGHT_GATEWAY.md) for setup notes and the implementation risks found while reviewing Moonlight Web Stream.
 
 For macOS SSH hosts, `wmux-sunshine-setup install-sunshine` installs the official DMG or Homebrew formula, `configure-sunshine` sets credentials, and `start-sunshine` creates a user LaunchAgent. For Windows hosts, `wmux-windows-setup install-sunshine` installs Sunshine with `winget`; `configure-sunshine` sets Sunshine credentials from `WMUX_SUNSHINE_USER` and `WMUX_SUNSHINE_PASSWORD`; `start-sunshine` starts it in the logged-in user session. The gateway can then automate pairing by calling `/api/wmux/setup/pair`, which generates the Moonlight Web PIN, waits briefly for Sunshine to register the pending pair request, and submits the matching Moonlight pair device name to Sunshine's `/api/pin`. When `WMUX_MOONLIGHT_WEB_USER` and `WMUX_MOONLIGHT_WEB_PASSWORD` are set on the gateway service, wmux stream links enter through the gateway autologin endpoint instead of prompting for Moonlight Web credentials.
 

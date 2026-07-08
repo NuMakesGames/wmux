@@ -46,10 +46,18 @@ const moonlightGatewayUi: StreamProviderUi = {
   frameUrl: (stream) => stream.openUrl,
   frameTitle: "Moonlight gateway",
   openTitle: "Open Moonlight gateway",
-  stateLabel: (stream) => (stream.live ? "gateway ready" : stream.reason ? "upstream offline" : "gateway offline"),
-  offlineTitle: (stream) => (stream.reason ? "Moonlight upstream unavailable" : "Moonlight gateway unavailable"),
-  offlineHint: (machineName) =>
-    `Run wmux-moonlight-gateway for ${machineName}; Sunshine and the gateway own the remote-control stream.`,
+  stateLabel: (stream) => {
+    if (stream.live) return "gateway ready";
+    if (stream.reasonKind === "target") return "target offline";
+    if (stream.reasonKind === "upstream") return "upstream offline";
+    return "gateway offline";
+  },
+  offlineTitle: (stream) => {
+    if (stream.reasonKind === "target") return "Moonlight target unavailable";
+    if (stream.reasonKind === "upstream") return "Moonlight Web unavailable";
+    return "Moonlight gateway unavailable";
+  },
+  offlineHint: (machineName) => `Sunshine must be running and reachable on ${machineName}.`,
   hint: (stream) => [
     { label: "gateway", value: stream.gatewayUrl ?? stream.openUrl },
     {
