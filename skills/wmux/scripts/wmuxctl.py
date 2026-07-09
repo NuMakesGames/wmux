@@ -71,6 +71,9 @@ class WmuxClient:
     def set_workspace_title(self, workspace_id: str, title: str) -> None:
         self.request("POST", f"/api/workspaces/{urllib.parse.quote(workspace_id)}/title", {"title": title})
 
+    def close_workspace(self, workspace_id: str) -> dict[str, Any]:
+        return self.request("DELETE", f"/api/workspaces/{urllib.parse.quote(workspace_id)}")
+
     def record_agent_event(
         self,
         workspace_id: str,
@@ -198,6 +201,21 @@ def get_or_create_workspace(client: WmuxClient, machine_id: str, title: str, for
     return workspace, False
 
 
+def resolve_workspace(client: WmuxClient, args: argparse.Namespace) -> dict[str, Any]:
+    if args.workspace:
+        payload = client.bootstrap()
+        for workspace in payload.get("workspaces", []):
+            if workspace.get("id") == args.workspace:
+                return workspace
+        raise SystemExit(f"wmuxctl: workspace not found: {args.workspace}")
+    if args.machine and args.title:
+        workspace = find_workspace(client, args.machine, args.title)
+        if workspace:
+            return workspace
+        raise SystemExit(f"wmuxctl: no workspace titled {args.title!r} on {args.machine}")
+    raise SystemExit("wmuxctl: provide --workspace or both --machine and --title")
+
+
 def maybe_record_running_event(client: WmuxClient, args: argparse.Namespace, info: dict[str, Any], summary: str) -> None:
     if args.no_event:
         return
@@ -239,6 +257,32 @@ def cmd_run(client: WmuxClient, args: argparse.Namespace) -> int:
     client.send_input(info["paneId"], line, args.cols, args.rows)
     info["reused"] = reused
     info["sentBytes"] = len(line.encode("utf-8"))
+    print_json(info)
+    return 0
+
+
+def cmd_finish(client: WmuxClient, args: argparse.Namespace) -> int:
+    workspace = resolve_workspace(client, args)
+    info = describe_workspace(client.url, workspace)
+    if args.pane:
+        info["paneId"] = args.pane
+    if args.tab:
+        info["tabId"] = args.tab
+    client.record_agent_event(
+        info["workspaceId"],
+        info["tabId"],
+        info["paneId"],
+        args.agent,
+        args.status,
+        args.title or workspace_title(workspace) or "wmux task",
+        args.summary,
+    )
+    info["status"] = args.status
+    if args.close:
+        result = client.close_workspace(info["workspaceId"])
+        info["closed"] = bool(result.get("removed"))
+    else:
+        info["closed"] = False
     print_json(info)
     return 0
 
@@ -332,6 +376,18 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--cols", type=int, default=120)
     ps.add_argument("--rows", type=int, default=36)
     ps.set_defaults(func=cmd_ps)
+
+    finish = subparsers.add_parser("finish", help="record final task status and optionally close the workspace")
+    finish.add_argument("--workspace", default="", help="workspace id to finish")
+    finish.add_argument("--machine", default="", help="machine id for --title lookup")
+    finish.add_argument("--title", default="", help="task/workspace title")
+    finish.add_argument("--tab", default="", help="override tab id for the final event")
+    finish.add_argument("--pane", default="", help="override pane id for the final event")
+    finish.add_argument("--agent", default="codex", help="agent name for the final event")
+    finish.add_argument("--status", choices=("completed", "failed", "stopped"), required=True)
+    finish.add_argument("--summary", required=True, help="final event summary")
+    finish.add_argument("--close", action="store_true", help="close the workspace after recording the event")
+    finish.set_defaults(func=cmd_finish)
 
     return parser
 

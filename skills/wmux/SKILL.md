@@ -22,6 +22,7 @@ python3 ~/.codex/skills/wmux/scripts/wmuxctl.py machines
 python3 ~/.codex/skills/wmux/scripts/wmuxctl.py open away-team --title "Build check"
 python3 ~/.codex/skills/wmux/scripts/wmuxctl.py run 9800x3d --title "Windows smoke" --line "wmux-run -- pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion'"
 python3 ~/.codex/skills/wmux/scripts/wmuxctl.py ps win-ci --title "Runner repair" --script "Get-ScheduledTask -TaskName gitea-act-runner"
+python3 ~/.codex/skills/wmux/scripts/wmuxctl.py finish --machine win-ci --title "Runner repair" --status completed --summary "Runner repaired" --close
 python3 ~/.codex/skills/wmux/scripts/wmuxctl.py send pane_abc123 --line "wmux-agent-event --agent codex --status completed --title Done --summary 'Remote step finished'"
 ```
 
@@ -38,6 +39,7 @@ The helper reads `~/.wmux/url`/`WMUX_URL` and `WMUX_TOKEN`/`~/.wmux/token`; it n
 - Use exact machine ids from the current config. Do not rely on stale docs if `wmux.config.json` or `/api/bootstrap` differs.
 - Always give automated work a descriptive `--title`; `wmuxctl open`, `run`, and `ps` reuse an existing workspace with that exact title by default. Use `--new` only when a genuinely separate workspace is wanted.
 - Prefer `wmuxctl ps` for Windows multi-step scripts. Avoid pasting long raw PowerShell blocks into an interactive prompt; they can leave continuation prompts or unreadable base64 fragments in the terminal.
+- For one-shot automated work that the agent created and completed successfully, record a final event and close the workspace with `wmuxctl finish --status completed --close`. Keep the workspace open when the task failed, needs user inspection, is interactive, or leaves a long-running process that the user should monitor.
 - Do not dump full process command lines from wmux-managed Windows shells. They can contain encoded wmux bootstrap URLs or tokens. Select safe fields such as `ProcessId`, `Name`, `CreationDate`, and service/task state unless the user explicitly needs command-line debugging.
 
 ## Workflow
@@ -47,7 +49,8 @@ The helper reads `~/.wmux/url`/`WMUX_URL` and `WMUX_TOKEN`/`~/.wmux/token`; it n
 3. Send commands with `wmuxctl run` for simple shell lines or `wmuxctl ps` for Windows PowerShell scripts. The helper records a `running` agent event for launched commands.
 4. Wrap substantive commands in `wmux-run -- ...` from inside the pane when you want command duration/exit tracking in the activity drawer.
 5. Use `wmux-agent-event` at task boundaries when running inside a wmux pane, especially for long remote agent sessions. End with `completed` or `failed` and a useful summary.
-6. Leave the workspace open unless cleanup was requested. Report the workspace URL, pane id, machine id, and any command status you observed.
+6. For successful, non-interactive task-owned workspaces, run `wmuxctl finish --workspace <workspaceId> --status completed --summary "..." --close` after recording the result. For failures, debugging, or user-visible long-running sessions, use `finish` without `--close` and leave the workspace open.
+7. Report the workspace URL, pane id, machine id, final status, and whether the workspace was closed.
 
 ## References
 

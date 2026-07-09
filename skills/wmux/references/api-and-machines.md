@@ -108,10 +108,23 @@ python3 ~/.codex/skills/wmux/scripts/wmuxctl.py ps win-ci \
 
 `wmuxctl ps` sends a child `pwsh -EncodedCommand`, appends a completion sentinel, and records a running agent event. This is less brittle than pasting long raw PowerShell blocks into an interactive prompt.
 
+When an agent-created, one-shot workspace completes successfully and no user inspection is needed, record the final event and close it:
+
+```bash
+python3 ~/.codex/skills/wmux/scripts/wmuxctl.py finish \
+  --workspace "$WORKSPACE_ID" \
+  --status completed \
+  --summary "Task completed; results are in ~/repo/output.json" \
+  --close
+```
+
+For failed runs, debugging sessions, interactive work, or long-running processes the user should monitor, omit `--close` so the terminal remains available.
+
 ## Other Useful Endpoints
 
 - `GET /api/bootstrap`: machines, workspaces, notifications, agent events, runs, settings, streams.
 - `POST /api/workspaces`: body `{ "machineId": "away-team" }`.
+- `DELETE /api/workspaces/:workspaceId`: close a workspace and kill its pane sessions.
 - `POST /api/workspaces/:workspaceId/tabs`: body `{ "machineId": "local" }`.
 - `POST /api/tabs/:tabId/split`: body `{ "paneId": "...", "direction": "horizontal"|"vertical", "machineId": "..." }`.
 - `POST /api/panes/:paneId/input`: body `{ "data": "...", "cols": 120, "rows": 36 }`.
