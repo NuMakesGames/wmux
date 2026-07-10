@@ -647,6 +647,10 @@ export const TerminalPane = memo(function TerminalPane({
       document.addEventListener("visibilitychange", visibilityChangeListener);
 
       term.attachCustomKeyEventHandler((event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === "KeyC" && term.hasSelection()) {
+          term.copySelection();
+          return true;
+        }
         if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
           if (event.key === "ArrowLeft") {
             sendInput(socketRef.current, "\x1bb");
