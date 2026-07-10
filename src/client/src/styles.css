@@ -1940,6 +1940,142 @@ button.active-tool {
   text-transform: uppercase;
 }
 
+.c64-boot-screen {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: var(--wmux-viewport-height, 100dvh);
+  overflow: hidden;
+  background: #7869c4;
+  padding: clamp(14px, 4vw, 52px);
+}
+
+.c64-boot-bezel {
+  position: relative;
+  width: min(920px, 100%);
+  height: min(680px, 100%);
+  min-height: 0;
+  overflow: hidden;
+  border: clamp(14px, 3vw, 42px) solid #7869c4;
+  background: #40318d;
+  box-shadow:
+    0 28px 90px rgba(16, 10, 48, 0.38),
+    inset 0 0 0 1px rgba(196, 187, 255, 0.12);
+}
+
+.c64-boot-terminal {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #40318d;
+}
+
+.c64-boot-terminal canvas {
+  display: block;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.wmux-login.c64-login {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: block;
+  min-height: 0;
+  background: #40318d;
+  padding: 0;
+  color: #7869c4;
+  font-family: var(--wmux-mono-font);
+  text-transform: uppercase;
+}
+
+.c64-login .wmux-login-card {
+  gap: 8px;
+  width: 100%;
+  padding: 14px 18px 16px;
+  border: 0;
+  border-top: 2px solid #7869c4;
+  border-radius: 0;
+  background: #40318d;
+  box-shadow: none;
+}
+
+.c64-login .wmux-login-title,
+.c64-login .wmux-login-hint,
+.c64-login .wmux-login-field,
+.c64-login .wmux-login-error {
+  color: #7869c4;
+  font-family: inherit;
+}
+
+.c64-login .wmux-login-title {
+  margin: 0;
+  font-size: 16px;
+  text-transform: uppercase;
+}
+
+.c64-login .wmux-login-hint {
+  font-size: 12px;
+}
+
+.c64-login .wmux-login-field {
+  display: grid;
+  grid-template-columns: 10ch minmax(0, 1fr);
+  align-items: center;
+  gap: 0;
+}
+
+.c64-login .wmux-login-field input {
+  min-width: 0;
+  border: 0;
+  border-bottom: 2px solid #7869c4;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  color: #7869c4;
+  caret-color: #7869c4;
+  font: inherit;
+}
+
+.c64-login .wmux-login-field input:focus {
+  color: #b8afff;
+  border-color: #b8afff;
+}
+
+.c64-login .wmux-login-submit {
+  align-self: flex-start;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 2px 0;
+  color: #7869c4;
+  font: inherit;
+}
+
+@media (max-width: 600px) {
+  .c64-boot-screen {
+    padding: 0;
+  }
+
+  .c64-boot-bezel {
+    width: 100%;
+    height: 100%;
+    border-width: 18px 12px;
+  }
+}
+
 .command-backdrop {
   position: fixed;
   inset: 0;

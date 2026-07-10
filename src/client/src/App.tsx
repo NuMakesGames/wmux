@@ -2,12 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, GripVertical, Link2, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
 import { api, UnauthorizedError } from "./api";
 
-// The terminal engine (ghostty-web + kitty graphics) loads on demand so the
-// login screen and chrome paint without it.
+// The full pane surface (Ghostty + Kitty graphics) stays lazy; the lightweight
+// boot screen owns the initial Ghostty startup while the API bootstrap runs.
 const LayoutView = lazy(() => import("./LayoutView").then((m) => ({ default: m.LayoutView })));
 import { createAppStore, useAppState } from "./app-store";
+import { C64BootScreen } from "./C64BootScreen";
 import { EmptyWorkspaceView } from "./EmptyWorkspaceView";
-import { LoginView } from "./LoginView";
 import { MobileAgentSurface } from "./MobileAgentSurface";
 import { OpenTuiActivityPanel } from "./OpenTuiActivityPanel";
 import type { OpenTuiActivityRow } from "./OpenTuiActivityPanel";
@@ -92,6 +92,7 @@ export function App() {
   const [newMachineId, setNewMachineId] = useState("local");
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
+  const [bootComplete, setBootComplete] = useState(false);
   const { toasts, pushToast, dismissToast } = useToasts();
   const {
     sidebarCollapsed,
@@ -114,6 +115,7 @@ export function App() {
   const [mountedTabKeys, setMountedTabKeys] = useState<string[]>([]);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState<TerminalFocusRequest | null>(null);
   const terminalFocusToken = useRef(0);
+  const finishBoot = useCallback(() => setBootComplete(true), []);
 
   useEffect(() => {
     if (!mobileViewport.isMobile || sidebarCollapsed) return;
@@ -925,9 +927,17 @@ export function App() {
     unreadNotifications.length,
   ]);
 
-  if (authRequired) return <LoginView onAuthenticated={() => void loadBootstrap()} />;
   if (error) return <div className="load-state">wmux failed to load: {error}</div>;
-  if (!state) return <div className="load-state">Loading wmux...</div>;
+  if (!state || !bootComplete || authRequired) {
+    return (
+      <C64BootScreen
+        authRequired={authRequired}
+        ready={Boolean(state) && !authRequired}
+        onAuthenticated={() => void loadBootstrap()}
+        onComplete={finishBoot}
+      />
+    );
+  }
 
   const appClassName = [
     "app-shell",

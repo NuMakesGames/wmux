@@ -3,6 +3,7 @@ import { api } from "./api";
 import { setToken } from "./token";
 
 interface LoginViewProps {
+  embedded?: boolean;
   onAuthenticated: () => void;
 }
 
@@ -11,7 +12,7 @@ interface LoginViewProps {
  * offers a username/password form (minting a session token); otherwise it
  * explains the token-URL path used by machine clients.
  */
-export const LoginView = ({ onAuthenticated }: LoginViewProps) => {
+export const LoginView = ({ embedded = false, onAuthenticated }: LoginViewProps) => {
   const [loginEnabled, setLoginEnabled] = useState<boolean | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -42,12 +43,12 @@ export const LoginView = ({ onAuthenticated }: LoginViewProps) => {
   };
 
   return (
-    <div className="wmux-login">
+    <div className={`wmux-login ${embedded ? "c64-login" : ""}`}>
       <form className="wmux-login-card" onSubmit={submit}>
-        <h1 className="wmux-login-title">wmux</h1>
+        <h1 className="wmux-login-title">{embedded ? "Authentication required" : "wmux"}</h1>
         {loginEnabled === false ? (
           <p className="wmux-login-hint">
-            This server requires an access token. Open the URL the server printed on startup, including
+            {embedded ? "ACCESS TOKEN REQUIRED. OPEN THE STARTUP URL INCLUDING" : "This server requires an access token. Open the URL the server printed on startup, including"}
             <code> ?token=…</code>.
           </p>
         ) : (
@@ -70,9 +71,9 @@ export const LoginView = ({ onAuthenticated }: LoginViewProps) => {
                 onChange={(event) => setPassword(event.target.value)}
               />
             </label>
-            {error ? <p className="wmux-login-error">{error}</p> : null}
+            {error ? <p className="wmux-login-error">{embedded ? `?${error}` : error}</p> : null}
             <button type="submit" className="wmux-login-submit" disabled={busy}>
-              {busy ? "Signing in…" : "Sign in"}
+              {embedded ? (busy ? "VERIFYING..." : "PRESS RETURN") : busy ? "Signing in…" : "Sign in"}
             </button>
           </>
         )}
