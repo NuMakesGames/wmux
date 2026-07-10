@@ -45,8 +45,10 @@ export const enableTerminalLigatures = (): void => {
     cols: number,
   ) {
     const y = row * this.metrics.height;
+    const width = cols * this.metrics.width;
+    this.ctx.clearRect(0, y, width, this.metrics.height);
     this.ctx.fillStyle = this.theme.background;
-    this.ctx.fillRect(0, y, cols * this.metrics.width, this.metrics.height);
+    this.ctx.fillRect(0, y, width, this.metrics.height);
 
     for (let col = 0; col < line.length; col += 1) {
       const cell = line[col];

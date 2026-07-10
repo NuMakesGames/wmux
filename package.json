@@ -16,7 +16,7 @@
   "dependencies": {
     "@fontsource/fira-code": "^5.2.7",
     "@vitejs/plugin-react": "^4.7.0",
-    "ghostty-web": "^0.4.0",
+    "ghostty-web": "0.4.0-next.20.g1858a59",
     "lucide-react": "^0.468.0",
     "node-pty": "^1.0.0",
     "opentui-browser": "file:vendor/opentui-browser",
