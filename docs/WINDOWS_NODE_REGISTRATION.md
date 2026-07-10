@@ -227,7 +227,7 @@ Notes:
 
 - `validate` prints a JSON report for helper state, wmux API reachability, FFmpeg/Python/pywinpty/winget availability, hook config files, and stream Scheduled Task state.
 - `persist-path` adds `%LOCALAPPDATA%\wmux\bin` to the persistent user PATH for future non-wmux shells.
-- `install-deps` uses `winget` to install `Gyan.FFmpeg` and `Python.Python.3.12` when missing, then installs `pywinpty` with pip.
+- `install-deps` uses `winget` to install `Gyan.FFmpeg` and `Python.Python.3.12` when missing, then installs `pywinpty` with pip. It executes Python during detection so the Microsoft Store app-execution alias is not mistaken for an installed runtime.
 - `install-stream` installs and starts the per-user `wmux-stream-agent` Scheduled Task.
 - `install-agent` installs and starts the per-user `wmux-windows-agent` Scheduled Task for experimental restart-durable sessions.
 - Both Windows Scheduled Tasks start at user logon, start when available, restart after failure, have no fixed execution-time cutoff, and launch through hidden PowerShell wrappers instead of visible `cmd.exe` windows.
@@ -337,6 +337,8 @@ To make wmux use the agent for new panes, opt in explicitly:
 
 Keep the legacy `powershell-ssh` path available as a fallback while the ConPTY agent is still being validated.
 
+The agent task uses `Interactive` logon when a desktop user is logged in and falls back to `S4U` on a headless host. S4U avoids a stored password and does not require a live desktop session, but Windows does not make delegated network credentials available to S4U processes. Override automatic selection before installation with `WMUX_WINDOWS_AGENT_LOGON_TYPE=Interactive` or `WMUX_WINDOWS_AGENT_LOGON_TYPE=S4U`.
+
 ## Definition Of Done
 
 - homelab can SSH to the Windows user on `100.68.206.111:22` without a password prompt.
@@ -355,7 +357,7 @@ Keep the legacy `powershell-ssh` path available as a fallback while the ConPTY a
 
 ## Known Limits
 
-- Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent` and can survive `wmux.service` restarts.
+- Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent`; wmux service shutdown detaches its client while explicit pane closure deletes the owned ConPTY.
 - Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
 - Windows screen streaming is validated on 9800x3d through FFmpeg/gdigrab and the supervised per-user Scheduled Task. Locked/logged-out behavior and a fuller Windows wmux agent are still not implemented.
 - The Windows session agent uses pywinpty-backed ConPTY by default. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running, but Windows-agent restarts still kill the owned ConPTY processes and broad full-screen app validation is still pending.

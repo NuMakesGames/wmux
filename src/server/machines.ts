@@ -16,6 +16,7 @@ import { probeWindowsAgent, shouldUseWindowsAgent } from "./windows-agent.js";
 const DEFAULT_TERM = "xterm-256color";
 const remotePathBootstrap = (): string => `export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"`;
 const WINDOWS_HEALTH_CACHE_MS = 15_000;
+const POSIX_RUNTIME_VERSION = "v1";
 
 interface WindowsHealthProbe {
   reachable: boolean;
@@ -184,10 +185,9 @@ const localBackend: Backend = {
         helperPathExport: `export PATH=${shellQuote(`${process.cwd()}/scripts`)}":$PATH";`,
         useSystemdScope: false,
       });
-      const launchScript = localScopeScript(sessionName, innerScript);
       return {
         file: "/bin/sh",
-        args: ["-lc", launchScript],
+        args: [stageLocalRuntime(sessionName, innerScript)],
         cwd: startCwd,
         env,
         title: machine.name,
@@ -674,21 +674,26 @@ const durableShellScript = ({
   return `${persistCredentials} if command -v tmux >/dev/null 2>&1; then ${tmuxCommand}; fi; if command -v screen >/dev/null 2>&1; then ${screenAttach} || exec ${screenCreate}; exit $?; fi; ${fallbackShell}`;
 };
 
-const localScopeScript = (sessionName: string, innerScript: string): string => {
+const stageLocalRuntime = (sessionName: string, innerScript: string): string => {
+  const base = process.env.XDG_RUNTIME_DIR?.startsWith("/")
+    ? process.env.XDG_RUNTIME_DIR
+    : path.join(os.homedir(), ".wmux", "run");
+  const runtimeDir = path.join(base, "wmux", "runtimes");
+  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(runtimeDir, 0o700);
+  const runtimePath = path.join(runtimeDir, `${POSIX_RUNTIME_VERSION}-${sessionName}.sh`);
+  const temporaryPath = `${runtimePath}.${process.pid}.tmp`;
   const unit = `wmux-pane-${sessionName}`.replace(/[^A-Za-z0-9_.@-]/g, "_").slice(0, 80);
-  const scoped = [
-    "systemd-run",
-    "--user",
-    "--scope",
-    "--quiet",
-    "--collect",
-    "--unit",
-    shellQuote(unit),
-    "/bin/sh",
-    "-lc",
-    shellQuote(innerScript),
-  ].join(" ");
-  return `if command -v systemd-run >/dev/null 2>&1 && [ -n "\${XDG_RUNTIME_DIR:-}" ]; then ${scoped} && exit $?; fi; exec /bin/sh -lc ${shellQuote(innerScript)}`;
+  const runtime = `#!/bin/sh
+if [ "\${WMUX_RUNTIME_SCOPED:-}" != 1 ] && command -v systemd-run >/dev/null 2>&1 && [ -n "\${XDG_RUNTIME_DIR:-}" ]; then
+  exec systemd-run --user --scope --quiet --collect --unit ${shellQuote(unit)} env WMUX_RUNTIME_SCOPED=1 /bin/sh "$0"
+fi
+${innerScript}
+`;
+  fs.writeFileSync(temporaryPath, runtime, { mode: 0o700 });
+  fs.renameSync(temporaryPath, runtimePath);
+  fs.chmodSync(runtimePath, 0o700);
+  return runtimePath;
 };
 
 export const disposeDurableSession = (machine: MachineConfig, paneId: string): void =>
@@ -1146,9 +1151,10 @@ export const resolveMachineStatuses = async (
   return Promise.all(
     machines.map(async (machine) => {
       const checkedAt = new Date().toISOString();
+      const publicMachine = publicMachineStatusBase(machine);
       if (machine.kind === "local") {
         return {
-          ...machine,
+          ...publicMachine,
           reachable: true,
           checkedAt,
           endpoint: localEndpoint === "localhost" ? "127.0.0.1" : localEndpoint,
@@ -1158,7 +1164,7 @@ export const resolveMachineStatuses = async (
       if (machine.kind === "powershell" && process.platform !== "win32") {
         const hasPwsh = commandExists("pwsh");
         return {
-          ...machine,
+          ...publicMachine,
           reachable: false,
           reason: hasPwsh
             ? "WSMan PowerShell remoting is not supported from this non-Windows wmux host"
@@ -1170,7 +1176,7 @@ export const resolveMachineStatuses = async (
       }
       if (!machine.host) {
         return {
-          ...machine,
+          ...publicMachine,
           reachable: false,
           reason: "missing host",
           checkedAt,
@@ -1185,7 +1191,7 @@ export const resolveMachineStatuses = async (
           const sshReachable = hasSsh ? await probeTcp(machine.host, port, 900) : false;
           const agentReachable = agent?.reachable === true;
           return {
-            ...machine,
+            ...publicMachine,
             reachable: agentReachable,
             checkedAt,
             endpoint: agent?.url ?? `${machine.host}:${machine.agentPort ?? 3481}`,
@@ -1208,7 +1214,7 @@ export const resolveMachineStatuses = async (
               reason: hasSsh ? `no TCP response on ${machine.host}:${port}` : "local ssh client is not installed or not executable",
             };
         return {
-          ...machine,
+          ...publicMachine,
           reachable: health.reachable,
           checkedAt,
           endpoint: `${machine.host}:${port}`,
@@ -1230,7 +1236,7 @@ export const resolveMachineStatuses = async (
       const port = machine.port ?? (machine.kind === "ssh" ? 22 : machine.kind === "powershell" ? 5985 : 3478);
       const reachable = await probeTcp(machine.host, port, 900);
       return {
-        ...machine,
+        ...publicMachine,
         reachable,
         checkedAt,
         endpoint: `${machine.host}:${port}`,
@@ -1240,6 +1246,25 @@ export const resolveMachineStatuses = async (
     }),
   );
 };
+
+const publicMachineStatusBase = (machine: MachineConfig): Omit<MachineStatus, "reachable" | "checkedAt"> => ({
+  id: machine.id,
+  name: machine.name,
+  kind: machine.kind,
+  host: machine.host,
+  user: machine.user,
+  port: machine.port,
+  sessionBackend: machine.sessionBackend,
+  agentUrl: machine.agentUrl,
+  agentPort: machine.agentPort,
+  stream: machine.stream
+    ? {
+        provider: machine.stream.provider,
+        gatewayUrl: machine.stream.gatewayUrl,
+        gatewayOpenUrl: machine.stream.gatewayOpenUrl,
+      }
+    : undefined,
+});
 
 const localBackendDetail = (machine: MachineConfig): string => {
   const backend = machine.sessionBackend ?? "auto";

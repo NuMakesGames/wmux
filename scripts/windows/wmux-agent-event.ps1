@@ -30,6 +30,16 @@ function Clean-Text([string]$Value, [int]$Limit) {
   return $Cleaned
 }
 
+function Clean-Message([string]$Value, [int]$Limit = 12000) {
+  if (-not $Value) { return '' }
+  $Cleaned = $Value -replace "`r`n?", "`n"
+  $Cleaned = $Cleaned -replace '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ''
+  $Cleaned = $Cleaned -replace '[ \t]+\n', "`n"
+  $Cleaned = ($Cleaned -replace '\n{4,}', "`n`n`n").Trim()
+  if ($Cleaned.Length -gt $Limit) { return $Cleaned.Substring(0, $Limit) }
+  return $Cleaned
+}
+
 function Get-ContentText($Content) {
   if ($null -eq $Content) { return '' }
   if ($Content -is [string]) { return $Content }
@@ -78,7 +88,7 @@ function Read-HookInput {
 }
 
 function Read-TranscriptSummary([string]$PathValue) {
-  $Result = @{ title = ''; summary = '' }
+  $Result = @{ title = ''; summary = ''; message = '' }
   if (-not $PathValue -or -not (Test-Path -LiteralPath $PathValue -PathType Leaf)) { return $Result }
   $LastUser = ''
   $LastAssistant = ''
@@ -88,17 +98,19 @@ function Read-TranscriptSummary([string]$PathValue) {
     } catch {
       return
     }
-    $Message = if ($Entry.message) { $Entry.message } elseif ($Entry.item) { $Entry.item } else { $Entry }
+    $Message = if ($Entry.message) { $Entry.message } elseif ($Entry.item) { $Entry.item } elseif ($Entry.payload) { $Entry.payload } else { $Entry }
     $Role = $Message.role
     if (-not $Role -and $Message.type -eq 'user_message') { $Role = 'user' }
-    if (-not $Role -and $Message.type -eq 'assistant_message') { $Role = 'assistant' }
+    if (-not $Role -and $Message.type -in @('assistant_message', 'agent_message')) { $Role = 'assistant' }
     $Text = Get-ContentText $Message.content
     if (-not $Text) { $Text = Get-ContentText $Message.text }
+    if (-not $Text) { $Text = Get-ContentText $Message.message }
     if ($Role -eq 'user' -and $Text) { $LastUser = $Text }
     if ($Role -eq 'assistant' -and $Text) { $LastAssistant = $Text }
   }
   $Result.title = Get-TitleFromPrompt $LastUser
   $Result.summary = Get-SummaryFromOutput $LastAssistant
+  $Result.message = Clean-Message $LastAssistant
   return $Result
 }
 
@@ -108,6 +120,7 @@ if (-not $Agent) { $Agent = 'agent' }
 $Status = 'completed'
 $Title = ''
 $Summary = ''
+$Message = ''
 $Body = ''
 $PaneId = $env:WMUX_PANE_ID
 $WorkspaceId = $env:WMUX_WORKSPACE_ID
@@ -125,6 +138,7 @@ for ($Index = 0; $Index -lt $args.Count; $Index++) {
     '--status' { $Index++; $Status = [string]$args[$Index]; continue }
     '--title' { $Index++; $Title = [string]$args[$Index]; continue }
     '--summary' { $Index++; $Summary = [string]$args[$Index]; continue }
+    '--message' { $Index++; $Message = [string]$args[$Index]; continue }
     '--body' { $Index++; $Body = [string]$args[$Index]; continue }
     '--pane' { $Index++; $PaneId = [string]$args[$Index]; continue }
     '--workspace' { $Index++; $WorkspaceId = [string]$args[$Index]; continue }
@@ -144,10 +158,12 @@ if ($HookInput) {
   }
   if (-not $Title -and $HookInput.prompt) { $Title = Get-TitleFromPrompt ([string]$HookInput.prompt) }
   if (-not $Summary -and $HookInput.last_assistant_message) { $Summary = Get-SummaryFromOutput ([string]$HookInput.last_assistant_message) }
+  if (-not $Message -and $HookInput.last_assistant_message) { $Message = Clean-Message ([string]$HookInput.last_assistant_message) }
 }
 $TranscriptResult = Read-TranscriptSummary $Transcript
 if (-not $Title) { $Title = $TranscriptResult.title }
 if (-not $Summary) { $Summary = if ($Body) { $Body } else { $TranscriptResult.summary } }
+if (-not $Message) { $Message = $TranscriptResult.message }
 
 if ($ClaudeHook -and $HookInput) {
   $HookEvent = [string]$HookInput.hook_event_name
@@ -183,6 +199,7 @@ $Payload = [ordered]@{
   summary = Clean-Text $Summary 500
   body = Clean-Text $Body 500
 }
+if ($Message) { $Payload.message = Clean-Message $Message }
 if ($PaneId) { $Payload.paneId = $PaneId }
 if ($WorkspaceId) { $Payload.workspaceId = $WorkspaceId }
 if ($TabId) { $Payload.tabId = $TabId }

@@ -109,6 +109,19 @@ function New-WmuxTaskSettings {
     -MultipleInstances IgnoreNew
 }
 
+function Get-AgentLogonType {
+  if ($env:WMUX_WINDOWS_AGENT_LOGON_TYPE) {
+    if ($env:WMUX_WINDOWS_AGENT_LOGON_TYPE -notin @('Interactive', 'S4U')) {
+      Write-Error 'WMUX_WINDOWS_AGENT_LOGON_TYPE must be Interactive or S4U.'
+      exit 2
+    }
+    return $env:WMUX_WINDOWS_AGENT_LOGON_TYPE
+  }
+  $InteractiveUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+  if ($InteractiveUser) { return 'Interactive' }
+  return 'S4U'
+}
+
 function Show-Usage {
   Write-Error 'usage: wmux-windows-agent-service [install|restart|stop|uninstall|status|logs|diagnose]'
 }
@@ -122,12 +135,15 @@ switch ($ActionName) {
     Write-Wrapper
     $TaskAction = New-HiddenPowerShellAction
     $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn
-    $TaskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
+    $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $LogonType = Get-AgentLogonType
+    $TaskPrincipal = New-ScheduledTaskPrincipal -UserId $Identity -LogonType $LogonType
     $TaskSettings = New-WmuxTaskSettings
     $Task = New-ScheduledTask -Action $TaskAction -Trigger $TaskTrigger -Principal $TaskPrincipal -Settings $TaskSettings
     Register-ScheduledTask -TaskName $TaskName -InputObject $Task -Force | Out-Null
     Start-ScheduledTask -TaskName $TaskName
     Write-Output "Installed $TaskName"
+    Write-Output "Logon type: $LogonType"
     Write-Output "Logs: $LogDir"
   }
   'restart' {

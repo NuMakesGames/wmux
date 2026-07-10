@@ -185,6 +185,36 @@ const drawTopbar = (
   };
 
   const row = rows > 2 ? 1 : 0;
+  const compactActions = cols < 130;
+  const buttons: Array<[string, string, HitAction, boolean, boolean]> = [];
+  if (props.canMarkRead) {
+    buttons.push([compactActions ? "read" : "mark read", "Mark workspace notifications read", { type: "mark-read" }, false, true]);
+  }
+  if (props.canEnableNotifications) {
+    buttons.push([
+      props.unreadNotifications > 0 ? `alerts ${props.unreadNotifications}` : "alerts",
+      "Enable browser notifications",
+      { type: "notifications" },
+      false,
+      props.unreadNotifications > 0,
+    ]);
+  }
+  if (props.canOpenStream) {
+    buttons.push([
+      props.streamLive ? `stream ${Math.min(99, props.streamViewerCount)}` : "stream",
+      "Machine screen stream",
+      { type: "stream" },
+      false,
+      props.streamLive,
+    ]);
+  }
+  if (props.canCopyLink) buttons.push(["link", "Copy active session link", { type: "copy-link" }, false, false]);
+  buttons.push(
+    [props.activityOpen ? (compactActions ? "act*" : "activity*") : compactActions ? "act" : "activity", "Activity", { type: "activity" }, false, props.activityOpen],
+    [compactActions ? "set" : "settings", "Settings", { type: "settings" }, false, false],
+    [compactActions ? "cmd" : "commands", "Command palette", { type: "palette" }, false, false],
+  );
+
   let col = 1;
   for (const tab of props.tabs) {
     const label = `${tab.active ? ">" : " "} ${tab.title}${tab.unreadCount > 0 ? ` (${tab.unreadCount})` : ""}`;
@@ -193,7 +223,7 @@ const drawTopbar = (
     write(row, col + 1, label, tab.active ? rgba.gold : rgba.text, tab.active ? 700 : 600);
     hit(row, col, width, `Activate ${tab.title}`, { type: "tab", tabId: tab.id });
     col += width + 1;
-    if (col > cols - 46) break;
+    if (col > cols - (compactActions ? 46 : 78)) break;
   }
 
   fill(row, col, 4, props.canCreate ? rgba.panel : rgba.black);
@@ -203,16 +233,6 @@ const drawTopbar = (
   const serviceLabel = `wmux ${props.serviceConnection}`;
   const serviceWidth = Math.max(13, serviceLabel.length + 4);
   let right = cols - 1;
-  const buttons: Array<[string, string, HitAction, boolean, boolean]> = [
-    ["ok", "Mark workspace notifications read", { type: "mark-read" }, !props.canMarkRead, props.canMarkRead],
-    [props.unreadNotifications > 0 ? `bell${props.unreadNotifications}` : "bell", "Enable browser notifications", { type: "notifications" }, !props.canEnableNotifications, props.unreadNotifications > 0],
-    [props.streamLive ? `str${Math.min(99, props.streamViewerCount)}` : "str", "Machine screen stream", { type: "stream" }, !props.canOpenStream, props.streamLive],
-    ["link", "Copy active session link", { type: "copy-link" }, !props.canCopyLink, false],
-    [props.activityOpen ? "act*" : "act", "Activity", { type: "activity" }, false, props.activityOpen],
-    ["set", "Settings", { type: "settings" }, false, false],
-    ["cmd", "Command palette", { type: "palette" }, false, false],
-  ];
-
   for (const [label, title, action, disabled, active] of buttons) {
     const width = Math.max(5, label.length + 2);
     right -= width;

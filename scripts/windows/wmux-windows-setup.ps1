@@ -65,6 +65,19 @@ function Test-PythonModule([string]$ModuleName) {
   return ($script:WmuxLastPythonExitCode -eq 0)
 }
 
+function Test-PythonRuntime {
+  Invoke-Python -PythonArgs @('--version') -Quiet
+  return ($script:WmuxLastPythonExitCode -eq 0)
+}
+
+function Get-WorkingPythonPath([string]$Name, [string[]]$PrefixArgs) {
+  $Command = Get-Command $Name -ErrorAction SilentlyContinue
+  if (-not $Command) { return $null }
+  & $Command.Source @PrefixArgs --version *> $null
+  if ($LASTEXITCODE -ne 0) { return $null }
+  return [string]$Command.Source
+}
+
 function Install-PythonPackage([string]$PackageName, [string]$ImportName) {
   if (Test-PythonModule $ImportName) {
     Write-Output "$PackageName is already available."
@@ -190,8 +203,8 @@ function Get-WindowsWmuxReport {
     agentTaskLastTaskResult = if ($AgentTaskInfo) { $AgentTaskInfo.LastTaskResult } else { $null }
     commands = [ordered]@{
       ffmpeg = Get-CommandPath 'ffmpeg.exe'
-      python = Get-CommandPath 'python.exe'
-      py = Get-CommandPath 'py.exe'
+      python = Get-WorkingPythonPath 'python.exe' @()
+      py = Get-WorkingPythonPath 'py.exe' @('-3')
       winget = Get-CommandPath 'winget.exe'
       sshd = Get-CommandPath 'sshd.exe'
       sunshine = $SunshineCommand
@@ -239,9 +252,13 @@ function Install-WmuxDependencies {
   } else {
     Write-Output 'ffmpeg.exe is already available.'
   }
-  if (-not (Get-CommandPath 'python.exe') -and -not (Get-CommandPath 'py.exe')) {
+  if (-not (Test-PythonRuntime)) {
     & $Winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements
     Update-ProcessPath
+    if (-not (Test-PythonRuntime)) {
+      Write-Error 'Python installation completed, but a working Python runtime was not found on PATH.'
+      exit 1
+    }
   } else {
     Write-Output 'Python is already available.'
   }

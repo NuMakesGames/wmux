@@ -39,6 +39,7 @@ export interface PaneState {
 }
 
 export type TitleSource = "default" | "auto" | "user";
+export type WorkspaceCreator = "user" | "agent";
 
 export type SplitDirection = "horizontal" | "vertical";
 
@@ -59,6 +60,7 @@ export interface SurfaceTab {
 export interface Workspace {
   id: string;
   name: string;
+  createdBy?: WorkspaceCreator;
   nameSource?: TitleSource;
   descriptor?: string;
   descriptorSource?: TitleSource;
@@ -110,6 +112,7 @@ export interface AgentActivity {
   status: string;
   title: string;
   summary: string;
+  message?: string;
   createdAt: string;
 }
 
@@ -127,6 +130,7 @@ export interface TerminalRun {
 
 export interface StreamStatus {
   machineId: string;
+  checkedAt: string;
   provider: StreamProvider;
   path: string;
   live: boolean;
@@ -152,6 +156,7 @@ export interface WmuxSettings {
 }
 
 export interface BootstrapPayload {
+  revision: number;
   machines: MachineStatus[];
   workspaces: Workspace[];
   activeWorkspaceId: string;
@@ -184,4 +189,32 @@ export interface DurableSessionAudit {
   };
   sessions: DurableSessionAuditRow[];
   missing: Array<{ paneId: string; name: string }>;
+}
+
+export interface DoctorPaneReport {
+  paneId: string;
+  title: string;
+  machineId: string;
+  machineName: string;
+  status: PaneState["status"];
+  exitCode?: number | null;
+  driver: "pty" | "windows-agent";
+  transport: "pty" | "local-multiplexer" | "ssh-multiplexer" | "windows-agent";
+  restartDurable: boolean;
+  replay: boolean;
+  cwd: "osc7" | "multiplexer" | "agent";
+  machineReachable: boolean;
+  issue?: string;
+}
+
+export interface DoctorReport {
+  checkedAt: string;
+  summary: {
+    paneCount: number;
+    restartDurablePaneCount: number;
+    exitedPaneCount: number;
+    unreachableMachineCount: number;
+    sessionIssueCount: number;
+  };
+  panes: DoctorPaneReport[];
 }

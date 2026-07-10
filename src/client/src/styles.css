@@ -399,6 +399,10 @@ button.active-tool {
 }
 
 .workspace-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   overflow: hidden;
   color: var(--ivory);
   font-size: 12px;
@@ -407,6 +411,24 @@ button.active-tool {
   text-transform: uppercase;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workspace-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-origin-badge {
+  flex: 0 0 auto;
+  padding: 0 3px;
+  color: #c792ea;
+  font-size: 8px;
+  line-height: 12px;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(199, 146, 234, 0.5);
+  border-radius: 2px;
+  background: rgba(199, 146, 234, 0.08);
 }
 
 .workspace-meta {
@@ -676,6 +698,115 @@ button.active-tool {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.diagnostics-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.72);
+  padding: 20px;
+}
+
+.diagnostics-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: min(980px, 100%);
+  max-height: min(720px, calc(var(--wmux-viewport-height, 100vh) - 40px));
+  overflow: hidden;
+  border: 1px solid var(--line-hot);
+  border-radius: 4px;
+  background: var(--black);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+.diagnostics-header,
+.diagnostics-summary,
+.diagnostics-row {
+  display: grid;
+  align-items: center;
+}
+
+.diagnostics-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+  border-bottom: 1px solid var(--line);
+  padding: 12px 14px;
+  background: var(--panel);
+}
+
+.diagnostics-header h2 {
+  margin: 1px 0 0;
+  color: var(--ivory);
+  font-size: 16px;
+}
+
+.diagnostics-kicker {
+  color: var(--gold);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.diagnostics-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.diagnostics-actions button {
+  width: 30px;
+  height: 30px;
+}
+
+.diagnostics-summary {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  padding: 9px 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.diagnostics-summary strong { color: var(--ivory); }
+.diagnostics-summary.healthy svg { color: var(--green); }
+.diagnostics-summary.warning svg,
+.diagnostics-row.issue > span:last-child { color: var(--red); }
+
+.diagnostics-table {
+  min-height: 0;
+  overflow: auto;
+}
+
+.diagnostics-row {
+  grid-template-columns: minmax(130px, 1.2fr) minmax(100px, 1fr) minmax(145px, 1fr) 110px minmax(130px, 1.2fr);
+  gap: 10px;
+  min-height: 38px;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.diagnostics-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-row > span:first-child { color: var(--ivory); font-weight: 700; }
+.diagnostics-columns { color: var(--gold-dim); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.diagnostics-error,
+.diagnostics-loading { padding: 18px; color: var(--muted); }
+.diagnostics-error { color: var(--red); }
+
+@media (max-width: 700px) {
+  .diagnostics-backdrop { padding: 8px; }
+  .diagnostics-summary { grid-template-columns: auto minmax(0, 1fr); }
+  .diagnostics-summary span { display: none; }
+  .diagnostics-row { grid-template-columns: minmax(110px, 1fr) minmax(100px, 1fr) minmax(120px, 1fr); }
+  .diagnostics-row > span:nth-child(2),
+  .diagnostics-row > span:nth-child(4) { display: none; }
 }
 
 .stream-link {
@@ -1891,7 +2022,7 @@ button.active-tool {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: var(--black);
+  background: #101114;
 }
 
 .terminal-host {
@@ -1900,6 +2031,7 @@ button.active-tool {
   min-width: 0;
   min-height: 0;
   padding: 0;
+  background: #101114;
 }
 
 .terminal-host canvas {
@@ -2567,7 +2699,9 @@ button.active-tool {
     border-right: 1px solid rgba(212, 180, 95, 0.45);
     box-shadow: 24px 0 70px rgba(0, 0, 0, 0.62);
     transform: translateX(0);
-    transition: transform 140ms ease;
+    transition:
+      transform 140ms ease,
+      box-shadow 140ms ease;
   }
 
   .app-shell.sidebar-collapsed .sidebar {
@@ -2575,6 +2709,8 @@ button.active-tool {
     overflow: hidden;
     padding: 0;
     border-right: 0;
+    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+    pointer-events: none;
     transform: translateX(calc(-100% - var(--wmux-mobile-left-inset)));
   }
 
@@ -2621,7 +2757,7 @@ button.active-tool {
   }
 
   .mobile-workspace {
-    grid-template-rows: calc(64px + var(--wmux-mobile-top-inset)) 52px 40px minmax(0, 1fr);
+    grid-template-rows: calc(64px + var(--wmux-mobile-top-inset)) 52px minmax(0, 1fr);
   }
 
   .mobile-workspace.mobile-agent-active {
@@ -2855,7 +2991,7 @@ button.active-tool {
   }
 
   .mobile-keyboard-open .mobile-workspace {
-    grid-template-rows: 0 0 0 minmax(0, 1fr);
+    grid-template-rows: 0 0 minmax(0, 1fr);
   }
 
   .mobile-keyboard-open .mobile-workspace.mobile-agent-active {
@@ -3114,4 +3250,52 @@ button.active-tool {
 .wmux-login-submit:disabled {
   opacity: 0.6;
   cursor: default;
+}
+.mutation-status {
+  position: fixed;
+  z-index: 120;
+  top: calc(var(--wmux-viewport-top, 0px) + 10px);
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  max-width: min(360px, calc(100vw - 24px));
+  padding: 6px 10px;
+  border: 1px solid #665a31;
+  border-radius: 4px;
+  background: #11100c;
+  color: #f4d35e;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 38%);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.mutation-status svg {
+  flex: 0 0 auto;
+  animation: mutation-status-spin 750ms linear infinite;
+}
+
+.mutation-status span:not(.mutation-status-count) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mutation-status-count {
+  flex: 0 0 auto;
+  color: #8d826f;
+}
+
+@keyframes mutation-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 800px), (max-height: 500px) and (pointer: coarse) {
+  .mutation-status {
+    top: calc(var(--wmux-viewport-top, 0px) + 54px);
+  }
 }

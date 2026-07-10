@@ -26,6 +26,7 @@ export interface OpenTuiSidebarWorkspace {
   reachable: boolean;
   active: boolean;
   unreadCount: number;
+  agentCreated?: boolean;
   agentName?: string;
   agentStatus?: "running" | "completed" | "failed" | "updated";
   bell?: boolean;
@@ -76,6 +77,7 @@ const colors = {
   red: "#d94a3d",
   green: "#47d37c",
   blue: "#5aa9ff",
+  agent: "#c792ea",
   runningSoft: "#061019",
   failedSoft: "#150806",
 };
@@ -282,7 +284,7 @@ const drawSidebarGrid = (
 
   section(row, "workspaces");
   row++;
-  const workspaceEndRow = rows - Math.min(rows, model.machines.length * 2 + 4);
+  const workspaceEndRow = rows - 1;
   let visibleWorkspaceCount = 0;
   if (model.workspaces.length === 0) {
     write(row, 3, "NO WORKSPACES", rgba.faint, 700);
@@ -291,7 +293,7 @@ const drawSidebarGrid = (
     for (const workspace of model.workspaces) {
       const meta = workspace.descriptor;
       const hostContext = workspace.agentName ? `${workspace.host} / ${workspace.agentName}` : workspace.host;
-      const descriptionLines = wrapText(meta || (workspace.agentName ? "" : "No description"), Math.max(8, cols - 7), 3);
+      const descriptionLines = wrapText(meta, Math.max(8, cols - 7), 3);
       const cwd = workspace.cwd?.trim() ?? "";
       const itemRows = 1 + descriptionLines.length + 1 + (cwd ? 1 : 0);
       if (row + itemRows >= workspaceEndRow) break;
@@ -317,7 +319,9 @@ const drawSidebarGrid = (
       fillRow(row, workspace.active ? rgba.active : inactiveBackground);
       write(row, 1, workspace.active ? ">" : " ", workspace.active ? rgba.gold : rgba.faint, 700);
       write(row, 3, statusMarker, statusColor, 700);
-      write(row, 5, workspace.title, workspace.reachable ? rgba.text : rgba.muted, 700);
+      const titleCol = workspace.agentCreated ? 8 : 5;
+      if (workspace.agentCreated) write(row, 5, "AI", rgba.agent, 700);
+      write(row, titleCol, workspace.title, workspace.reachable ? rgba.text : rgba.muted, 700);
       if (workspace.unreadCount > 0) write(row, cols - 6, `(${workspace.unreadCount})`, rgba.gold, 700);
       row++;
       for (const line of descriptionLines) {
@@ -331,7 +335,12 @@ const drawSidebarGrid = (
         writeCompactPath(row, 5, cwd);
         row++;
       }
-      actionRows(itemStart, itemRows, workspace.title, { type: "workspace", workspaceId: workspace.id, tabId: workspace.tabId });
+      actionRows(
+        itemStart,
+        itemRows,
+        workspace.agentCreated ? `${workspace.title} (agent-created)` : workspace.title,
+        { type: "workspace", workspaceId: workspace.id, tabId: workspace.tabId },
+      );
       visibleWorkspaceCount++;
     }
   }
@@ -339,22 +348,6 @@ const drawSidebarGrid = (
   if (model.workspaces.length > visibleWorkspaceCount) {
     write(row, 3, `+${model.workspaces.length - visibleWorkspaceCount} more`, rgba.faint);
     row += 2;
-  }
-
-  row = Math.max(row + 1, rows - Math.min(rows, model.machines.length * 2 + 3));
-  section(row, "host status");
-  row++;
-  for (const machine of model.machines) {
-    if (row >= rows - 1) break;
-    const activeTarget = machine.id === model.targetMachineId;
-    fillRow(row, activeTarget ? rgba.active : rgba.black);
-    write(row, 1, activeTarget ? ">" : " ", activeTarget ? rgba.gold : rgba.faint, 700);
-    write(row, 3, statusBullet, reachColor(machine.reachable), 700);
-    write(row, 5, machine.name, machine.reachable ? rgba.text : rgba.muted, 700);
-    actionCells(row, 0, cols, `Target ${machine.name}`, { type: "target-machine", machineId: machine.id });
-    row++;
-    write(row, 5, machine.detail, machine.reachable ? rgba.faint : rgba.red);
-    row++;
   }
 
   return grid;

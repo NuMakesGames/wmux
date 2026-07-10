@@ -1,18 +1,12 @@
 import type { WebSocket } from "ws";
 import type { MachineConfig, PaneState } from "./types.js";
-import { PtySession } from "./pty-session.js";
 import type { StateStore } from "./state.js";
-import {
-  canRefreshDurableSessionClient,
-  disposeDurableSession,
-  readDurableSessionCwd,
-  refreshDurableSessionClient,
-} from "./machines.js";
+import { sessionDriverForMachine, type ManagedSession } from "./session-driver.js";
 import { streamPathForMachine } from "./streams.js";
-import { shouldUseWindowsAgent, WindowsAgentSession } from "./windows-agent.js";
+import type { AttachReplay } from "./terminal-checkpoint.js";
 
-type ClientMessage =
-  | { type: "input"; data: string }
+export type ClientMessage =
+  | { type: "input"; data: string; terminalResponse?: boolean }
   | { type: "resize"; cols: number; rows: number; foreground?: boolean }
   | { type: "activate"; cols: number; rows: number; foreground?: boolean };
 
@@ -21,8 +15,6 @@ interface SocketState {
   cols: number;
   rows: number;
 }
-
-type ManagedSession = PtySession | WindowsAgentSession;
 
 // A session that exits cleanly (code 0) after running at least this long is
 // treated as a deliberate shell exit, which collapses the pane/tab/workspace.
@@ -39,6 +31,11 @@ const MIN_DELIBERATE_EXIT_UPTIME_MS = 3000;
  */
 export const isDeliberateExit = (code: number | null, uptimeMs: number): boolean =>
   code === 0 && uptimeMs >= MIN_DELIBERATE_EXIT_UPTIME_MS;
+
+// Codex may not emit its Stop hook when a user aborts a turn. Recognize only
+// bare interrupt keystrokes here so arrow keys and other escape sequences do
+// not clear an agent that is still working.
+export const isAgentInterruptInput = (data: string): boolean => data === "\x03" || /^\x1b{1,2}$/.test(data);
 
 // Pause the PTY when a consumer socket's outbound buffer exceeds the high-water
 // mark; resume once every consumer drains below the low-water mark.
@@ -90,7 +87,9 @@ export class SessionManager {
       if (!message) return;
       if (message.type === "input") {
         this.promoteResizeOwner(paneId, socket, session);
-        session.write(message.data);
+        if (isAgentInterruptInput(message.data)) this.state.interruptAgentForPane(paneId);
+        if (message.terminalResponse && session.writeTerminalResponse) session.writeTerminalResponse(message.data);
+        else session.write(message.data);
       }
       if (message.type === "resize") {
         const size = normalizeSize(message.cols, message.rows);
@@ -118,6 +117,7 @@ export class SessionManager {
       this.reassignResizeOwner(paneId, socket, session);
     });
 
+    const attachReplay = this.replayOutputFor(pane, session);
     this.send(socket, {
       type: "ready",
       paneId,
@@ -125,7 +125,8 @@ export class SessionManager {
       title: pane.title,
       status: pane.status,
       resizeOwner,
-      replay: this.replayOutputFor(pane, session),
+      replay: attachReplay.data,
+      replayKind: attachReplay.kind,
     });
     this.scheduleDurableClientRefresh(pane, socket);
   }
@@ -208,6 +209,7 @@ export class SessionManager {
     const existing = this.sessions.get(pane.id);
     const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
     if (!machine) throw new Error(`machine ${pane.machineId} not found`);
+    const driver = sessionDriverForMachine(machine);
     const refreshedCwd = this.refreshPaneCwdFromBackend(pane, machine);
     pane = refreshedCwd && refreshedCwd !== pane.cwd ? { ...pane, cwd: refreshedCwd } : pane;
     if (existing && !existing.isExited) return existing;
@@ -229,9 +231,7 @@ export class SessionManager {
       WMUX_STREAM_WHIP_URL: `${process.env.WMUX_MEDIAMTX_WEBRTC_ORIGIN ?? `http://${streamHost}:8889`}/${streamPath}/whip`,
       KITTY_WINDOW_ID: `wmux-${pane.id}`,
     };
-    const session = shouldUseWindowsAgent(machine)
-      ? new WindowsAgentSession(pane, machine, cols, rows, sessionEnv)
-      : new PtySession(pane, machine, cols, rows, sessionEnv);
+    const session = driver.create(pane, machine, cols, rows, sessionEnv);
     const startedAt = Date.now();
     this.sessions.set(pane.id, session);
     this.state.updatePane(pane.id, { status: "running", exitCode: undefined, title: pane.title });
@@ -277,7 +277,7 @@ export class SessionManager {
   }
 
   private refreshPaneCwdFromBackend(pane: PaneState, machine: MachineConfig): string | undefined {
-    const cwd = readDurableSessionCwd(machine, pane.id);
+    const cwd = sessionDriverForMachine(machine).readCwd(machine, pane.id);
     if (cwd && cwd !== pane.cwd) this.state.updatePane(pane.id, { cwd });
     return cwd;
   }
@@ -315,7 +315,7 @@ export class SessionManager {
     return max;
   }
 
-  /** Kill every live session and clear timers. Called on process shutdown. */
+  /** Detach every live client and clear timers. Called on process shutdown. */
   disposeAll(): void {
     for (const timer of this.durableRefreshTimers) clearTimeout(timer);
     this.durableRefreshTimers.clear();
@@ -323,13 +323,18 @@ export class SessionManager {
     this.pausedSessions.clear();
     for (const session of this.sessions.values()) {
       this.ignoredSessionExits.add(session);
-      session.kill();
+      if (session.detach) session.detach();
+      else session.kill();
     }
     this.sessions.clear();
   }
 
-  private replayOutputFor(pane: PaneState, session: ManagedSession): string {
-    return this.shouldUseDurableClientRefresh(pane) ? "" : session.replayOutput;
+  private replayOutputFor(pane: PaneState, session: ManagedSession): AttachReplay {
+    if (this.shouldUseDurableClientRefresh(pane)) return { data: "", kind: "raw" };
+    return (session as ManagedSession & { readonly attachReplay?: AttachReplay }).attachReplay ?? {
+      data: session.replayOutput,
+      kind: "raw",
+    };
   }
 
   private scheduleDurableClientRefresh(pane: PaneState, socket: WebSocket): void {
@@ -339,7 +344,7 @@ export class SessionManager {
         this.durableRefreshTimers.delete(timer);
         if (socket.readyState !== socket.OPEN) return;
         const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
-        if (machine) refreshDurableSessionClient(machine, pane.id);
+        if (machine) sessionDriverForMachine(machine).refreshClient(machine, pane.id);
       }, delayMs);
       timer.unref?.();
       this.durableRefreshTimers.add(timer);
@@ -348,7 +353,7 @@ export class SessionManager {
 
   private shouldUseDurableClientRefresh(pane: PaneState): boolean {
     const machine = this.machines.find((candidate) => candidate.id === pane.machineId);
-    return machine ? canRefreshDurableSessionClient(machine) : false;
+    return machine ? sessionDriverForMachine(machine).capabilities(machine).refreshClient : false;
   }
 
   private recycleIdleDurableClient(pane: PaneState): void {
@@ -431,7 +436,7 @@ export class SessionManager {
     const machine = fallbackMachineId
       ? this.machines.find((candidate) => candidate.id === fallbackMachineId)
       : undefined;
-    if (machine) disposeDurableSession(machine, paneId);
+    if (machine) sessionDriverForMachine(machine).dispose(machine, paneId, Boolean(session));
     this.broadcast(paneId, { type: "removed", paneId });
     for (const socket of this.sockets.get(paneId) ?? []) {
       this.socketState.delete(socket);
@@ -463,29 +468,37 @@ export class SessionManager {
   }
 
   private parse(raw: string): ClientMessage | null {
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (parsed.type === "input" && typeof parsed.data === "string") {
-        return { type: "input", data: parsed.data };
-      }
-      if (
-        (parsed.type === "resize" || parsed.type === "activate") &&
-        Number.isFinite(parsed.cols) &&
-        Number.isFinite(parsed.rows)
-      ) {
-        return {
-          type: parsed.type,
-          cols: Number(parsed.cols),
-          rows: Number(parsed.rows),
-          ...(typeof parsed.foreground === "boolean" ? { foreground: parsed.foreground } : {}),
-        };
-      }
-    } catch {
-      return null;
-    }
-    return null;
+    return parseClientMessage(raw);
   }
 }
+
+export const parseClientMessage = (raw: string): ClientMessage | null => {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed.type === "input" && typeof parsed.data === "string") {
+      return {
+        type: "input",
+        data: parsed.data,
+        ...(parsed.terminalResponse === true ? { terminalResponse: true } : {}),
+      };
+    }
+    if (
+      (parsed.type === "resize" || parsed.type === "activate") &&
+      Number.isFinite(parsed.cols) &&
+      Number.isFinite(parsed.rows)
+    ) {
+      return {
+        type: parsed.type,
+        cols: Number(parsed.cols),
+        rows: Number(parsed.rows),
+        ...(typeof parsed.foreground === "boolean" ? { foreground: parsed.foreground } : {}),
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+};
 
 const normalizeSize = (cols: number, rows: number): { cols: number; rows: number } => ({
   cols: Number.isFinite(cols) && cols >= 2 ? Math.floor(cols) : 80,

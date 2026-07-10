@@ -4,6 +4,7 @@ import https from "node:https";
 import type { MachineConfig, PaneState } from "./types.js";
 import { appendBoundedReplay } from "./replay-buffer.js";
 import { captureOsc7 } from "./osc7.js";
+import { selectAttachReplay, TerminalCheckpoint, type AttachReplay } from "./terminal-checkpoint.js";
 
 interface AgentEvents {
   output: [string];
@@ -53,6 +54,13 @@ export const windowsAgentUrl = (machine: MachineConfig): string | undefined => {
 export const shouldUseWindowsAgent = (machine: MachineConfig): boolean =>
   machine.kind === "powershell-ssh" && machine.sessionBackend === "agent";
 
+export const deleteWindowsAgentSession = (machine: MachineConfig, paneId: string): void => {
+  const url = windowsAgentUrl(machine);
+  if (!url) return;
+  void requestJson("DELETE", `${url}/sessions/${encodeURIComponent(paneId)}`, undefined, 5000, authHeaders(machine))
+    .catch((error) => console.warn(`wmux: Windows agent delete failed for ${paneId}: ${formatError(error)}`));
+};
+
 const authHeaders = (machine: MachineConfig): Record<string, string> =>
   machine.agentToken ? { authorization: `Bearer ${machine.agentToken}` } : {};
 
@@ -73,6 +81,8 @@ export const probeWindowsAgent = async (
 export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private replay: string[] = [];
   private replayBytes = 0;
+  private replayTruncated = false;
+  private readonly checkpoint: TerminalCheckpoint;
   private exited = false;
   private exitCode: number | null = null;
   private cursor = 0;
@@ -81,6 +91,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private cwdCaptureBuffer = "";
   private stopped = false;
   private paused = false;
+  private lastTransportWarningAt = 0;
 
   constructor(
     readonly pane: PaneState,
@@ -90,6 +101,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     private readonly extraEnv: Record<string, string> = {},
   ) {
     super();
+    this.checkpoint = new TerminalCheckpoint(cols, rows);
     this.cwd = pane.cwd ?? "";
     void this.start();
   }
@@ -106,22 +118,44 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     return this.replay.join("");
   }
 
+  get attachReplay(): AttachReplay {
+    return selectAttachReplay(this.replayOutput, this.replayTruncated, this.checkpoint);
+  }
+
   write(data: string): void {
+    this.postInput(data, false);
+  }
+
+  writeTerminalResponse(data: string): void {
+    this.postInput(data, true);
+  }
+
+  private postInput(data: string, terminalResponse: boolean): void {
     if (this.exited || this.stopped) return;
     void this.post(`/sessions/${encodeURIComponent(this.pane.id)}/input`, {
       dataBase64: Buffer.from(data, "utf8").toString("base64"),
-    });
+      terminalResponse,
+    }).catch((error) => this.reportTransportFailure("input", error));
   }
 
   resize(cols: number, rows: number): void {
     if (this.exited || this.stopped || cols < 2 || rows < 1) return;
-    void this.post(`/sessions/${encodeURIComponent(this.pane.id)}/resize`, { cols, rows });
+    this.checkpoint.resize(cols, rows);
+    void this.post(`/sessions/${encodeURIComponent(this.pane.id)}/resize`, { cols, rows })
+      .catch((error) => this.reportTransportFailure("resize", error));
   }
 
   kill(): void {
     if (this.stopped) return;
+    this.detach();
+    void this.delete(`/sessions/${encodeURIComponent(this.pane.id)}`)
+      .catch((error) => this.reportTransportFailure("delete", error, false));
+  }
+
+  detach(): void {
+    if (this.stopped) return;
     this.stopped = true;
-    void this.delete(`/sessions/${encodeURIComponent(this.pane.id)}`);
+    this.checkpoint.dispose();
   }
 
   pause(): void {
@@ -215,12 +249,14 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   }
 
   private appendAndEmit(data: string): void {
+    this.checkpoint.write(data);
     this.appendReplay(data);
     this.captureCwd(data);
     this.emit("output", data);
   }
 
   private appendReplay(data: string): void {
+    if (this.replayBytes + Buffer.byteLength(data) > MAX_REPLAY_BYTES) this.replayTruncated = true;
     this.replayBytes = appendBoundedReplay(this.replay, this.replayBytes, data, MAX_REPLAY_BYTES);
   }
 
@@ -232,6 +268,16 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       this.cwd = cwd;
       this.emit("cwd", cwd);
     }
+  }
+
+  private reportTransportFailure(operation: string, error: unknown, showInPane = true): void {
+    const detail = formatError(error);
+    const timestamp = Date.now();
+    if (showInPane && timestamp - this.lastTransportWarningAt < 5000) return;
+    if (showInPane) this.lastTransportWarningAt = timestamp;
+    console.warn(`wmux: Windows agent ${operation} failed for ${this.pane.id}: ${detail}`);
+    if (!showInPane || this.stopped) return;
+    this.appendAndEmit(`\r\n[wmux] Windows agent ${operation} failed: ${detail}\r\n`);
   }
 }
 

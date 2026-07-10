@@ -52,6 +52,8 @@ test("resolves mediamtx and moonlight machines through their providers, preservi
         ],
       );
       const [gaming, local] = statuses;
+      assert.ok(Number.isFinite(Date.parse(gaming.checkedAt)));
+      assert.equal(gaming.checkedAt, local.checkedAt);
       assert.equal(gaming.inputEnabled, true);
       assert.equal(gaming.viewerCount, 1);
       assert.ok(gaming.openUrl.includes("token=tok"));

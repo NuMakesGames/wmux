@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
+import os from "node:os";
+import path from "node:path";
+
+const wmuxHome = path.join(os.homedir(), ".wmux");
+const read = (name) => {
+  try {
+    return fs.readFileSync(path.join(wmuxHome, name), "utf8").trim();
+  } catch {
+    return "";
+  }
+};
+const baseUrl = (process.env.WMUX_URL || read("url") || "http://127.0.0.1:3478").replace(/\/+$/, "");
+const token = process.env.WMUX_TOKEN || read("token");
+const requestDoctor = () => new Promise((resolve, reject) => {
+  const url = new URL(`${baseUrl}/api/doctor`);
+  const client = url.protocol === "https:" ? https : http;
+  const request = client.request(url, {
+    method: "GET",
+    headers: {
+      connection: "close",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+  }, (response) => {
+    const chunks = [];
+    response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
+  });
+  request.setTimeout(10_000, () => request.destroy(new Error("request timed out after 10000ms")));
+  request.on("error", reject);
+  request.end();
+});
+
+let response;
+let lastError;
+for (let attempt = 0; attempt < 3; attempt += 1) {
+  try {
+    response = await requestDoctor();
+    break;
+  } catch (error) {
+    lastError = error;
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+  }
+}
+if (!response) {
+  console.error(`wmux doctor failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  process.exit(1);
+}
+if (response.status < 200 || response.status >= 300) {
+  console.error(`wmux doctor failed: HTTP ${response.status} ${response.body}`);
+  process.exit(1);
+}
+const report = JSON.parse(response.body);
+if (process.argv.includes("--json")) {
+  console.log(JSON.stringify(report, null, 2));
+  process.exit(0);
+}
+const summary = report.summary;
+console.log(`wmux doctor (${report.checkedAt})`);
+console.log(`${summary.paneCount} panes, ${summary.restartDurablePaneCount} restart-durable, ${summary.exitedPaneCount} exited, ${summary.sessionIssueCount} session issues`);
+for (const pane of report.panes) {
+  const state = pane.issue ? "issue" : pane.status;
+  console.log(`${state.padEnd(8)} ${pane.transport.padEnd(18)} ${pane.machineName.padEnd(14)} ${pane.title}${pane.issue ? ` - ${pane.issue}` : ""}`);
+}
+process.exit(summary.exitedPaneCount || summary.sessionIssueCount ? 1 : 0);

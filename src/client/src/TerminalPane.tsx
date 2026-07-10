@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState, type MutableRefObject } from "react";
-import { FitAddon, Terminal } from "ghostty-web";
+import { Terminal } from "ghostty-web";
 import { X } from "lucide-react";
 import {
   KittyGraphicsParser,
@@ -17,6 +17,7 @@ import {
 } from "./kitty-graphics";
 import { ensureWmuxFonts, WMUX_MONO_FONT_FAMILY } from "./fonts";
 import { ensureGhostty } from "./terminal-loader";
+import { isTerminalProtocolResponse } from "./terminal-protocol";
 import { OpenTuiPaneToolbar } from "./OpenTuiPaneToolbar";
 import { withTokenParam } from "./token";
 import type { MachineStatus, PaneState, SplitDirection, TerminalMedia, TerminalRun } from "./types";
@@ -74,6 +75,11 @@ interface SynchronizedOutputState {
   flushTimer: number | undefined;
 }
 
+interface TerminalFitter {
+  fit: () => void;
+  dispose: () => void;
+}
+
 // Memoized: with structural sharing in refresh (reconcile.ts) and the stable
 // callbacks from LayoutPane, unrelated state events skip this subtree.
 export const TerminalPane = memo(function TerminalPane({
@@ -95,7 +101,8 @@ export const TerminalPane = memo(function TerminalPane({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
+  const fitAddonRef = useRef<TerminalFitter | null>(null);
+  const reconnectRef = useRef<(() => void) | null>(null);
   const outputCarryRef = useRef("");
   const kittyParserRef = useRef(new KittyGraphicsParser());
   const kittyPlaceholderStripRef = useRef<KittyPlaceholderStripState>({ pendingPlaceholderMarks: false });
@@ -109,6 +116,7 @@ export const TerminalPane = memo(function TerminalPane({
   const activeRef = useRef(active);
   const focusSignalRef = useRef(focusSignal);
   const [connected, setConnected] = useState(false);
+  const [connectionIssue, setConnectionIssue] = useState("");
   const [kittyMediaItems, setKittyMediaItems] = useState<TerminalMedia[]>([]);
   const [kittyInlineItems, setKittyInlineItems] = useState<KittyInlineImage[]>([]);
   const [terminalMetrics, setTerminalMetrics] = useState<CellMetrics>({ width: 8, height: 16 });
@@ -131,7 +139,7 @@ export const TerminalPane = memo(function TerminalPane({
   useEffect(() => {
     let cancelled = false;
     let removed = false;
-    let fitAddon: FitAddon | null = null;
+    let fitAddon: TerminalFitter | null = null;
     let reconnectTimer: number | undefined;
     let scrollDisposable: { dispose: () => void } | undefined;
     let renderDisposable: { dispose: () => void } | undefined;
@@ -498,17 +506,20 @@ export const TerminalPane = memo(function TerminalPane({
         }
         reconnectDelayMs = 350;
         setConnected(true);
+        setConnectionIssue("");
         sendResizeMessage(ws, activeRef.current ? "activate" : "resize", term, foreground());
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (cancelled) return;
         if (socketRef.current === ws) socketRef.current = null;
         setConnected(false);
+        if (!cancelled && !removed) setConnectionIssue(event.reason || "Connection lost; retrying");
         scheduleReconnect();
       };
       ws.onerror = () => {
         if (cancelled || socketRef.current !== ws) return;
         setConnected(false);
+        setConnectionIssue("Pane connection failed; retrying");
       };
       ws.onmessage = (event) => {
         if (cancelled || socketRef.current !== ws) return;
@@ -536,6 +547,7 @@ export const TerminalPane = memo(function TerminalPane({
           finishReplayDrainNow(term);
           flushQueuedTerminalText(term);
           term.write(`\r\n[wmux] process exited with code ${message.code}. Press any key to restart.\r\n`);
+          setConnectionIssue(`Process exited with code ${message.code}`);
           awaitingRestart = true;
         }
         if (message.type === "removed") {
@@ -545,6 +557,16 @@ export const TerminalPane = memo(function TerminalPane({
           ws.close();
         }
       };
+    };
+
+    reconnectRef.current = () => {
+      setConnectionIssue("Reconnecting pane");
+      awaitingRestart = false;
+      reconnectDelayMs = 350;
+      const stale = socketRef.current;
+      socketRef.current = null;
+      stale?.close();
+      if (!stale) connect();
     };
 
     const start = async () => {
@@ -562,16 +584,14 @@ export const TerminalPane = memo(function TerminalPane({
           selectionBackground: "#31445f",
         },
       });
-      fitAddon = new FitAddon();
-      fitAddonRef.current = fitAddon;
-      term.loadAddon(fitAddon);
       term.open(containerRef.current);
       configureTerminalInput(term);
       terminalRef.current = term;
       if (activeRef.current && focusSignalRef.current > 0) requestAnimationFrame(() => term.focus());
       await waitForVisibleBox(containerRef.current);
+      fitAddon = createTerminalFitter(term, containerRef.current);
+      fitAddonRef.current = fitAddon;
       fitAddon.fit();
-      fitAddon.observeResize();
       refreshMetrics(term);
       scrollDisposable = term.onScroll((position) => setViewportY(position));
       renderDisposable = term.onRender(() => refreshMetrics(term));
@@ -698,7 +718,7 @@ export const TerminalPane = memo(function TerminalPane({
         }
         if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
         if (term.getViewportY() > 0) term.scrollToBottom();
-        sendInput(socketRef.current, data);
+        sendInput(socketRef.current, data, isTerminalProtocolResponse(data));
       });
       term.onResize(() => {
         const ws = socketRef.current;
@@ -735,6 +755,7 @@ export const TerminalPane = memo(function TerminalPane({
       socketRef.current = null;
       terminalRef.current = null;
       fitAddonRef.current = null;
+      reconnectRef.current = null;
     };
   }, [pane.id]);
 
@@ -794,9 +815,12 @@ export const TerminalPane = memo(function TerminalPane({
         canCopyLastCommand={Boolean(lastRun?.command && navigator.clipboard)}
         canRerunLastCommand={Boolean(connected && lastRun?.command)}
         canSplit={canSplit}
+        canReconnect={!connected || pane.status === "exited" || Boolean(connectionIssue)}
+        connectionIssue={connectionIssue || undefined}
         onSplit={onSplit}
         onActivate={onActivate}
         onClose={onClose}
+        onReconnect={() => reconnectRef.current?.()}
         onCopyLastCommand={copyLastCommand}
         onRerunLastCommand={rerunLastCommand}
       />
@@ -898,8 +922,38 @@ const configureTerminalInput = (term: Terminal): void => {
   textarea.setAttribute("data-ms-editor", "false");
 };
 
-const sendInput = (ws: WebSocket | null, data: string): void => {
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+const sendInput = (ws: WebSocket | null, data: string, terminalResponse = false): void => {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data, terminalResponse }));
+};
+
+const createTerminalFitter = (term: Terminal, element: HTMLElement): TerminalFitter => {
+  let frame: number | undefined;
+  const fit = () => {
+    const metrics = term.renderer?.getMetrics();
+    if (!metrics?.width || !metrics.height || !element.clientWidth || !element.clientHeight) return;
+    const style = window.getComputedStyle(element);
+    const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const verticalPadding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    const cols = Math.max(2, Math.floor((element.clientWidth - horizontalPadding) / metrics.width));
+    const rows = Math.max(1, Math.floor((element.clientHeight - verticalPadding) / metrics.height));
+    if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
+  };
+  const scheduleFit = () => {
+    if (frame !== undefined) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = undefined;
+      fit();
+    });
+  };
+  const observer = new ResizeObserver(scheduleFit);
+  observer.observe(element);
+  return {
+    fit,
+    dispose: () => {
+      observer.disconnect();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+    },
+  };
 };
 
 const sendResizeMessage = (

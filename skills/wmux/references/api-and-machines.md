@@ -23,7 +23,7 @@ Confirm with `wmux.config.json` or `/api/bootstrap` before use.
 | `away-team` | `ssh` | `gisenberg@100.110.71.73` | `sessionBackend: "auto"`; Moonlight gateway at `https://homelab.tail2fcc57.ts.net:3490`. |
 | `9800x3d` | `powershell-ssh` | `gisen@100.68.206.111` | `sessionBackend: "agent"`; Windows session agent on port `3481`. |
 | `2080ti` | `powershell-ssh` | `gisenberg@100.101.81.42` | Helpers are staged in repo docs, but live bootstrap may report this host down; validate before scheduling work. FFmpeg, pywinpty, stream task, and Windows session agent may still be pending. |
-| `win-ci` | `powershell-ssh` | `gisenberg@100.124.2.7` | Windows VM on the tailnet; Moonlight gateway at `https://homelab.tail2fcc57.ts.net:3491`; live bootstrap may report helpers ready while stream, session-agent, and Sunshine tasks are missing. Consult `homelab/win-ci/README.md` for VM details. |
+| `win-ci` | `powershell-ssh` | `gisenberg@100.124.2.7` | `sessionBackend: "agent"`; headless Windows session agent on port `3481` using S4U task logon; Moonlight gateway at `https://homelab.tail2fcc57.ts.net:3491`. Consult `homelab/win-ci/README.md` for VM details. |
 
 ## Common Checks
 
@@ -59,7 +59,7 @@ WMUX_TOKEN=$(cat ~/.wmux/token)
 curl -fsS -X POST "$WMUX_URL/api/workspaces" \
   -H "authorization: Bearer $WMUX_TOKEN" \
   -H "content-type: application/json" \
-  -d '{"machineId":"away-team"}' | jq '.workspace'
+  -d '{"machineId":"away-team","createdBy":"agent"}' | jq '.workspace'
 ```
 
 The returned workspace has `id`, `activeTabId`, and the active pane under `tabs[].panes[]`. A browser URL has this shape:
@@ -95,7 +95,7 @@ Use `scripts/wmuxctl.py run <machine> --line '<shell line>'` to create a workspa
 - POSIX hosts: `wmux-run -- bash -lc 'cd ~/repo && npm test'`
 - Windows PowerShell hosts: `wmux-run -- pwsh -NoLogo -NoProfile -Command "Get-ComputerInfo | Select-Object CsName,WindowsVersion"`
 
-Give automated work a descriptive `--title`. `wmuxctl open`, `run`, and `ps` reuse the latest workspace with the same machine/title by default, which prevents a diagnostic loop from creating many generic `win-ci N` workspaces. Pass `--new` only for intentionally separate sessions.
+Give automated work a descriptive `--title`. Workspaces created by `wmuxctl` are persisted with `createdBy: "agent"`, which gives them a stable `AI` badge in the workspace rail. `wmuxctl open`, `run`, and `ps` reuse the latest workspace with the same machine/title by default, which prevents a diagnostic loop from creating many generic `win-ci N` workspaces. Pass `--new` only for intentionally separate sessions.
 
 For a newly created workspace, `run` and `ps` wait until the shell prompt is visible before sending input. This avoids losing or duplicating input during SSH/PowerShell bootstrap. Use `--no-wait-ready` only when deliberately testing that startup path.
 
@@ -147,7 +147,7 @@ For failed runs, debugging sessions, interactive work, or long-running processes
 ## Other Useful Endpoints
 
 - `GET /api/bootstrap`: machines, workspaces, notifications, agent events, runs, settings, streams.
-- `POST /api/workspaces`: body `{ "machineId": "away-team" }`.
+- `POST /api/workspaces`: body `{ "machineId": "away-team", "createdBy": "agent" }`; omit `createdBy` for browser/user-created workspaces.
 - `DELETE /api/workspaces/:workspaceId`: close a workspace and kill its pane sessions.
 - `POST /api/workspaces/:workspaceId/tabs`: body `{ "machineId": "local" }`.
 - `POST /api/tabs/:tabId/split`: body `{ "paneId": "...", "direction": "horizontal"|"vertical", "machineId": "..." }`.
@@ -194,6 +194,6 @@ If the helper is not on `PATH`, call it by path:
 & "$env:LOCALAPPDATA\wmux\bin\wmux-windows-setup.ps1" validate
 ```
 
-Windows panes are durable across wmux service restarts only when the machine has `sessionBackend: "agent"` and the Windows agent is healthy. The `9800x3d` config currently opts into this; `2080ti` and `win-ci` may not.
+Windows panes are durable across wmux service restarts only when the machine has `sessionBackend: "agent"` and the Windows agent is healthy. The `9800x3d` and `win-ci` configs currently opt into this; `2080ti` does not.
 
 When auditing Windows processes from wmux, avoid full `CommandLine` output unless the user asks for it. wmux-managed shells can include encoded bootstrap URLs or tokens in their process command line; prefer `ProcessId`, `Name`, `CreationDate`, service state, scheduled-task state, and explicit version commands.

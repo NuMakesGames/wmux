@@ -123,7 +123,7 @@ export interface StreamProviderBackend {
     machines: MachineConfig[],
     host: string,
     requestStatusFor: (machineId: string) => StreamRequestStatus,
-  ): Promise<StreamStatus[]>;
+  ): Promise<Array<Omit<StreamStatus, "checkedAt">>>;
 }
 
 export const resolveStreamStatuses = async (
@@ -149,7 +149,8 @@ export const resolveStreamStatuses = async (
     ),
   );
   const byMachineId = new Map(resolved.flat().map((status) => [status.machineId, status]));
-  return machines.map((machine) => byMachineId.get(machine.id)!);
+  const checkedAt = new Date().toISOString();
+  return machines.map((machine) => ({ ...byMachineId.get(machine.id)!, checkedAt }));
 };
 
 const mediaMtxBackend: StreamProviderBackend = {

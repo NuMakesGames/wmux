@@ -67,6 +67,14 @@ def clean_text(value, limit):
     return value[:limit]
 
 
+def clean_message(value, limit=12000):
+    value = strip_markup(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
+    value = re.sub(r"[ \t]+\n", "\n", value)
+    value = re.sub(r"\n{4,}", "\n\n\n", value).strip()
+    return value[:limit]
+
+
 def text_from_content(content):
     if isinstance(content, str):
         return content
@@ -120,7 +128,7 @@ def read_hook_input():
 
 def transcript_summary(path):
     if not path or not os.path.isfile(path):
-        return "", ""
+        return "", "", ""
     last_user = ""
     last_assistant = ""
     try:
@@ -133,21 +141,25 @@ def transcript_summary(path):
                 message = entry.get("message") if isinstance(entry.get("message"), dict) else entry
                 if isinstance(entry.get("item"), dict):
                     message = entry["item"]
+                if isinstance(entry.get("payload"), dict):
+                    message = entry["payload"]
                 role = message.get("role")
                 if not role and message.get("type") == "user_message":
                     role = "user"
-                if not role and message.get("type") == "assistant_message":
+                if not role and message.get("type") in ("assistant_message", "agent_message"):
                     role = "assistant"
                 text = text_from_content(message.get("content"))
                 if not text:
                     text = text_from_content(message.get("text"))
+                if not text:
+                    text = text_from_content(message.get("message"))
                 if role == "user" and text:
                     last_user = text
                 if role == "assistant" and text:
                     last_assistant = text
     except OSError:
-        return "", ""
-    return title_from_prompt(last_user), summary_from_output(last_assistant)
+        return "", "", ""
+    return title_from_prompt(last_user), summary_from_output(last_assistant), clean_message(last_assistant)
 
 
 def post_json(url, payload):
@@ -168,6 +180,7 @@ def main():
     parser.add_argument("--status", default="completed")
     parser.add_argument("--title", default="")
     parser.add_argument("--summary", default="")
+    parser.add_argument("--message", default="")
     parser.add_argument("--body", default="")
     parser.add_argument("--pane", default=os.environ.get("WMUX_PANE_ID", ""))
     parser.add_argument("--workspace", default=os.environ.get("WMUX_WORKSPACE_ID", ""))
@@ -180,13 +193,15 @@ def main():
 
     hook_input = read_hook_input() if args.claude_hook or args.codex_hook else {}
     transcript = args.transcript or hook_input.get("transcript_path") or hook_input.get("agent_transcript_path") or ""
-    transcript_title, transcript_summary_text = transcript_summary(transcript)
+    transcript_title, transcript_summary_text, transcript_message = transcript_summary(transcript)
 
     hook_event = str(hook_input.get("hook_event_name") or "")
     prompt_title = title_from_prompt(hook_input.get("prompt") or "")
     hook_summary = summary_from_output(hook_input.get("last_assistant_message") or "")
+    hook_message = clean_message(hook_input.get("last_assistant_message") or "")
     title = args.title or prompt_title or transcript_title
     summary = args.summary or args.body or hook_summary or transcript_summary_text
+    message = clean_message(args.message) or hook_message or transcript_message
     status = args.status
     if args.claude_hook:
         if hook_event == "UserPromptSubmit":
@@ -212,6 +227,8 @@ def main():
         "summary": clean_text(summary, 500),
         "body": clean_text(args.body, 500),
     }
+    if message:
+        payload["message"] = message
     if args.pane:
         payload["paneId"] = args.pane
     if args.workspace:

@@ -100,6 +100,7 @@ export function ScreenStreamViewer({ machine, stream, onRequest, onRelease, onCl
             <span className={`stream-status ${stream?.live ? "live" : "waiting"}`}>
               {stream ? ui.stateLabel(stream) : "requesting stream"}
               {stream ? ` / ${stream.viewerCount} viewer${stream.viewerCount === 1 ? "" : "s"}` : ""}
+              {stream ? ` / checked ${formatRelativeTime(stream.checkedAt)}` : ""}
             </span>
           </div>
           <div className="stream-actions">
@@ -149,4 +150,13 @@ export function ScreenStreamViewer({ machine, stream, onRequest, onRelease, onCl
 const createRequestId = (): string => {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `stream-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const formatRelativeTime = (iso: string): string => {
+  const elapsedMs = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(elapsedMs)) return "unknown";
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
 };

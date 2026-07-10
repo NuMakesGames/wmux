@@ -1,0 +1,183 @@
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import test from "node:test";
+import type { WebSocket } from "ws";
+import { durableSessionName } from "../src/server/machines.js";
+import { isAgentInterruptInput, parseClientMessage, SessionManager } from "../src/server/session-manager.js";
+import { StateStore } from "../src/server/state.js";
+import type { MachineConfig } from "../src/server/types.js";
+
+class FakeSocket extends EventEmitter {
+  readonly OPEN = 1;
+  readyState = this.OPEN;
+  bufferedAmount = 0;
+  sent: unknown[] = [];
+
+  send(raw: string): void {
+    this.sent.push(JSON.parse(raw));
+    this.emit("sent");
+  }
+
+  close(code = 1000, reason = ""): void {
+    if (this.readyState !== this.OPEN) return;
+    this.readyState = 3;
+    this.emit("close", code, Buffer.from(reason));
+  }
+
+  message(payload: unknown): void {
+    this.emit("message", Buffer.from(JSON.stringify(payload)));
+  }
+}
+
+const socket = (): WebSocket => new FakeSocket() as unknown as WebSocket;
+const fake = (ws: WebSocket): FakeSocket => ws as unknown as FakeSocket;
+
+const waitForMessage = async (ws: WebSocket, predicate: (message: any) => boolean, timeoutMs = 3_000): Promise<any> => {
+  const target = fake(ws);
+  const existing = target.sent.find(predicate);
+  if (existing) return existing;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`timed out waiting for session message: ${JSON.stringify(target.sent.slice(-3))}`));
+    }, timeoutMs);
+    const onSent = () => {
+      const match = target.sent.find(predicate);
+      if (!match) return;
+      cleanup();
+      resolve(match);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      target.off("sent", onSent);
+    };
+    target.on("sent", onSent);
+  });
+};
+
+const withState = async (machine: MachineConfig, run: (state: StateStore, dir: string) => Promise<void>) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-session-manager-"));
+  try {
+    await run(new StateStore([machine], path.join(dir, "state.json")), dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test("agent interrupt input excludes terminal escape sequences", () => {
+  assert.equal(isAgentInterruptInput("\x03"), true);
+  assert.equal(isAgentInterruptInput("\x1b"), true);
+  assert.equal(isAgentInterruptInput("\x1b\x1b"), true);
+  assert.equal(isAgentInterruptInput("\x1b[A"), false);
+  assert.equal(isAgentInterruptInput("\x1bf"), false);
+  assert.equal(isAgentInterruptInput("text"), false);
+});
+
+test("terminal-generated response metadata survives client message parsing", () => {
+  assert.deepEqual(parseClientMessage(JSON.stringify({ type: "input", data: "\x1b[?62;22c", terminalResponse: true })), {
+    type: "input",
+    data: "\x1b[?62;22c",
+    terminalResponse: true,
+  });
+  assert.deepEqual(parseClientMessage(JSON.stringify({ type: "input", data: "text", terminalResponse: false })), {
+    type: "input",
+    data: "text",
+  });
+});
+
+test("multi-client PTY attach broadcasts output, replays, and removes cleanly", async () => {
+  const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
+  await withState(machine, async (state) => {
+    const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+    const manager = new SessionManager(state, [machine]);
+    const first = socket();
+    const second = socket();
+    manager.attach(pane.id, first, 80, 24);
+    manager.attach(pane.id, second, 100, 30);
+    await Promise.all([
+      waitForMessage(first, (message) => message.type === "ready"),
+      waitForMessage(second, (message) => message.type === "ready"),
+    ]);
+    fake(second).message({ type: "input", data: "printf 'wmux-multi-marker\\n'\r" });
+    await Promise.all([
+      waitForMessage(first, (message) => message.type === "output" && message.data.includes("wmux-multi-marker")),
+      waitForMessage(second, (message) => message.type === "output" && message.data.includes("wmux-multi-marker")),
+    ]);
+
+    fake(second).close();
+    const reconnected = socket();
+    manager.attach(pane.id, reconnected, 92, 28);
+    const ready = await waitForMessage(reconnected, (message) => message.type === "ready");
+    assert.match(ready.replay, /wmux-multi-marker/);
+    assert.equal(ready.replayKind, "raw");
+
+    const workspaceId = state.snapshot().workspaces[0].id;
+    assert.equal(manager.closeWorkspace(workspaceId), true);
+    await waitForMessage(reconnected, (message) => message.type === "removed");
+    assert.equal(state.findPane(pane.id), null);
+    manager.disposeAll();
+  });
+});
+
+test("late attach receives an authoritative checkpoint for a full-screen PTY", async () => {
+  const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
+  await withState(machine, async (state) => {
+    const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+    const manager = new SessionManager(state, [machine]);
+    const first = socket();
+    manager.attach(pane.id, first, 80, 24);
+    await waitForMessage(first, (message) => message.type === "ready");
+
+    fake(first).message({
+      type: "input",
+      data: "printf '\\033[?1049h\\033[2J\\033[Hcheckpoint-marker\\033[3;4Hcursor'\r",
+    });
+    await waitForMessage(first, (message) => message.type === "output" && message.data.includes("checkpoint-marker"));
+    fake(first).close();
+
+    const reconnected = socket();
+    manager.attach(pane.id, reconnected, 80, 24);
+    const ready = await waitForMessage(reconnected, (message) => message.type === "ready");
+    assert.equal(ready.replayKind, "checkpoint");
+    assert.match(ready.replay, /checkpoint-marker/);
+    assert.match(ready.replay, /cursor/);
+
+    manager.disposeAll();
+  });
+});
+
+test(
+  "tmux pane survives manager disposal and explicit close kills its durable session",
+  { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 },
+  async () => {
+    const machine: MachineConfig = { id: "local", name: "Local", kind: "local", shell: "/bin/sh", sessionBackend: "tmux" };
+    await withState(machine, async (state) => {
+      const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+      const sessionName = durableSessionName(pane.id);
+      const firstManager = new SessionManager(state, [machine]);
+      const first = socket();
+      firstManager.attach(pane.id, first, 80, 24);
+      await waitForMessage(first, (message) => message.type === "ready");
+      fake(first).message({ type: "input", data: "export WMUX_RESTORE_MARKER=survived\r" });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      firstManager.disposeAll();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(spawnSync("tmux", ["has-session", "-t", sessionName]).status, 0);
+
+      const secondManager = new SessionManager(state, [machine]);
+      const second = socket();
+      secondManager.attach(pane.id, second, 88, 26);
+      await waitForMessage(second, (message) => message.type === "ready");
+      fake(second).message({ type: "input", data: "printf 'restore:%s\\n' \"$WMUX_RESTORE_MARKER\"\r" });
+      await waitForMessage(second, (message) => message.type === "output" && message.data.includes("restore:survived"), 5_000);
+
+      assert.equal(secondManager.closeWorkspace(state.snapshot().workspaces[0].id), true);
+      assert.notEqual(spawnSync("tmux", ["has-session", "-t", sessionName]).status, 0);
+      secondManager.disposeAll();
+    });
+  },
+);

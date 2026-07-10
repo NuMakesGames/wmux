@@ -1,0 +1,36 @@
+#!/usr/bin/env node
+import os from "node:os";
+
+const host = String(process.argv[2] ?? "").trim();
+const timeoutMs = positiveInteger(process.env.WMUX_BIND_WAIT_MS, 60_000);
+const pollMs = 500;
+
+if (!host) {
+  console.error("wmux-wait-bind: host is required");
+  process.exit(2);
+}
+
+if (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "::1") {
+  process.exit(0);
+}
+
+const deadline = Date.now() + timeoutMs;
+while (!addressIsAssigned(host) && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, pollMs));
+}
+
+if (!addressIsAssigned(host)) {
+  console.error(`wmux-wait-bind: ${host} was not assigned within ${timeoutMs}ms`);
+  process.exit(1);
+}
+
+function addressIsAssigned(address) {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .some((entry) => entry?.address === address);
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}

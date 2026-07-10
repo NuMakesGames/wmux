@@ -157,7 +157,10 @@ test("wmuxctl refuses an ambiguous reused workspace and honors an explicit tab",
     const result = JSON.parse(sent.stdout);
     assert.equal(result.tabId, "tab_agent");
     assert.equal(result.paneId, "pane_agent");
-    assert.deepEqual(inputs, [{ data: "Get-Date\r", cols: 120, rows: 36 }]);
+    assert.deepEqual(inputs, [
+      { data: "Get-Date", cols: 120, rows: 36 },
+      { data: "\r", cols: 120, rows: 36 },
+    ]);
   } finally {
     await close(server);
   }
@@ -165,6 +168,7 @@ test("wmuxctl refuses an ambiguous reused workspace and honors an explicit tab",
 
 test("wmuxctl waits for a new Windows shell prompt before sending input", async () => {
   const events: string[] = [];
+  const workspaceRequests: Array<Record<string, unknown>> = [];
   const workspace = {
     id: "ws_new",
     name: "Fresh",
@@ -179,8 +183,13 @@ test("wmuxctl waits for a new Windows shell prompt before sending input", async 
   };
   const server = http.createServer((request, response) => {
     if (request.method === "POST" && request.url === "/api/workspaces") {
-      response.writeHead(201, { "content-type": "application/json" });
-      response.end(JSON.stringify({ workspace, state: {} }));
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        workspaceRequests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(JSON.stringify({ workspace, state: {} }));
+      });
       return;
     }
     if (request.method === "POST" && request.url === "/api/workspaces/ws_new/title") {
@@ -226,7 +235,8 @@ test("wmuxctl waits for a new Windows shell prompt before sending input", async 
     const result = JSON.parse(sent.stdout);
     assert.equal(result.paneId, "pane_new");
     assert.equal(typeof result.shellReadySeconds, "number");
-    assert.deepEqual(events, ["prompt", "input"]);
+    assert.deepEqual(workspaceRequests, [{ machineId: "win-ci", createdBy: "agent" }]);
+    assert.deepEqual(events, ["prompt", "input", "input"]);
   } finally {
     await close(server);
   }

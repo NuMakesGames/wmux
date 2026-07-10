@@ -20,7 +20,9 @@ const withTempState = (run: (filePath: string, dir: string) => void): void => {
 test("fresh store creates one workspace and persists atomically", () => {
   withTempState((filePath, dir) => {
     const store = new StateStore(machines, filePath);
-    assert.equal(store.snapshot().workspaces.length, 1);
+    const snapshot = store.snapshot();
+    assert.equal(snapshot.workspaces.length, 1);
+    assert.ok(snapshot.revision >= 1);
     assert.ok(fs.existsSync(filePath));
     // No temp file should be left behind after an atomic write.
     assert.equal(fs.readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
@@ -31,13 +33,32 @@ test("fresh store creates one workspace and persists atomically", () => {
 test("mutations round-trip through flush and reload", () => {
   withTempState((filePath) => {
     const store = new StateStore(machines, filePath);
+    const initialRevision = store.snapshot().revision;
     const workspace = store.createWorkspace("local");
     store.setWorkspaceTitle(workspace.id, "Renamed");
+    assert.ok(store.snapshot().revision >= initialRevision + 2);
     store.flush();
 
     const reloaded = new StateStore(machines, filePath);
     const found = reloaded.snapshot().workspaces.find((w) => w.id === workspace.id);
     assert.equal(found?.name, "Renamed");
+    assert.equal(reloaded.snapshot().revision, store.snapshot().revision);
+  });
+});
+
+test("agent-created workspace origin persists while user workspaces remain unmarked", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const userWorkspace = store.createWorkspace("local");
+    const agentWorkspace = store.createWorkspace("local", undefined, "agent");
+
+    assert.equal(userWorkspace.createdBy, undefined);
+    assert.equal(agentWorkspace.createdBy, "agent");
+    store.flush();
+
+    const reloaded = new StateStore(machines, filePath).snapshot();
+    assert.equal(reloaded.workspaces.find((workspace) => workspace.id === userWorkspace.id)?.createdBy, undefined);
+    assert.equal(reloaded.workspaces.find((workspace) => workspace.id === agentWorkspace.id)?.createdBy, "agent");
   });
 });
 
@@ -79,5 +100,54 @@ test("flush persists debounced writes synchronously", () => {
     store.flush();
     const onDisk = JSON.parse(fs.readFileSync(filePath, "utf8"));
     assert.ok(onDisk.workspaces.some((w: { id: string }) => w.id === workspace.id));
+  });
+});
+
+test("agent messages are sanitized and persist across restart", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const paneId = store.snapshot().workspaces[0].tabs[0].panes[0].id;
+    const result = store.recordAgentEvent({
+      paneId,
+      agent: "codex",
+      status: "completed",
+      summary: "Finished the mobile response",
+      message: "First line.  \r\n\r\nSecond line.\x00",
+    });
+
+    assert.equal(result.agentEvent.message, "First line.\n\nSecond line.");
+    store.flush();
+
+    const reloaded = new StateStore(machines, filePath);
+    assert.equal(reloaded.snapshot().agentEvents[0].message, "First line.\n\nSecond line.");
+  });
+});
+
+test("terminal interrupts clear the latest running agent event", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const paneId = store.snapshot().workspaces[0].tabs[0].panes[0].id;
+    store.recordAgentEvent({ paneId, agent: "codex", status: "running", summary: "Working" });
+
+    assert.equal(store.interruptAgentForPane(paneId), true);
+    const latest = store.snapshot().agentEvents[0];
+    assert.equal(latest.status, "interrupted");
+    assert.equal(latest.summary, "codex interrupted");
+    assert.equal(store.interruptAgentForPane(paneId), false);
+  });
+});
+
+test("a new running event reconciles a prior turn without a stop hook", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const paneId = store.snapshot().workspaces[0].tabs[0].panes[0].id;
+    store.recordAgentEvent({ paneId, agent: "codex", status: "running", summary: "First turn" });
+    store.recordAgentEvent({ paneId, agent: "codex", status: "running", summary: "Second turn" });
+
+    const [current, previous] = store.snapshot().agentEvents;
+    assert.equal(current.status, "running");
+    assert.equal(current.summary, "Second turn");
+    assert.equal(previous.status, "interrupted");
+    assert.equal(previous.summary, "codex interrupted");
   });
 });

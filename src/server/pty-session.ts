@@ -6,6 +6,7 @@ import type { MachineConfig, PaneState } from "./types.js";
 import { buildSpawnSpec } from "./machines.js";
 import { appendBoundedReplay } from "./replay-buffer.js";
 import { captureOsc7 } from "./osc7.js";
+import { selectAttachReplay, TerminalCheckpoint, type AttachReplay } from "./terminal-checkpoint.js";
 
 interface PtyEvents {
   output: [string];
@@ -20,6 +21,8 @@ export class PtySession extends EventEmitter<PtyEvents> {
   private pty: IPty;
   private replay: string[] = [];
   private replayBytes = 0;
+  private replayTruncated = false;
+  private readonly checkpoint: TerminalCheckpoint;
   private exited = false;
   private title: string;
   private cwd = "";
@@ -35,6 +38,7 @@ export class PtySession extends EventEmitter<PtyEvents> {
     super();
     const spec = buildSpawnSpec(machine, cols, rows, extraEnv);
     this.title = spec.title;
+    this.checkpoint = new TerminalCheckpoint(cols, rows);
     const trackProcessTitle = spec.trackProcessTitle ?? true;
     this.pty = spawn(spec.file, spec.args, {
       name: "xterm-256color",
@@ -45,6 +49,7 @@ export class PtySession extends EventEmitter<PtyEvents> {
     });
 
     this.pty.onData((data) => {
+      this.checkpoint.write(data);
       this.appendReplay(data);
       this.captureCwd(data);
       this.emit("output", data);
@@ -74,6 +79,10 @@ export class PtySession extends EventEmitter<PtyEvents> {
     return this.replay.join("");
   }
 
+  get attachReplay(): AttachReplay {
+    return selectAttachReplay(this.replayOutput, this.replayTruncated, this.checkpoint);
+  }
+
   write(data: string): void {
     if (!this.exited) this.pty.write(data);
   }
@@ -82,17 +91,23 @@ export class PtySession extends EventEmitter<PtyEvents> {
     if (this.exited || cols < 2 || rows < 1) return;
     try {
       this.pty.resize(cols, rows);
+      this.checkpoint.resize(cols, rows);
     } catch {
       /* PTY already exited */
     }
   }
 
   kill(): void {
-    if (this.exited) return;
+    if (this.exited) {
+      this.checkpoint.dispose();
+      return;
+    }
     try {
       this.pty.kill();
     } catch {
       /* PTY already exited */
+    } finally {
+      this.checkpoint.dispose();
     }
   }
 
@@ -115,6 +130,7 @@ export class PtySession extends EventEmitter<PtyEvents> {
   }
 
   private appendReplay(data: string): void {
+    if (this.replayBytes + Buffer.byteLength(data) > MAX_REPLAY_BYTES) this.replayTruncated = true;
     this.replayBytes = appendBoundedReplay(this.replay, this.replayBytes, data, MAX_REPLAY_BYTES);
   }
 

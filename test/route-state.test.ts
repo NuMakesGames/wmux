@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  activatePaneInState,
   activateWorkspaceTabInState,
+  applyClientViewToState,
   applyRouteTargetToState,
   findWorkspaceTab,
+  markPaneNotificationsReadInState,
   markWorkspaceNotificationsReadInState,
   parseRouteTarget,
   workspaceTabPath,
@@ -21,8 +24,18 @@ const payload = (): BootstrapPayload =>
         machineId: "local",
         activeTabId: "t1",
         tabs: [
-          { id: "t1", title: "a", activePaneId: "p1", layout: { type: "pane", paneId: "p1" }, panes: [], createdAt: "" },
-          { id: "t2", title: "b", activePaneId: "p2", layout: { type: "pane", paneId: "p2" }, panes: [], createdAt: "" },
+          {
+            id: "t1",
+            title: "a",
+            activePaneId: "p1",
+            layout: { type: "split", direction: "vertical", ratio: 0.5, first: { type: "pane", paneId: "p1" }, second: { type: "pane", paneId: "p1b" } },
+            panes: [
+              { id: "p1", machineId: "local", title: "one", status: "running", createdAt: "" },
+              { id: "p1b", machineId: "local", title: "two", status: "running", createdAt: "" },
+            ],
+            createdAt: "",
+          },
+          { id: "t2", title: "b", activePaneId: "p2", layout: { type: "pane", paneId: "p2" }, panes: [{ id: "p2", machineId: "local", title: "two", status: "running", createdAt: "" }], createdAt: "" },
         ],
         createdAt: "",
         updatedAt: "",
@@ -32,7 +45,7 @@ const payload = (): BootstrapPayload =>
         name: "Two",
         machineId: "local",
         activeTabId: "t3",
-        tabs: [{ id: "t3", title: "c", activePaneId: "p3", layout: { type: "pane", paneId: "p3" }, panes: [], createdAt: "" }],
+        tabs: [{ id: "t3", title: "c", activePaneId: "p3", layout: { type: "pane", paneId: "p3" }, panes: [{ id: "p3", machineId: "local", title: "three", status: "running", createdAt: "" }], createdAt: "" }],
         createdAt: "",
         updatedAt: "",
       },
@@ -84,6 +97,68 @@ test("activating a workspace marks its notifications read", () => {
 test("markWorkspaceNotificationsReadInState returns same ref when nothing changes", () => {
   const input = payload();
   assert.equal(markWorkspaceNotificationsReadInState(input, "ws1"), input);
+});
+
+test("pane activation is local and marks only that pane read", () => {
+  const input = payload();
+  input.notifications.push({
+    id: "n2",
+    workspaceId: "ws1",
+    tabId: "t1",
+    paneId: "p1b",
+    title: "t",
+    subtitle: "",
+    body: "",
+    createdAt: "",
+    read: false,
+  });
+  const next = activatePaneInState(input, "t1", "p1b");
+  assert.equal(next.workspaces[0].tabs[0].activePaneId, "p1b");
+  assert.equal(next.notifications.find((notification) => notification.id === "n2")?.read, true);
+  assert.equal(next.notifications.find((notification) => notification.id === "n1")?.read, false);
+  assert.equal(input.workspaces[0].tabs[0].activePaneId, "p1");
+});
+
+test("pane notification projection is a no-op when nothing changes", () => {
+  const input = payload();
+  assert.equal(markPaneNotificationsReadInState(input, "p1"), input);
+});
+
+test("different browser views project independently over the same server payload", () => {
+  const serverPayload = payload();
+  const firstBrowser = applyClientViewToState(
+    serverPayload,
+    { workspaceId: "ws1", tabId: "t1" },
+    { ws2: "t3" },
+    { t1: "p1b" },
+  );
+  const secondBrowser = applyClientViewToState(
+    serverPayload,
+    { workspaceId: "ws2", tabId: "t3" },
+    {},
+    {},
+  );
+
+  assert.equal(firstBrowser.activeWorkspaceId, "ws1");
+  assert.equal(firstBrowser.workspaces[0].activeTabId, "t1");
+  assert.equal(firstBrowser.workspaces[0].tabs[0].activePaneId, "p1b");
+  assert.equal(secondBrowser.activeWorkspaceId, "ws2");
+  assert.equal(serverPayload.activeWorkspaceId, "ws1");
+  assert.equal(serverPayload.workspaces[0].tabs[0].activePaneId, "p1");
+});
+
+test("invalid stored pane selections do not replace a valid fallback", () => {
+  const input = payload();
+  const next = applyClientViewToState(input, { workspaceId: "ws1", tabId: "t1" }, {}, { t1: "removed-pane" });
+  assert.equal(next.workspaces[0].tabs[0].activePaneId, "p1");
+});
+
+test("stored tabs are browser-local for inactive workspaces", () => {
+  const input = payload();
+  const next = applyClientViewToState(input, { workspaceId: "ws2", tabId: "t3" }, { ws1: "t2" }, {});
+  assert.equal(next.activeWorkspaceId, "ws2");
+  assert.equal(next.workspaces.find((workspace) => workspace.id === "ws1")?.activeTabId, "t2");
+  assert.equal(input.workspaces.find((workspace) => workspace.id === "ws1")?.activeTabId, "t1");
 });
 
 test("applyRouteTargetToState is a no-op for null and unknown targets", () => {

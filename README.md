@@ -61,6 +61,12 @@ systemctl --user restart wmux.service
 journalctl --user -u wmux.service -f
 ```
 
+Run backend-aware diagnostics against the service with `scripts/wmux-doctor`
+(or `scripts/wmux-doctor --json`). The same read-only report is available from
+**Diagnostics** in the command palette and shows pane drivers, restart
+durability, host reachability, and durable-session issues without exposing
+machine secrets.
+
 ## Configure Machines
 
 Put machine definitions in `wmux.config.json` or `~/.wmux/config.json`:
@@ -159,6 +165,13 @@ curl -fsS \
 
 `WMUX_TOKEN` is present in every pane's environment, so the bundled helpers (`wmux-notify`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`) send it automatically. For shells that predate those variables — durable sessions created before an upgrade, or agent hooks launched outside a pane — the helpers fall back to `~/.wmux/token` and `~/.wmux/url`, which wmux persists on the server host at startup and on every remote machine when a durable pane (re)attaches. See [Authentication](#authentication) above.
 
+Local durable panes stage their generated bootstrap in a mode-`0700`, versioned
+runtime file, so tokens and shell setup are not exposed in the wmux attachment
+process arguments. First-run SSH and PowerShell helper delivery still embeds
+bootstrap credentials in their respective client command lines; replacing that
+with a non-argument, one-time credential handoff remains an explicit remote
+transport gap.
+
 Unread notifications light the workspace, tab, and pane. The browser notification button in the top bar requests browser notification permission.
 
 SSH panes stage remote helper commands into `~/.cache/wmux/bin` when the pane process starts. That makes `wmux-notify`, `wmux-title`, `wmux-agent-event`, `wmux-run`, `wmux-media`, `wmux-copy`, its `wmux-clip`/`wclip`/`wmclip` aliases, `wmux-stream-agent`, `wmux-stream-agent-service`, and `wmux-sunshine-setup` available on hosts like Away-Team without manually copying this repo there.
@@ -175,7 +188,7 @@ wmux-windows-setup install-stream
 wmux-windows-setup install-agent
 ```
 
-`install-deps` uses `winget` to install FFmpeg and Python when missing, then installs `pywinpty` for the Windows session agent's ConPTY backend. `install-stream` creates the per-user Scheduled Task that runs the on-demand screen stream agent. `install-agent` creates a per-user Scheduled Task for the experimental Windows session agent, which uses ConPTY by default. Both Scheduled Tasks are registered to start at user logon, start when available, restart after failure, run without the default 72-hour execution cutoff, and launch through hidden PowerShell wrappers instead of visible `cmd.exe` windows.
+`install-deps` uses `winget` to install FFmpeg and Python when missing, then installs `pywinpty` for the Windows session agent's ConPTY backend. The dependency check executes Python instead of trusting the Microsoft Store app-execution alias. `install-stream` creates the per-user Scheduled Task that runs the on-demand screen stream agent. `install-agent` creates a per-user Scheduled Task for the experimental Windows session agent, which uses ConPTY by default. Agent tasks use interactive logon when a desktop user is present and S4U logon on headless hosts; set `WMUX_WINDOWS_AGENT_LOGON_TYPE=Interactive` or `S4U` to override detection. Both Scheduled Tasks start when available, restart after failure, run without the default 72-hour execution cutoff, and launch through hidden PowerShell wrappers instead of visible `cmd.exe` windows.
 
 ## Agent Events
 
@@ -185,7 +198,7 @@ wmux can update workspace names/descriptors and send completion notifications fr
 wmux-agent-event --agent codex --status completed --title "Remote helpers" --summary "Fixed Away-Team helper staging"
 ```
 
-The helper posts to `POST /api/agent-events`. It uses the pane environment variables when available and exits without changing state if it is run outside a wmux pane.
+The helper posts to `POST /api/agent-events`. It uses the pane environment variables when available and exits without changing state if it is run outside a wmux pane. Completion hooks include the sanitized full assistant message as structured event data; short summaries remain separate workspace and notification metadata.
 
 Install agent hooks on this machine with:
 
@@ -294,7 +307,9 @@ wmux-sunshine-setup sunshine-status
 
 On Windows hosts, `wmux-stream-agent-service install` creates a supervised per-user Scheduled Task at logon. The task runs in the logged-in user's desktop session but launches through a hidden PowerShell wrapper, so normal operation should not leave an empty console window on screen. `wmux-windows-setup install-deps` can install FFmpeg and Python with `winget`, installs `pywinpty`, and `wmux-stream-agent --probe-capture` can test a direct one-frame FFmpeg capture. Direct SSH capture may fail with Windows desktop access errors; the scheduled task is the intended path because it runs in the logged-in interactive user context.
 
-As an alternate interactive remote-control path, a machine can use a browser-native Moonlight/Sunshine gateway instead of MediaMTX:
+For interactive remote control, prefer the browser-native Moonlight/Sunshine
+gateway. MediaMTX remains the simpler view-only fallback for machines where a
+full Sunshine/Moonlight setup is unnecessary:
 
 ```json
 {
@@ -343,7 +358,7 @@ The agent listens on the configured Tailscale/internal host and owns pane proces
 }
 ```
 
-The Windows agent uses `pywinpty` with its native ConPTY backend by default, so pane input, resize, rich line editing, and full-screen terminal applications go through Windows' pseudo console API instead of redirected PowerShell stdio. A `backend: "stdio"` config value remains available as an explicit fallback for debugging older hosts.
+The Windows agent uses `pywinpty` with its native ConPTY backend by default, so pane input, resize, rich line editing, and full-screen terminal applications go through Windows' pseudo console API instead of redirected PowerShell stdio. It answers fixed device-attribute and operating-status queries beside ConPTY to avoid delayed browser round trips being echoed into PSReadLine; browser terminal replies are tagged so locally answered duplicates can be discarded, while cursor-position replies still come from the renderer that owns cursor state. A `backend: "stdio"` config value remains available as an explicit fallback for debugging older hosts.
 
 ## Workspace Titles
 
@@ -373,15 +388,17 @@ Workspace rows and tab pills are real navigation links. A specific workspace and
 
 The link button in the top bar copies the active workspace/tab URL when the browser allows clipboard access.
 
+Workspace, tab, and pane selection are browser-local. The route selects the workspace and tab for that browser, while the last selected pane per tab is kept in browser storage. Navigating in one browser does not redirect another browser. Notification read state remains account-global for this single-user service, so reading a workspace or pane clears its notifications in every browser.
+
 ## Current Directory Preservation
 
 When you create a new workspace, tab, or split on the same host as the source pane, wmux starts the new pane in that source pane's current working directory. With the default durable backend this is resolved from tmux's live `pane_current_path`, so it follows normal `cd` usage without requiring a shell helper. If tmux is unavailable, wmux falls back to the last cwd reported by OSC 7. Local and SSH panes launched through wmux install a temporary zsh/bash prompt hook for this when the backend passes OSC 7 through. Windows `powershell-ssh` panes install a temporary PowerShell prompt function that emits OSC 7 for filesystem locations.
 
 ## Command Palette
 
-Open the command palette with `Cmd+K` or `Ctrl+K`, or use the command icon in the top bar. It searches common actions, workspace and tab navigation, host-scoped session creation, pane splits, settings, and session audit entry points.
+Open the command palette with `Cmd+K` or `Ctrl+K`, or use the command icon in the top bar. It searches common actions, workspace and tab navigation, host-scoped session creation, pane splits, settings, diagnostics, and session audit entry points.
 
-The workspace rail has a host filter for narrowing the left navigation without changing the target host used for new workspaces and tabs. Splits open on the host of the pane being split.
+The workspace rail has a host filter for narrowing the left navigation without changing the target host used for new workspaces and tabs. Workspaces created by agent automation carry a persistent purple `AI` badge, independent of the transient running/completed status indicator. Splits open on the host of the pane being split.
 
 ## Durable Session Audit
 
@@ -398,7 +415,7 @@ The audit reports:
 - `active`: a multiplexer session matching a pane in `~/.wmux/state.json`.
 - `duplicate`: more than one backend exists for the same active pane, usually an old fallback session after switching to tmux.
 - `orphan`: a wmux-named multiplexer session whose pane id is no longer in state.
-- `missing`: a pane in state without a local durable multiplexer session.
+- `missing`: a live local pane configured for `auto`, `tmux`, or `screen` without its expected local durable multiplexer session. Remote, raw PTY, command, agent-backed, and exited panes are excluded.
 
 Use `npm run audit:sessions -- --json` for machine-readable output.
 
@@ -418,7 +435,14 @@ The settings modal can quit local duplicate/orphan `tmux` or `screen` sessions a
 
 wmux persists workspace/tab/pane metadata in `~/.wmux/state.json`. For local and SSH machines using the default durable backend, each pane also maps to a stable `tmux`/`screen` session named from the pane ID. After a wmux service restart, reopening the pane attaches to that durable session instead of starting a fresh shell.
 
-Explicitly closing a pane, tab, or workspace from wmux kills the matching durable session. Windows panes are durable across wmux service restarts only when the machine uses `"sessionBackend": "agent"`; restarting the Windows agent itself still ends its pane processes.
+While the service is running, wmux maintains a headless `ghostty-web` VT checkpoint alongside each pane's bounded raw replay. Normal shells retain raw scrollback until that replay reaches its cap. Full-screen applications and panes with truncated replay instead late-attach from the authoritative current screen, cursor, colors, and input modes, avoiding corrupt redraws caused by starting from an arbitrary ANSI tail. These checkpoints are memory-only; durable `tmux`/`screen` clients still provide the redraw path after a service restart.
+
+Explicitly closing a pane, tab, or workspace from wmux kills the matching durable session. Windows panes are durable across wmux service restarts only when the machine uses `"sessionBackend": "agent"`; wmux shutdown detaches its polling client without deleting the agent-owned ConPTY. Restarting the Windows agent itself still ends its pane processes.
+
+An exited or disconnected pane shows a `retry` action in its pane toolbar. The
+action reconnects the browser socket and lets the server reattach or re-spawn
+the pane as appropriate; its tooltip carries the latest structured
+connection/process failure reason.
 
 ## Keyboard Shortcuts
 
@@ -448,3 +472,10 @@ Some browser or OS-reserved shortcuts may not reach wmux on every platform.
 ## Design Direction
 
 The terminal viewport should stay visually neutral. Product styling belongs in surrounding chrome: workspace rail, tab strip, pane toolbar, settings, activity, notifications, and audit views. Current chrome uses dense cmux-inspired navigation with dark surfaces, thin borders, compact uppercase labels, clipped corners, gold focus accents, and small reachability/status indicators.
+
+Workspace pinning, manual ordering, and archive/restore are intentionally
+deferred until workspace counts demonstrate that navigation and search are not
+sufficient. The mobile Chat surface sends input to the active terminal pane but
+renders responses only from structured agent events. It never interprets raw
+PTY output, so live terminal progress stays in Term view and the complete
+assistant response appears in Chat when the trusted completion hook runs.

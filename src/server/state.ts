@@ -19,6 +19,7 @@ import type {
 } from "./types.js";
 
 const now = (): string => new Date().toISOString();
+const ACTIVE_AGENT_STATUSES = new Set(["running", "started", "working"]);
 
 const defaultPath = (): string => path.join(os.homedir(), ".wmux", "state.json");
 
@@ -55,6 +56,7 @@ interface RecordAgentEventInput extends TargetInput {
   status?: string;
   title?: string;
   summary?: string;
+  message?: string;
   body?: string;
 }
 
@@ -100,6 +102,7 @@ export class StateStore extends EventEmitter {
   }
 
   save(): void {
+    this.state.revision = Math.max(0, Math.floor(this.state.revision || 0)) + 1;
     this.dirty = true;
     this.emit("change");
     if (this.writeTimer) return;
@@ -129,7 +132,7 @@ export class StateStore extends EventEmitter {
     fs.renameSync(tempPath, this.filePath);
   }
 
-  createWorkspace(machineId = "local", cwd?: string): Workspace {
+  createWorkspace(machineId = "local", cwd?: string, createdBy: "user" | "agent" = "user"): Workspace {
     const pane = this.createPane(machineId, cwd);
     const tab: SurfaceTab = {
       id: createId("tab"),
@@ -143,6 +146,7 @@ export class StateStore extends EventEmitter {
     const workspace: Workspace = {
       id: createId("ws"),
       name: this.nextWorkspaceName(machineId),
+      ...(createdBy === "agent" ? { createdBy } : {}),
       nameSource: "default",
       descriptor: this.machineDescriptor(machineId),
       descriptorSource: "default",
@@ -272,31 +276,6 @@ export class StateStore extends EventEmitter {
       this.state.activeWorkspaceId = this.state.workspaces[0].id;
       this.save();
     }
-  }
-
-  setActiveWorkspace(workspaceId: string): void {
-    this.requireWorkspace(workspaceId);
-    this.state.activeWorkspaceId = workspaceId;
-    this.markWorkspaceNotificationsRead(workspaceId, false);
-    this.save();
-  }
-
-  setActiveTab(workspaceId: string, tabId: string): void {
-    const workspace = this.requireWorkspace(workspaceId);
-    if (!workspace.tabs.some((tab) => tab.id === tabId)) throw new Error("tab not found");
-    workspace.activeTabId = tabId;
-    workspace.updatedAt = now();
-    this.markWorkspaceNotificationsRead(workspaceId, false);
-    this.save();
-  }
-
-  setActivePane(tabId: string, paneId: string): void {
-    const { workspace, tab } = this.requireTab(tabId);
-    if (!tab.panes.some((pane) => pane.id === paneId)) throw new Error("pane not found");
-    tab.activePaneId = paneId;
-    workspace.updatedAt = now();
-    this.markPaneNotificationsRead(paneId, false);
-    this.save();
   }
 
   updatePane(paneId: string, patch: Partial<PaneState>): void {
@@ -456,7 +435,11 @@ export class StateStore extends EventEmitter {
     const status = cleanTitle(input.status ?? "updated", "updated").toLowerCase();
     const title = cleanTitle(input.title ?? "", "");
     const summary = cleanDescriptor(input.summary ?? input.body ?? "", "");
+    const message = cleanAgentMessage(input.message ?? "");
     const createdAt = now();
+    if (ACTIVE_AGENT_STATUSES.has(status)) {
+      this.markLatestAgentInterrupted(target.pane.id, agent, createdAt);
+    }
     const agentEvent: AgentActivity = {
       id: createId("agent"),
       workspaceId: target.workspace.id,
@@ -466,6 +449,7 @@ export class StateStore extends EventEmitter {
       status,
       title,
       summary,
+      ...(message ? { message } : {}),
       createdAt,
     };
     this.state.agentEvents.unshift(agentEvent);
@@ -511,6 +495,28 @@ export class StateStore extends EventEmitter {
       notification: notification ? structuredClone(notification) : undefined,
       agentEvent: structuredClone(agentEvent),
     };
+  }
+
+  interruptAgentForPane(paneId: string): boolean {
+    const interruptedAt = now();
+    if (!this.markLatestAgentInterrupted(paneId, undefined, interruptedAt)) return false;
+    this.save();
+    return true;
+  }
+
+  private markLatestAgentInterrupted(paneId: string, agent: string | undefined, interruptedAt: string): boolean {
+    const latest = this.state.agentEvents.find((candidate) => candidate.paneId === paneId && (!agent || candidate.agent === agent));
+    if (!latest || !ACTIVE_AGENT_STATUSES.has(latest.status)) return false;
+
+    latest.status = "interrupted";
+    latest.summary = `${latest.agent} interrupted`;
+    const workspace = this.state.workspaces.find((candidate) => candidate.id === latest.workspaceId);
+    if (workspace && workspace.descriptorSource !== "user") {
+      workspace.descriptor = latest.summary;
+      workspace.descriptorSource = "auto";
+      workspace.updatedAt = interruptedAt;
+    }
+    return true;
   }
 
   recordRunEvent(input: RecordRunEventInput): TerminalRun {
@@ -582,7 +588,7 @@ export class StateStore extends EventEmitter {
     if (changed && save) this.save();
   }
 
-  private markPaneNotificationsRead(paneId: string, save = true): void {
+  markPaneNotificationsRead(paneId: string, save = true): void {
     let changed = false;
     for (const notification of this.state.notifications) {
       if (notification.paneId === paneId && !notification.read) {
@@ -602,6 +608,7 @@ export class StateStore extends EventEmitter {
       this.quarantineStateFile();
     }
     const state: PersistedState = {
+      revision: 0,
       machines,
       workspaces: [],
       activeWorkspaceId: "",
@@ -692,9 +699,15 @@ export class StateStore extends EventEmitter {
   }
 
   private normalizeRestoredState(state: PersistedState): PersistedState {
+    state.revision = Math.max(0, Math.floor(state.revision || 0));
     state.notifications ??= [];
     state.agentEvents ??= [];
     state.runs ??= [];
+    for (const event of state.agentEvents) {
+      const message = cleanAgentMessage(event.message ?? "");
+      if (message) event.message = message;
+      else delete event.message;
+    }
     for (const workspace of state.workspaces) {
       workspace.nameSource ??= isDefaultWorkspaceName(workspace.name, workspace.machineId) ? "default" : "user";
       workspace.descriptor ??= this.machineDescriptor(workspace.machineId, state.machines ?? []);
@@ -799,6 +812,15 @@ const cleanDescriptor = (value: string, fallback: string): string => {
   const cleaned = stripMarkup(value).replace(/\s+/g, " ").trim();
   return (cleaned || fallback).slice(0, 120);
 };
+
+const cleanAgentMessage = (value: string): string =>
+  stripMarkup(value)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim()
+    .slice(0, 12_000);
 
 const cleanEventId = (value?: string): string => {
   const cleaned = (value ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);

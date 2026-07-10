@@ -3,19 +3,18 @@ import { api } from "./api";
 import type { AppStore } from "./app-store";
 import { reconcile } from "./reconcile";
 import {
+  activatePaneInState,
   activateWorkspaceTabInState,
-  applyRouteTargetToState,
+  applyClientViewToState,
   findWorkspaceTab,
+  loadActivePaneSelections,
+  loadActiveTabSelections,
   parseRouteTarget,
+  saveActivePaneSelections,
+  saveActiveTabSelections,
   workspaceTabPath,
 } from "./route-state";
 import type { BootstrapPayload, SurfaceTab, Workspace } from "./types";
-
-interface PendingActiveRoute {
-  requestId: number;
-  workspaceId: string;
-  tabId: string;
-}
 
 export interface ActivateWorkspaceTabOptions {
   focusTerminal?: boolean;
@@ -36,14 +35,14 @@ interface UseAppRoutingOptions {
   requestTerminalFocus: (workspaceId: string, tabId: string) => void;
 }
 
-// Owns the URL <-> active-workspace/tab machine: optimistic activation with
-// request-id guarded persistence, history push/replace bookkeeping, and
-// popstate handling. The pure state transforms live in route-state.ts.
+// Owns browser-local workspace/tab/pane selection. Durable server state keeps
+// compatibility fallback ids, but navigation never writes them back, so two
+// browsers can view the same wmux state independently.
 export function useAppRouting(options: UseAppRoutingOptions) {
   const { store, openTuiMode, activeWorkspace, activeTab } = options;
   const lastSyncedPath = useRef("");
-  const activeRouteRequestId = useRef(0);
-  const pendingActiveRoute = useRef<PendingActiveRoute | null>(null);
+  const activePaneSelections = useRef(loadActivePaneSelections());
+  const activeTabSelections = useRef(loadActiveTabSelections());
   // Latest callbacks/flags for the []-dep popstate effect and stable callbacks.
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -56,43 +55,17 @@ export function useAppRouting(options: UseAppRoutingOptions) {
   const refresh = useCallback(
     async (nextState?: BootstrapPayload) => {
       const incoming = nextState ?? (await api.bootstrap());
-      const pending = pendingActiveRoute.current;
-      const routed = applyRouteTargetToState(incoming, pending ?? parseRouteTarget(window.location.pathname));
+      const routed = applyClientViewToState(
+        incoming,
+        parseRouteTarget(window.location.pathname),
+        activeTabSelections.current,
+        activePaneSelections.current,
+      );
       // Structural sharing: keep previous object identities for unchanged
       // subtrees so memoized panes/tabs skip re-rendering on resyncs.
       store.set(reconcile(store.get(), routed));
     },
     [store],
-  );
-
-  const persistActiveRoute = useCallback(
-    async (
-      workspaceId: string,
-      tabId: string,
-      requestId: number,
-      shouldActivateWorkspace: boolean,
-      shouldActivateTab: boolean,
-    ) => {
-      let nextState: BootstrapPayload | null = null;
-      try {
-        if (shouldActivateWorkspace) nextState = await api.activateWorkspace(workspaceId);
-        if (shouldActivateTab) nextState = await api.activateTab(workspaceId, tabId);
-      } catch (nextError) {
-        if (activeRouteRequestId.current === requestId) {
-          pendingActiveRoute.current = null;
-          optionsRef.current.onError(String(nextError));
-          void refresh();
-        }
-        return;
-      }
-
-      if (activeRouteRequestId.current !== requestId) return;
-      pendingActiveRoute.current = null;
-      if (nextState) {
-        store.set(activateWorkspaceTabInState(nextState, workspaceId, tabId));
-      }
-    },
-    [refresh, store],
   );
 
   const activateWorkspaceTab = useCallback(
@@ -113,28 +86,44 @@ export function useAppRouting(options: UseAppRoutingOptions) {
       }
       if (isMobile) onMobileNavigate();
       clearBellPanes(target.tab.panes.map((pane) => pane.id));
+      activeTabSelections.current = { ...activeTabSelections.current, [workspaceId]: target.tab.id };
+      saveActiveTabSelections(activeTabSelections.current);
 
       store.update((snapshot) =>
         snapshot ? activateWorkspaceTabInState(snapshot, workspaceId, target.tab.id) : snapshot,
       );
       if (activateOptions.focusTerminal) requestTerminalFocus(workspaceId, target.tab.id);
 
-      const shouldActivateWorkspace = current.activeWorkspaceId !== workspaceId;
-      const shouldActivateTab = target.workspace.activeTabId !== target.tab.id;
-      if (!shouldActivateWorkspace && !shouldActivateTab) {
-        if (shouldMarkWorkspaceRead) {
-          void api.markWorkspaceNotificationsRead(workspaceId)
-            .then((payload) => refresh(activateWorkspaceTabInState(payload, workspaceId, target.tab.id)))
-            .catch((nextError) => onError(String(nextError)));
-        }
-        return;
+      if (shouldMarkWorkspaceRead) {
+        void api.markWorkspaceNotificationsRead(workspaceId)
+          .then((payload) => refresh(activateWorkspaceTabInState(payload, workspaceId, target.tab.id)))
+          .catch((nextError) => onError(String(nextError)));
       }
-
-      const requestId = ++activeRouteRequestId.current;
-      pendingActiveRoute.current = { requestId, workspaceId, tabId: target.tab.id };
-      void persistActiveRoute(workspaceId, target.tab.id, requestId, shouldActivateWorkspace, shouldActivateTab);
     },
-    [chromePath, persistActiveRoute, refresh, store],
+    [chromePath, refresh, store],
+  );
+
+  const activatePane = useCallback(
+    (tabId: string, paneId: string) => {
+      const { onError } = optionsRef.current;
+      const current = store.get();
+      if (!current) return;
+      const tab = current.workspaces.flatMap((workspace) => workspace.tabs).find((candidate) => candidate.id === tabId);
+      if (!tab?.panes.some((pane) => pane.id === paneId)) return;
+      const next = activatePaneInState(current, tabId, paneId);
+      const shouldMarkPaneRead = current.notifications.some(
+        (notification) => notification.paneId === paneId && !notification.read,
+      );
+      activePaneSelections.current = { ...activePaneSelections.current, [tabId]: paneId };
+      saveActivePaneSelections(activePaneSelections.current);
+      if (next !== current) store.set(next);
+      if (shouldMarkPaneRead) {
+        void api.markPaneNotificationsRead(paneId)
+          .then((payload) => refresh(activatePaneInState(payload, tabId, paneId)))
+          .catch((nextError) => onError(String(nextError)));
+      }
+    },
+    [refresh, store],
   );
 
   // Keep the address bar in sync with the active workspace/tab.
@@ -147,6 +136,12 @@ export function useAppRouting(options: UseAppRoutingOptions) {
         lastSyncedPath.current = nextPath;
       }
       return;
+    }
+    activeTabSelections.current = { ...activeTabSelections.current, [activeWorkspace.id]: activeTab.id };
+    saveActiveTabSelections(activeTabSelections.current);
+    if (activeTab.activePaneId) {
+      activePaneSelections.current = { ...activePaneSelections.current, [activeTab.id]: activeTab.activePaneId };
+      saveActivePaneSelections(activePaneSelections.current);
     }
     const nextChromePath = chromePath(workspaceTabPath(activeWorkspace.id, activeTab.id));
     const currentPath = currentChromePath();
@@ -169,7 +164,7 @@ export function useAppRouting(options: UseAppRoutingOptions) {
     return () => window.removeEventListener("popstate", onPopState);
   }, [activateWorkspaceTab]);
 
-  return { refresh, activateWorkspaceTab, chromePath };
+  return { refresh, activateWorkspaceTab, activatePane, chromePath };
 }
 
 const currentChromePath = () => `${window.location.pathname}${window.location.search}`;

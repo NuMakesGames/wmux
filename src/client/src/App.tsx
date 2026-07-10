@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, GripVertical, Link2, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
+import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Clipboard, Command as CommandIcon, GripVertical, Link2, LoaderCircle, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Search, Server, Settings, TerminalSquare, Trash2, X } from "lucide-react";
 import { api, UnauthorizedError } from "./api";
+import { DiagnosticsModal } from "./DiagnosticsModal";
 
 // The full pane surface (Ghostty + Kitty graphics) stays lazy; the lightweight
 // boot screen owns the initial Ghostty startup while the API bootstrap runs.
@@ -16,7 +17,7 @@ import { OpenTuiSettingsModal } from "./OpenTuiSettingsModal";
 import { OpenTuiSidebar } from "./OpenTuiSidebar";
 import type { OpenTuiSidebarMachine, OpenTuiSidebarWorkspace } from "./OpenTuiSidebar";
 import { OpenTuiTopbar } from "./OpenTuiTopbar";
-import { applyRouteTargetToState, parseRouteTarget, workspaceTabPath } from "./route-state";
+import { applyClientViewToState, loadActivePaneSelections, loadActiveTabSelections, markWorkspaceNotificationsReadInState, parseRouteTarget, workspaceTabPath } from "./route-state";
 import { compactMiddlePath, normalizeUserPath } from "./path-display";
 import { ScreenStreamViewer } from "./ScreenStream";
 import { Toasts, useToasts } from "./Toasts";
@@ -28,6 +29,7 @@ import { writeBrowserClipboard } from "./clipboard";
 import type {
   AgentActivity,
   BootstrapPayload,
+  DoctorReport,
   DurableSessionAudit,
   LayoutNode,
   MachineStatus,
@@ -84,6 +86,11 @@ interface TerminalFocusRequest {
   token: number;
 }
 
+interface PendingAction {
+  key: string;
+  label: string;
+}
+
 export function App() {
   const openTuiMode = useMemo(() => new URLSearchParams(window.location.search).get("legacy") !== "1", []);
   const mobileViewport = useMobileViewportState();
@@ -110,10 +117,16 @@ export function App() {
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
   const [activityOpen, setActivityOpen] = useState(false);
   const [streamOpen, setStreamOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null);
+  const [doctorLoading, setDoctorLoading] = useState(false);
+  const [doctorError, setDoctorError] = useState("");
   const [mobileSurfaceMode, setMobileSurfaceMode] = useState<MobileSurfaceMode>("agent");
   const [bellPaneIds, setBellPaneIds] = useState<Set<string>>(() => new Set());
   const [mountedTabKeys, setMountedTabKeys] = useState<string[]>([]);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState<TerminalFocusRequest | null>(null);
+  const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
+  const pendingActionKeys = useRef(new Set<string>());
   const terminalFocusToken = useRef(0);
   const finishBoot = useCallback(() => setBootComplete(true), []);
 
@@ -125,6 +138,41 @@ export function App() {
     window.addEventListener("keydown", closeNavigation);
     return () => window.removeEventListener("keydown", closeNavigation);
   }, [collapseSidebar, mobileViewport.isMobile, sidebarCollapsed]);
+
+  const runPending = useCallback(
+    async <T,>(key: string, label: string, action: () => Promise<T>): Promise<T | undefined> => {
+      if (pendingActionKeys.current.has(key)) return undefined;
+      pendingActionKeys.current.add(key);
+      setPendingActions((current) => [...current, { key, label }]);
+      try {
+        return await action();
+      } catch (nextError) {
+        pushToast(`${label.replace(/\.{3}$/, "")} failed: ${describeActionError(nextError)}`);
+        return undefined;
+      } finally {
+        pendingActionKeys.current.delete(key);
+        setPendingActions((current) => current.filter((candidate) => candidate.key !== key));
+      }
+    },
+    [pushToast],
+  );
+
+  const refreshDiagnostics = useCallback(async () => {
+    setDoctorLoading(true);
+    setDoctorError("");
+    try {
+      setDoctorReport(await api.doctor());
+    } catch (nextError) {
+      setDoctorError(describeActionError(nextError));
+    } finally {
+      setDoctorLoading(false);
+    }
+  }, []);
+
+  const openDiagnostics = useCallback(() => {
+    setDiagnosticsOpen(true);
+    void refreshDiagnostics();
+  }, [refreshDiagnostics]);
 
   const loadBootstrap = useCallback(async () => {
     try {
@@ -148,25 +196,6 @@ export function App() {
     onAuthRequired: () => setAuthRequired(true),
     onError: (message) => setError(message),
   });
-
-  useEffect(() => {
-    if (!state) return;
-    let closed = false;
-    const refreshStreams = async () => {
-      try {
-        const response = await api.streams();
-        if (!closed) store.update((current) => (current ? { ...current, streams: response.streams } : current));
-      } catch {
-        // Stream status is advisory; terminal service status is tracked separately.
-      }
-    };
-    const interval = window.setInterval(refreshStreams, 5000);
-    void refreshStreams();
-    return () => {
-      closed = true;
-      window.clearInterval(interval);
-    };
-  }, [state?.machines.length]);
 
   const activeWorkspace = useMemo(
     () => state?.workspaces.find((workspace) => workspace.id === state.activeWorkspaceId) ?? state?.workspaces[0],
@@ -273,6 +302,7 @@ export function App() {
             reachable: Boolean(machine?.reachable),
             active: workspace.id === activeWorkspace?.id,
             unreadCount,
+            agentCreated: workspace.createdBy === "agent",
             agentName: latestAgentName,
             agentStatus: latestAgent ? agentStatusClass(latestAgent.status) : undefined,
             bell: bellByWorkspaceId.has(workspace.id),
@@ -357,7 +387,7 @@ export function App() {
     });
   }, []);
 
-  const { refresh, activateWorkspaceTab, chromePath } = useAppRouting({
+  const { refresh, activateWorkspaceTab, activatePane, chromePath } = useAppRouting({
     store,
     openTuiMode,
     activeWorkspace,
@@ -372,11 +402,23 @@ export function App() {
     requestTerminalFocus,
   });
 
+  const activeWorkspaceUnreadCount = activeWorkspace ? unreadByWorkspaceId.get(activeWorkspace.id) ?? 0 : 0;
+  useEffect(() => {
+    if (!activeWorkspace || activeWorkspaceUnreadCount === 0) return;
+    const workspaceId = activeWorkspace.id;
+    store.update((current) => current ? markWorkspaceNotificationsReadInState(current, workspaceId) : current);
+    void api.markWorkspaceNotificationsRead(workspaceId)
+      .then((payload) => refresh(payload))
+      .catch((nextError) => pushToast(`Mark notifications read failed: ${describeActionError(nextError)}`));
+  }, [activeWorkspace?.id, activeWorkspaceUnreadCount, pushToast, refresh, store]);
+
   const updateSettings = async (nextSettings: WmuxSettings) => {
-    const response = await api.updateSettings(nextSettings);
-    setPreviewSettings(null);
-    store.set(response.state);
-    setSettingsOpen(false);
+    await runPending("settings:save", "Saving settings...", async () => {
+      const response = await api.updateSettings(nextSettings);
+      setPreviewSettings(null);
+      store.set(response.state);
+      setSettingsOpen(false);
+    });
   };
 
   const openSettings = useCallback(() => {
@@ -426,22 +468,30 @@ export function App() {
     .filter(Boolean)
     .join(" / ");
 
-  const activatePaneInTab = useCallback(async (tabId: string, paneId: string) => {
+  const activatePaneInTab = useCallback((tabId: string, paneId: string) => {
     clearBellPanes([paneId]);
-    await refresh(await api.activatePane(tabId, paneId));
-  }, [clearBellPanes, refresh]);
+    activatePane(tabId, paneId);
+  }, [activatePane, clearBellPanes]);
 
   const splitPaneInTab = useCallback(async (tabId: string, paneId: string, direction: SplitDirection, machineId?: string) => {
-    await refresh((await api.splitPane(tabId, paneId, direction, machineId)).state);
-  }, [refresh]);
+    await runPending(`pane:${paneId}:split`, "Splitting pane...", async () => {
+      const response = await api.splitPane(tabId, paneId, direction, machineId);
+      await refresh(response.state);
+      activatePane(response.tab.id, response.tab.activePaneId);
+    });
+  }, [activatePane, refresh, runPending]);
 
   const resizeSplitInTab = useCallback(async (tabId: string, path: string, ratio: number) => {
-    await refresh((await api.updateSplitRatio(tabId, path, ratio)).state);
-  }, [refresh]);
+    await runPending(`tab:${tabId}:resize:${path}`, "Saving pane layout...", async () => {
+      await refresh((await api.updateSplitRatio(tabId, path, ratio)).state);
+    });
+  }, [refresh, runPending]);
 
   const closePaneInTab = useCallback(async (tabId: string, paneId: string) => {
-    await refresh((await api.closePane(tabId, paneId)).state);
-  }, [refresh]);
+    await runPending(`pane:${paneId}:close`, "Closing pane...", async () => {
+      await refresh((await api.closePane(tabId, paneId)).state);
+    });
+  }, [refresh, runPending]);
 
   const recordPaneBell = useCallback((paneId: string) => {
     const snapshot = store.get();
@@ -460,21 +510,18 @@ export function App() {
     });
   }, [store]);
 
-  // Wrap a mutating action so a transient API failure surfaces as a toast
-  // instead of an unhandled rejection that silently drops the action.
-  const guard = <A extends unknown[]>(label: string, fn: (...args: A) => Promise<void>) => (
+  // Wrap a mutation with duplicate suppression, visible progress, and a toast
+  // on failure. The key can include the target so unrelated work may proceed.
+  const guard = <A extends unknown[]>(keyFor: (...args: A) => string, pendingLabel: string, fn: (...args: A) => Promise<void>) => (
     async (...args: A): Promise<void> => {
-      try {
-        await fn(...args);
-      } catch (nextError) {
-        pushToast(`${label} failed: ${describeActionError(nextError)}`);
-      }
+      await runPending(keyFor(...args), pendingLabel, () => fn(...args));
     }
   );
 
-  const createWorkspace = guard("Create workspace", async (machineId: string) => {
-    const response = await api.createWorkspace(machineId);
+  const createWorkspace = guard((machineId: string) => `machine:${machineId}:create-workspace`, "Creating workspace...", async (machineId: string) => {
+    const response = await api.createWorkspace(machineId, activePane?.id);
     await refresh(response.state);
+    activateWorkspaceTab(response.workspace.id, response.workspace.activeTabId, { replaceHistory: false });
     if (mobileViewport.isMobile) collapseSidebar();
   });
 
@@ -508,45 +555,52 @@ export function App() {
     await writeBrowserClipboard(url.toString());
   };
 
-  const createTab = guard("Create tab", async (machineId: string) => {
+  const createTab = guard((machineId: string) => `machine:${machineId}:create-tab`, "Creating tab...", async (machineId: string) => {
     if (!activeWorkspace) return;
-    const response = await api.createTab(activeWorkspace.id, machineId);
+    const response = await api.createTab(activeWorkspace.id, machineId, activePane?.id);
     await refresh(response.state);
+    activateWorkspaceTab(activeWorkspace.id, response.tab.id, { replaceHistory: false });
   });
 
-  const splitPane = guard("Split pane", async (paneId: string, direction: SplitDirection, machineId?: string) => {
+  const splitPane = guard((paneId: string, _direction: SplitDirection, _machineId?: string) => `pane:${paneId}:split`, "Splitting pane...", async (paneId: string, direction: SplitDirection, machineId?: string) => {
     if (!activeTab) return;
     const response = await api.splitPane(activeTab.id, paneId, direction, machineId);
     await refresh(response.state);
+    activatePane(response.tab.id, response.tab.activePaneId);
   });
 
-  const resizeSplit = guard("Resize split", async (path: string, ratio: number) => {
+  const resizeSplit = guard((path: string, _ratio: number) => `tab:${activeTab?.id ?? "unknown"}:resize:${path}`, "Saving pane layout...", async (path: string, ratio: number) => {
     if (!activeTab) return;
     const response = await api.updateSplitRatio(activeTab.id, path, ratio);
     await refresh(response.state);
   });
 
-  const closePane = guard("Close pane", async (paneId: string) => {
+  const closePane = guard((paneId: string) => `pane:${paneId}:close`, "Closing pane...", async (paneId: string) => {
     if (!activeTab) return;
     const response = await api.closePane(activeTab.id, paneId);
     await refresh(response.state);
   });
 
-  const closeActiveTab = guard("Close tab", async () => {
+  const closeActiveTab = guard(() => `tab:${activeTab?.id ?? "unknown"}:close`, "Closing tab...", async () => {
     if (!activeWorkspace || !activeTab) return;
     const response = await api.closeTab(activeWorkspace.id, activeTab.id);
     await refresh(response.state);
   });
 
-  const closeActiveWorkspace = guard("Close workspace", async () => {
+  const closeActiveWorkspace = guard(() => `workspace:${activeWorkspace?.id ?? "unknown"}:close`, "Closing workspace...", async () => {
     if (!state || !activeWorkspace) return;
     const response = await api.closeWorkspace(activeWorkspace.id);
     await refresh(response.state);
   });
 
-  const sendPaneInput = guard("Send input", async (paneId: string, data: string) => {
-    await refresh(await api.sendPaneInput(paneId, data));
-  });
+  const sendPaneInput = async (paneId: string, data: string): Promise<void> => {
+    try {
+      await refresh(await api.sendPaneInput(paneId, data));
+    } catch (nextError) {
+      pushToast(`Send input failed: ${describeActionError(nextError)}`);
+      throw nextError;
+    }
+  };
 
   const activateWorkspaceAt = (index: number) => {
     if (!state) return;
@@ -583,14 +637,14 @@ export function App() {
     const current = paneIds.indexOf(activeTab.activePaneId);
     if (current === -1 || paneIds.length < 2) return;
     const nextPaneId = paneIds[modulo(current + delta, paneIds.length)];
-    await refresh(await api.activatePane(activeTab.id, nextPaneId));
+    await activatePaneInTab(activeTab.id, nextPaneId);
   };
 
   const jumpLatestUnread = async () => {
     const latest = notifications.find((notification) => !notification.read);
     if (!latest) return;
     activateWorkspaceTab(latest.workspaceId, latest.tabId);
-    await refresh(await api.activatePane(latest.tabId, latest.paneId));
+    await activatePaneInTab(latest.tabId, latest.paneId);
   };
 
   const openCommandPalette = () => {
@@ -600,7 +654,7 @@ export function App() {
 
   const activePaneForSplit = activeTab?.panes.find((candidate) => candidate.id === activeTab.activePaneId);
   useKeyboardShortcuts({
-    modalOpen: settingsOpen || commandPaletteOpen,
+    modalOpen: settingsOpen || commandPaletteOpen || diagnosticsOpen,
     openCommandPalette,
     toggleSidebar,
     createWorkspace: () => createWorkspace(newMachineId),
@@ -629,7 +683,9 @@ export function App() {
 
   const markWorkspaceRead = async () => {
     if (!activeWorkspace) return;
-    await refresh(await api.markWorkspaceNotificationsRead(activeWorkspace.id));
+    await runPending(`workspace:${activeWorkspace.id}:mark-read`, "Marking notifications read...", async () => {
+      await refresh(await api.markWorkspaceNotificationsRead(activeWorkspace.id));
+    });
   };
 
   const requestStream = useCallback(
@@ -681,6 +737,14 @@ export function App() {
         section: "System",
         run: openSettings,
         keywords: ["tmux", "screen", "durable", "orphan", "duplicate"],
+      },
+      {
+        id: "open-diagnostics",
+        title: "Open diagnostics",
+        subtitle: "Pane drivers, restart durability, and session health",
+        section: "System",
+        run: openDiagnostics,
+        keywords: ["doctor", "health", "driver", "restart", "reconnect"],
       },
       {
         id: "open-activity",
@@ -916,6 +980,7 @@ export function App() {
     newMachineId,
     openTuiMode,
     openSettings,
+    openDiagnostics,
     activeStream,
     activeStreamMachine,
     activeStreamMachineId,
@@ -950,8 +1015,15 @@ export function App() {
     .join(" ");
 
   return (
-    <main className={appClassName} style={appStyle}>
+    <main className={appClassName} style={appStyle} aria-busy={pendingActions.length > 0}>
       <Toasts toasts={toasts} dismissToast={dismissToast} />
+      {pendingActions.length > 0 ? (
+        <div className="mutation-status" role="status" aria-live="polite">
+          <LoaderCircle size={15} aria-hidden="true" />
+          <span>{pendingActions[pendingActions.length - 1].label}</span>
+          {pendingActions.length > 1 ? <span className="mutation-status-count">+{pendingActions.length - 1}</span> : null}
+        </div>
+      ) : null}
       {openTuiMode ? (
         <OpenTuiSidebar
           targetMachineId={newMachineId}
@@ -1033,7 +1105,13 @@ export function App() {
               const visibleDescriptor = compactWorkspaceDescription(descriptor, 72);
               const tooltipDescriptor = compactWorkspaceDescription(descriptor, 200);
               const showDescriptor = visibleDescriptor && visibleDescriptor !== host && visibleDescriptor !== hostContext;
-              const tooltip = [workspace.name, showDescriptor ? tooltipDescriptor : "", hostContext, cwd].filter(Boolean).join(" / ");
+              const tooltip = [
+                workspace.name,
+                workspace.createdBy === "agent" ? "Agent-created" : "",
+                showDescriptor ? tooltipDescriptor : "",
+                hostContext,
+                cwd,
+              ].filter(Boolean).join(" / ");
               const latestAgentStatus = latestAgent ? agentStatusClass(latestAgent.status) : "";
               const hasBell = bellByWorkspaceId.has(workspace.id);
               const workspaceStateClass = latestAgentStatus || (machine?.reachable ? "reachable" : "offline");
@@ -1049,12 +1127,19 @@ export function App() {
                 title={tooltip}
                 className={`workspace-item ${workspace.id === activeWorkspace?.id ? "active" : ""} ${
                   machine?.reachable ? "" : "disabled"
-                } ${latestAgentStatus ? `agent-${latestAgentStatus}` : ""}`}
+                } ${workspace.createdBy === "agent" ? "agent-created" : ""} ${
+                  latestAgentStatus ? `agent-${latestAgentStatus}` : ""
+                }`}
                 onClick={(event) => activateWorkspaceLink(event, workspace.id, tab.id, { focusTerminal: true })}
                 >
                   <span className={`workspace-state-dot ${workspaceStateClass}`} title={workspaceStateTitle} />
                   {hasBell ? <Bell size={10} className="workspace-bell-indicator" aria-label="Terminal bell" /> : null}
-                  <span className="workspace-title">{workspace.name}</span>
+                  <span className="workspace-title">
+                    {workspace.createdBy === "agent" ? (
+                      <span className="workspace-origin-badge" title="Created by an agent">AI</span>
+                    ) : null}
+                    <span className="workspace-title-text">{workspace.name}</span>
+                  </span>
                   {unreadCount > 0 ? <span className="badge workspace-badge">{unreadCount}</span> : null}
                   <span className="workspace-meta">
                     {showDescriptor ? <span className="workspace-descriptor">{visibleDescriptor}</span> : null}
@@ -1205,7 +1290,7 @@ export function App() {
             </div>
           </div>
         ) : null}
-        {!showMobileAgentSurface && (openTuiMode ? (
+        {!showMobileModeBar && (openTuiMode ? (
           <OpenTuiTopbar
             tabs={
               activeWorkspace?.tabs.map((tab) => ({
@@ -1391,6 +1476,15 @@ export function App() {
           onRequest={requestStream}
           onRelease={releaseStream}
           onClose={() => setStreamOpen(false)}
+        />
+      ) : null}
+      {diagnosticsOpen ? (
+        <DiagnosticsModal
+          report={doctorReport}
+          loading={doctorLoading}
+          error={doctorError}
+          onRefresh={() => void refreshDiagnostics()}
+          onClose={() => setDiagnosticsOpen(false)}
         />
       ) : null}
       {settingsOpen ? (
@@ -2191,9 +2285,13 @@ const describeActionError = (error: unknown): string => {
   return message.length > 160 ? `${message.slice(0, 157)}…` : message;
 };
 
-const activateRouteTarget = async (payload: BootstrapPayload): Promise<BootstrapPayload> => {
-  return applyRouteTargetToState(payload, parseRouteTarget(window.location.pathname));
-};
+const activateRouteTarget = async (payload: BootstrapPayload): Promise<BootstrapPayload> =>
+  applyClientViewToState(
+    payload,
+    parseRouteTarget(window.location.pathname),
+    loadActiveTabSelections(),
+    loadActivePaneSelections(),
+  );
 
 const countUnreadBy = (
   notifications: TerminalNotification[],

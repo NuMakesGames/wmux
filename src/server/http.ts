@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import https from "node:https";
 import os from "node:os";
@@ -8,10 +9,11 @@ import type { ViteDevServer } from "vite";
 import { WebSocketServer } from "ws";
 import { type AuthConfig, isAuthorized, issueSessionToken, verifyCredentials } from "./auth.js";
 import { isAllowedOrigin, isAllowedRequestHost } from "./bind.js";
+import { buildDoctorReport } from "./doctor.js";
 import { readDurableSessionCwd, resolveMachineStatuses } from "./machines.js";
 import { auditDurableSessions, cleanupDurableSession } from "./session-audit.js";
 import { resolveStreamStatuses, StreamRequestStore } from "./streams.js";
-import type { MachineConfig, PaneState } from "./types.js";
+import type { MachineConfig, MachineStatus, PaneState, StreamStatus } from "./types.js";
 import { buildWindowsHelperBundle, buildWindowsPowerShellBootstrap } from "./windows-helpers.js";
 import type { StateStore } from "./state.js";
 import type { SessionManager } from "./session-manager.js";
@@ -74,20 +76,65 @@ export const createHttpServer = (
   const { auth } = options;
   const root = clientRoot();
   const streamRequests = new StreamRequestStore();
+  const healthEvents = new EventEmitter();
+  let machineStatuses: MachineStatus[] = [];
+  let streamStatuses: StreamStatus[] = [];
+  let machineRefresh: Promise<void> | null = null;
+  let streamRefresh = Promise.resolve();
   let vite: ViteDevServer | undefined;
   const protocol = options.tls ? "https" : "http";
-  const bootstrap = async () => {
+
+  const currentPayload = () => {
     const snapshot = state.snapshot();
     return {
-      machines: await resolveMachineStatuses(machines, bindHost),
+      revision: snapshot.revision,
+      machines: machineStatuses,
       workspaces: snapshot.workspaces,
       activeWorkspaceId: snapshot.activeWorkspaceId,
       notifications: snapshot.notifications,
       agentEvents: snapshot.agentEvents,
       runs: snapshot.runs,
       settings: settings.snapshot(),
-      streams: await resolveStreamStatuses(machines, bindHost, streamRequests),
+      streams: streamStatuses,
     };
+  };
+
+  const refreshMachineStatuses = async (publish = true): Promise<void> => {
+    if (machineRefresh) return machineRefresh;
+    machineRefresh = resolveMachineStatuses(machines, bindHost)
+      .then((next) => {
+        machineStatuses = next;
+        if (publish) healthEvents.emit("change", "machines");
+      })
+      .finally(() => {
+        machineRefresh = null;
+      });
+    return machineRefresh;
+  };
+
+  const refreshStreamStatuses = (publish = true): Promise<void> => {
+    const nextRefresh = streamRefresh.then(async () => {
+      const next = await resolveStreamStatuses(machines, bindHost, streamRequests);
+      streamStatuses = next;
+      if (publish) healthEvents.emit("change", "streams");
+    });
+    streamRefresh = nextRefresh.catch(() => undefined);
+    return nextRefresh;
+  };
+
+  const refreshHealthInBackground = (kind: "machines" | "streams", refresh: () => Promise<void>): void => {
+    void refresh().catch((error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`wmux: ${kind} health refresh failed: ${detail}`);
+    });
+  };
+
+  const bootstrapFresh = async () => {
+    await Promise.all([
+      machineStatuses.length === machines.length ? undefined : refreshMachineStatuses(false),
+      streamStatuses.length === machines.length ? undefined : refreshStreamStatuses(false),
+    ]);
+    return currentPayload();
   };
 
   const handleRequest = async (request: http.IncomingMessage, response: http.ServerResponse): Promise<void> => {
@@ -143,7 +190,7 @@ export const createHttpServer = (
       }
 
       if (url.pathname === "/api/bootstrap" && request.method === "GET") {
-        sendJson(response, 200, await bootstrap());
+        sendJson(response, 200, await bootstrapFresh());
         return;
       }
 
@@ -152,8 +199,15 @@ export const createHttpServer = (
         return;
       }
 
+      if (url.pathname === "/api/doctor" && request.method === "GET") {
+        if (machineStatuses.length !== machines.length) await refreshMachineStatuses(false);
+        sendJson(response, 200, buildDoctorReport(state.snapshot(), machines, machineStatuses, auditDurableSessions()));
+        return;
+      }
+
       if (url.pathname === "/api/streams" && request.method === "GET") {
-        sendJson(response, 200, { streams: await resolveStreamStatuses(machines, bindHost, streamRequests) });
+        await refreshStreamStatuses(false);
+        sendJson(response, 200, { streams: streamStatuses });
         return;
       }
 
@@ -220,10 +274,11 @@ export const createHttpServer = (
         const body = (await readBody(request)) as { requestId?: string; ttlMs?: number };
         const requestId = body.requestId?.trim() || cryptoRandomId();
         const requestStatus = streamRequests.touch(machineId, requestId, body.ttlMs);
+        await refreshStreamStatuses();
         sendJson(response, 200, {
           requestId,
           ...requestStatus,
-          streams: await resolveStreamStatuses(machines, bindHost, streamRequests),
+          streams: streamStatuses,
         });
         return;
       }
@@ -236,9 +291,10 @@ export const createHttpServer = (
           return;
         }
         const requestStatus = streamRequests.release(machineId, decodeURIComponent(streamRequestRelease[2]));
+        await refreshStreamStatuses();
         sendJson(response, 200, {
           ...requestStatus,
-          streams: await resolveStreamStatuses(machines, bindHost, streamRequests),
+          streams: streamStatuses,
         });
         return;
       }
@@ -260,15 +316,24 @@ export const createHttpServer = (
           terminalScrollbackRows: body.terminalScrollbackRows,
           machineAliases: body.machineAliases,
         });
-        sendJson(response, 200, { settings: settings.snapshot(), state: await bootstrap() });
+        sendJson(response, 200, { settings: settings.snapshot(), state: currentPayload() });
         return;
       }
 
       if (url.pathname === "/api/workspaces" && request.method === "POST") {
-        const body = (await readBody(request)) as { machineId?: string };
+        const body = (await readBody(request)) as {
+          machineId?: string;
+          sourcePaneId?: string;
+          createdBy?: "user" | "agent";
+        };
         const machineId = body.machineId ?? "local";
-        const workspace = state.createWorkspace(machineId, cwdForActivePane(state, machines, machineId));
-        sendJson(response, 201, { workspace, state: await bootstrap() });
+        const sourcePane = body.sourcePaneId ? state.findPane(body.sourcePaneId) ?? undefined : undefined;
+        const workspace = state.createWorkspace(
+          machineId,
+          cwdForSourcePane(state, machines, sourcePane, machineId),
+          body.createdBy === "agent" ? "agent" : "user",
+        );
+        sendJson(response, 201, { workspace, state: currentPayload() });
         return;
       }
 
@@ -289,7 +354,7 @@ export const createHttpServer = (
           subtitle: body.subtitle,
           body: body.body,
         });
-        sendJson(response, 201, { notification, state: await bootstrap() });
+        sendJson(response, 201, { notification, state: currentPayload() });
         return;
       }
 
@@ -302,6 +367,7 @@ export const createHttpServer = (
           status?: string;
           title?: string;
           summary?: string;
+          message?: string;
           body?: string;
         };
         const result = state.recordAgentEvent({
@@ -312,9 +378,10 @@ export const createHttpServer = (
           status: body.status,
           title: body.title,
           summary: body.summary,
+          message: body.message,
           body: body.body,
         });
-        sendJson(response, 201, { ...result, state: await bootstrap() });
+        sendJson(response, 201, { ...result, state: currentPayload() });
         return;
       }
 
@@ -345,7 +412,7 @@ export const createHttpServer = (
           startedAt: body.startedAt,
           completedAt: body.completedAt,
         });
-        sendJson(response, 201, { run, state: await bootstrap() });
+        sendJson(response, 201, { run, state: currentPayload() });
         return;
       }
 
@@ -444,21 +511,21 @@ export const createHttpServer = (
       const readNotification = url.pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);
       if (readNotification && request.method === "POST") {
         state.markNotificationRead(readNotification[1]);
-        sendJson(response, 200, await bootstrap());
+        sendJson(response, 200, currentPayload());
         return;
       }
 
       const readWorkspaceNotifications = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/notifications\/read$/);
       if (readWorkspaceNotifications && request.method === "POST") {
         state.markWorkspaceNotificationsRead(readWorkspaceNotifications[1]);
-        sendJson(response, 200, await bootstrap());
+        sendJson(response, 200, currentPayload());
         return;
       }
 
       const closeWorkspace = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
       if (closeWorkspace && request.method === "DELETE") {
         const removed = sessions.closeWorkspace(closeWorkspace[1]);
-        sendJson(response, removed ? 200 : 409, { removed, state: await bootstrap() });
+        sendJson(response, removed ? 200 : 409, { removed, state: currentPayload() });
         return;
       }
 
@@ -468,7 +535,7 @@ export const createHttpServer = (
         const workspace = body.clear
           ? state.clearWorkspaceTitle(workspaceTitle[1])
           : state.setWorkspaceTitle(workspaceTitle[1], body.title ?? "");
-        sendJson(response, 200, { workspace, state: await bootstrap() });
+        sendJson(response, 200, { workspace, state: currentPayload() });
         return;
       }
 
@@ -487,41 +554,28 @@ export const createHttpServer = (
           descriptor: body.descriptor,
           tabOnlyIfMultiple: body.tabOnlyIfMultiple,
         });
-        sendJson(response, 200, { ...result, state: await bootstrap() });
-        return;
-      }
-
-      const activeWorkspace = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/active$/);
-      if (activeWorkspace && request.method === "POST") {
-        state.setActiveWorkspace(activeWorkspace[1]);
-        sendJson(response, 200, await bootstrap());
+        sendJson(response, 200, { ...result, state: currentPayload() });
         return;
       }
 
       const tabs = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/tabs$/);
       if (tabs && request.method === "POST") {
-        const body = (await readBody(request)) as { machineId?: string };
+        const body = (await readBody(request)) as { machineId?: string; sourcePaneId?: string };
         const snapshot = state.snapshot();
         const workspace = snapshot.workspaces.find((candidate) => candidate.id === tabs[1]);
-        const activeTab = workspace?.tabs.find((candidate) => candidate.id === workspace.activeTabId);
-        const activePane = activeTab?.panes.find((candidate) => candidate.id === activeTab.activePaneId);
+        const sourcePane = body.sourcePaneId
+          ? workspace?.tabs.flatMap((tab) => tab.panes).find((pane) => pane.id === body.sourcePaneId)
+          : undefined;
         const machineId = body.machineId ?? workspace?.machineId ?? "local";
-        const tab = state.createTab(tabs[1], machineId, cwdForSourcePane(state, machines, activePane, machineId));
-        sendJson(response, 201, { tab, state: await bootstrap() });
-        return;
-      }
-
-      const activeTab = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/tabs\/([^/]+)\/active$/);
-      if (activeTab && request.method === "POST") {
-        state.setActiveTab(activeTab[1], activeTab[2]);
-        sendJson(response, 200, await bootstrap());
+        const tab = state.createTab(tabs[1], machineId, cwdForSourcePane(state, machines, sourcePane, machineId));
+        sendJson(response, 201, { tab, state: currentPayload() });
         return;
       }
 
       const closeTab = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/tabs\/([^/]+)$/);
       if (closeTab && request.method === "DELETE") {
         const removed = sessions.closeTab(closeTab[1], closeTab[2]);
-        sendJson(response, removed ? 200 : 409, { removed, state: await bootstrap() });
+        sendJson(response, removed ? 200 : 409, { removed, state: currentPayload() });
         return;
       }
 
@@ -529,7 +583,7 @@ export const createHttpServer = (
       if (tabTitle && request.method === "POST") {
         const body = (await readBody(request)) as { title?: string };
         const tab = state.setTabTitle(tabTitle[1], tabTitle[2], body.title ?? "");
-        sendJson(response, 200, { tab, state: await bootstrap() });
+        sendJson(response, 200, { tab, state: currentPayload() });
         return;
       }
 
@@ -557,7 +611,7 @@ export const createHttpServer = (
           machineId,
           cwdForSourcePane(state, machines, sourcePane, machineId),
         );
-        sendJson(response, 201, { tab, state: await bootstrap() });
+        sendJson(response, 201, { tab, state: currentPayload() });
         return;
       }
 
@@ -570,7 +624,7 @@ export const createHttpServer = (
           return;
         }
         const tab = state.setSplitRatio(splitRatio[1], body.path, ratio);
-        sendJson(response, 200, { tab, state: await bootstrap() });
+        sendJson(response, 200, { tab, state: currentPayload() });
         return;
       }
 
@@ -595,21 +649,21 @@ export const createHttpServer = (
           sendJson(response, 404, { error: "pane_not_found" });
           return;
         }
-        sendJson(response, 200, await bootstrap());
+        sendJson(response, 200, currentPayload());
         return;
       }
 
-      const activePane = url.pathname.match(/^\/api\/tabs\/([^/]+)\/panes\/([^/]+)\/active$/);
-      if (activePane && request.method === "POST") {
-        state.setActivePane(activePane[1], activePane[2]);
-        sendJson(response, 200, await bootstrap());
+      const readPaneNotifications = url.pathname.match(/^\/api\/panes\/([^/]+)\/notifications\/read$/);
+      if (readPaneNotifications && request.method === "POST") {
+        state.markPaneNotificationsRead(decodeURIComponent(readPaneNotifications[1]));
+        sendJson(response, 200, currentPayload());
         return;
       }
 
       const closePane = url.pathname.match(/^\/api\/tabs\/([^/]+)\/panes\/([^/]+)$/);
       if (closePane && request.method === "DELETE") {
         const removed = sessions.closePane(closePane[2]);
-        sendJson(response, removed ? 200 : 409, { removed, state: await bootstrap() });
+        sendJson(response, removed ? 200 : 409, { removed, state: currentPayload() });
         return;
       }
 
@@ -722,9 +776,15 @@ export const createHttpServer = (
     if (url.pathname === "/ws/events") {
       wss.handleUpgrade(request, socket, head, (ws) => {
         markAlive(ws);
-        const onChange = () => {
-          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "state" }));
+        const sendSnapshot = (reason: string) => {
+          if (ws.readyState === ws.OPEN) {
+            const snapshot = currentPayload();
+            ws.send(JSON.stringify({ type: "snapshot", reason, revision: snapshot.revision, state: snapshot }));
+          }
         };
+        const onStateChange = () => sendSnapshot("state");
+        const onSettingsChange = () => sendSnapshot("settings");
+        const onHealthChange = (reason: string) => sendSnapshot(reason);
         const onNotification = (notification: unknown) => {
           if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "notification", notification }));
         };
@@ -734,29 +794,31 @@ export const createHttpServer = (
         const onClipboard = (clipboard: unknown) => {
           if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "clipboard", clipboard }));
         };
-        state.on("change", onChange);
-        settings.on("change", onChange);
+        state.on("change", onStateChange);
+        settings.on("change", onSettingsChange);
+        healthEvents.on("change", onHealthChange);
         state.on("notification", onNotification);
         state.on("media", onMedia);
         state.on("clipboard", onClipboard);
-        streamRequests.on("change", onChange);
         ws.on("message", (raw) => {
           const message = parseSocketMessage(raw.toString());
           if (!message) return;
           if (message.type === "stream-request" && machineExists(machines, message.machineId)) {
             streamRequests.touch(message.machineId, message.requestId, message.ttlMs);
+            refreshHealthInBackground("streams", refreshStreamStatuses);
           }
           if (message.type === "stream-release" && machineExists(machines, message.machineId)) {
             streamRequests.release(message.machineId, message.requestId);
+            refreshHealthInBackground("streams", refreshStreamStatuses);
           }
         });
         ws.on("close", () => {
-          state.off("change", onChange);
-          settings.off("change", onChange);
+          state.off("change", onStateChange);
+          settings.off("change", onSettingsChange);
+          healthEvents.off("change", onHealthChange);
           state.off("notification", onNotification);
           state.off("media", onMedia);
           state.off("clipboard", onClipboard);
-          streamRequests.off("change", onChange);
         });
         ws.send(JSON.stringify({ type: "ready" }));
       });
@@ -792,6 +854,21 @@ export const createHttpServer = (
     });
   });
 
+  const machineHealthTimer = setInterval(
+    () => refreshHealthInBackground("machines", refreshMachineStatuses),
+    15_000,
+  );
+  const streamHealthTimer = setInterval(
+    () => refreshHealthInBackground("streams", refreshStreamStatuses),
+    5_000,
+  );
+  machineHealthTimer.unref();
+  streamHealthTimer.unref();
+  server.on("close", () => {
+    clearInterval(machineHealthTimer);
+    clearInterval(streamHealthTimer);
+  });
+
   return setupDevServer().then(() => server);
 };
 
@@ -820,14 +897,6 @@ const serveViteRequest = async (
     if (error instanceof Error) vite.ssrFixStacktrace(error);
     throw error;
   }
-};
-
-const cwdForActivePane = (state: StateStore, machines: MachineConfig[], targetMachineId: string): string | undefined => {
-  const snapshot = state.snapshot();
-  const workspace = snapshot.workspaces.find((candidate) => candidate.id === snapshot.activeWorkspaceId);
-  const tab = workspace?.tabs.find((candidate) => candidate.id === workspace.activeTabId);
-  const pane = tab?.panes.find((candidate) => candidate.id === tab.activePaneId);
-  return cwdForSourcePane(state, machines, pane, targetMachineId);
 };
 
 const cwdForSourcePane = (

@@ -127,7 +127,7 @@ class WmuxClient:
         return self.request("GET", "/api/bootstrap")
 
     def create_workspace(self, machine_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        result = self.request("POST", "/api/workspaces", {"machineId": machine_id})
+        result = self.request("POST", "/api/workspaces", {"machineId": machine_id, "createdBy": "agent"})
         return result["workspace"], result["state"]
 
     def create_tab(self, workspace_id: str, machine_id: str, source_pane_id: str = "") -> tuple[dict[str, Any], dict[str, Any]]:
@@ -571,12 +571,21 @@ def append_wait_result(client: WmuxClient, args: argparse.Namespace, info: dict[
     info["elapsedSeconds"] = round(elapsed, 3)
 
 
+def submit_line(client: WmuxClient, pane_id: str, line: str, enter: bool, cols: int, rows: int) -> int:
+    text = line[:-1] if enter and line.endswith("\r") else line
+    if text:
+        client.send_input(pane_id, text, cols, rows)
+    if enter:
+        # Interactive line editors can process a pasted line asynchronously. A
+        # separate Enter request gives PSReadLine time to accept the final bytes.
+        time.sleep(0.1)
+        client.send_input(pane_id, "\r", cols, rows)
+    return len(text.encode("utf-8")) + (1 if enter else 0)
+
+
 def cmd_send(client: WmuxClient, args: argparse.Namespace) -> int:
-    line = args.line
-    if args.enter and not line.endswith("\r"):
-        line += "\r"
-    client.send_input(args.pane, line, args.cols, args.rows)
-    info = {"paneId": args.pane, "sentBytes": len(line.encode("utf-8"))}
+    sent_bytes = submit_line(client, args.pane, args.line, args.enter, args.cols, args.rows)
+    info = {"paneId": args.pane, "sentBytes": sent_bytes}
     if args.wait_for:
         append_wait_result(client, args, info, args.wait_for)
     print_json(info)
@@ -590,13 +599,11 @@ def cmd_run(client: WmuxClient, args: argparse.Namespace) -> int:
         info["shellReadySeconds"] = round(
             wait_for_shell_ready(client, info["paneId"], info["machineId"], args.ready_timeout, args.cols, args.rows), 3
         )
-    line = args.line
-    if args.enter and not line.endswith("\r"):
-        line += "\r"
-    maybe_record_running_event(client, args, info, f"sent {len(line.encode('utf-8'))} bytes")
-    client.send_input(info["paneId"], line, args.cols, args.rows)
+    sent_bytes = len(args.line.encode("utf-8")) + (1 if args.enter and not args.line.endswith("\r") else 0)
+    maybe_record_running_event(client, args, info, f"sent {sent_bytes} bytes")
+    sent_bytes = submit_line(client, info["paneId"], args.line, args.enter, args.cols, args.rows)
     info["reused"] = reused
-    info["sentBytes"] = len(line.encode("utf-8"))
+    info["sentBytes"] = sent_bytes
     if args.wait_for:
         append_wait_result(client, args, info, args.wait_for)
     print_json(info)
@@ -678,13 +685,13 @@ def cmd_ps(client: WmuxClient, args: argparse.Namespace) -> int:
     script = read_script_arg(args)
     sentinel = "" if args.no_sentinel else f"__WMUX_DONE_{info['paneId']}_{os.getpid()}__"
     encoded = powershell_encoded_command(script, sentinel)
-    line = f"pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}\r"
+    line = f"pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
     if len(line.encode("utf-8")) > 240_000:
         raise SystemExit("wmuxctl: encoded PowerShell command is too large for one pane input")
     maybe_record_running_event(client, args, info, f"PowerShell script sent; sentinel {sentinel}" if sentinel else "PowerShell script sent")
-    client.send_input(info["paneId"], line, args.cols, args.rows)
+    sent_bytes = submit_line(client, info["paneId"], line, True, args.cols, args.rows)
     info["reused"] = reused
-    info["sentBytes"] = len(line.encode("utf-8"))
+    info["sentBytes"] = sent_bytes
     if sentinel:
         info["sentinel"] = sentinel
     if args.wait:

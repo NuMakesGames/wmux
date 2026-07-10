@@ -40,9 +40,27 @@ const commandOutput = (command: string, args: string[]): string => {
   return result.stdout;
 };
 
-const loadState = (statePath: string): { workspaces?: Array<{ tabs?: Array<{ panes?: Array<{ id?: string }> }> }> } => {
+interface AuditMachine {
+  id?: string;
+  kind?: string;
+  sessionBackend?: string;
+  command?: unknown[];
+}
+
+interface AuditPane {
+  id?: string;
+  machineId?: string;
+  status?: string;
+}
+
+interface AuditState {
+  machines?: AuditMachine[];
+  workspaces?: Array<{ tabs?: Array<{ panes?: AuditPane[] }> }>;
+}
+
+const loadState = (statePath: string): AuditState => {
   try {
-    return JSON.parse(fs.readFileSync(statePath, "utf8")) as { workspaces?: Array<{ tabs?: Array<{ panes?: Array<{ id?: string }> }> }> };
+    return JSON.parse(fs.readFileSync(statePath, "utf8")) as AuditState;
   } catch {
     return { workspaces: [] };
   }
@@ -51,12 +69,23 @@ const loadState = (statePath: string): { workspaces?: Array<{ tabs?: Array<{ pan
 const durableSessionName = (paneId: string): string => `wmux_${String(paneId || "unknown").replace(/[^A-Za-z0-9_-]/g, "_")}`;
 const paneIdFromSession = (sessionName: string): string => (sessionName.startsWith("wmux_") ? sessionName.slice("wmux_".length) : "");
 
-const activePaneIds = (state: ReturnType<typeof loadState>): Set<string> =>
-  new Set(
-    (state.workspaces ?? []).flatMap((workspace) =>
-      (workspace.tabs ?? []).flatMap((tab) => (tab.panes ?? []).map((pane) => pane.id).filter(Boolean) as string[]),
+export const expectedLocalDurablePaneIds = (state: AuditState): Set<string> => {
+  const machines = new Map((state.machines ?? []).map((machine) => [machine.id, machine]));
+  const paneIds = (state.workspaces ?? []).flatMap((workspace) =>
+    (workspace.tabs ?? []).flatMap((tab) =>
+      (tab.panes ?? []).flatMap((pane) => {
+        if (!pane.id || pane.status === "exited") return [];
+        const machineId = pane.machineId ?? "local";
+        const machine = machines.get(machineId);
+        if (machineId !== "local" || (machine && machine.kind !== "local")) return [];
+        if (machine?.command?.length) return [];
+        const backend = machine?.sessionBackend ?? "auto";
+        return backend === "auto" || backend === "tmux" || backend === "screen" ? [pane.id] : [];
+      }),
     ),
   );
+  return new Set(paneIds);
+};
 
 const listTmux = (): Array<Omit<DurableSessionAuditRow, "activePane" | "status" | "cleanupAllowed">> =>
   commandOutput("tmux", ["list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{session_windows}"])
@@ -94,7 +123,7 @@ const listScreen = (): Array<Omit<DurableSessionAuditRow, "activePane" | "status
 
 export const auditDurableSessions = (statePath = process.env.WMUX_STATE_PATH ?? defaultStatePath()): DurableSessionAudit => {
   const state = loadState(statePath);
-  const active = activePaneIds(state);
+  const active = expectedLocalDurablePaneIds(state);
   const sessions = [...listTmux(), ...listScreen()];
   const byName = new Map<string, typeof sessions>();
   for (const session of sessions) {

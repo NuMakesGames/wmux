@@ -80,3 +80,10 @@ test("every machine kind produces a runnable file + cwd", () => {
     assert.ok(Array.isArray(spec.args), `${label} has args`);
   }
 });
+
+test("local durable credentials are staged outside observable process arguments", () => {
+  const spec = buildSpawnSpec(machines[0].machine, 120, 40, extraEnv);
+  assert.equal(spec.args.join(" ").includes(extraEnv.WMUX_TOKEN), false);
+  assert.match(spec.args[0], /wmux\/runtimes\/v1-wmux_pane_fixed001\.sh$/);
+  assert.equal(fs.statSync(spec.args[0]).mode & 0o777, 0o700);
+});

@@ -15,10 +15,35 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "0.2"
+VERSION = "0.3"
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
+LOCAL_RESPONSE_TTL_SECONDS = 30.0
+
+LOCAL_TERMINAL_QUERY_RESPONSES = {
+    b"\x1b[c": b"\x1b[?62;22c",
+    b"\x1b[0c": b"\x1b[?62;22c",
+    b"\x1b[5n": b"\x1b[0n",
+}
+
+
+class TerminalQueryResponder:
+    def __init__(self) -> None:
+        self.pending = b""
+
+    def feed(self, data: bytes) -> list[bytes]:
+        replies: list[bytes] = []
+        queries = tuple(LOCAL_TERMINAL_QUERY_RESPONSES)
+        for value in data:
+            self.pending += bytes((value,))
+            while self.pending and not any(query.startswith(self.pending) for query in queries):
+                self.pending = self.pending[1:]
+            reply = LOCAL_TERMINAL_QUERY_RESPONSES.get(self.pending)
+            if reply is not None:
+                replies.append(reply)
+                self.pending = b""
+        return replies
 
 
 def load_config(path: str) -> dict[str, Any]:
@@ -196,6 +221,9 @@ class StdioBackend:
         self.process.stdin.write(data.replace(b"\r", b"\n"))
         self.process.stdin.flush()
 
+    def write_terminal_response(self, data: bytes) -> None:
+        self.write(data)
+
     def resize(self, _cols: int, _rows: int) -> None:
         return
 
@@ -235,6 +263,8 @@ class ConptyBackend:
         )
         self.lock = threading.Lock()
         self.closed = False
+        self.query_responder = TerminalQueryResponder()
+        self.locally_answered: dict[bytes, float] = {}
 
     @property
     def pid(self) -> int:
@@ -245,6 +275,20 @@ class ConptyBackend:
             return
         with self.lock:
             if self.closed:
+                return
+            self.process.write(data.decode("utf-8", errors="replace"))
+
+    def write_terminal_response(self, data: bytes) -> None:
+        if self.closed or not data:
+            return
+        with self.lock:
+            if self.closed:
+                return
+            current = time.monotonic()
+            self.locally_answered = {
+                response: deadline for response, deadline in self.locally_answered.items() if deadline > current
+            }
+            if data in self.locally_answered:
                 return
             self.process.write(data.decode("utf-8", errors="replace"))
 
@@ -280,6 +324,7 @@ class ConptyBackend:
                     break
                 chunk = chunk.replace(b"0011Ignore", b"")
                 if chunk:
+                    self._answer_terminal_queries(chunk)
                     append(chunk)
         except OSError:
             pass
@@ -287,6 +332,18 @@ class ConptyBackend:
             exit_code = self._exit_code()
             self._close()
         return exit_code
+
+    def _answer_terminal_queries(self, data: bytes) -> None:
+        replies = self.query_responder.feed(data)
+        if not replies:
+            return
+        with self.lock:
+            if self.closed:
+                return
+            deadline = time.monotonic() + LOCAL_RESPONSE_TTL_SECONDS
+            for reply in replies:
+                self.locally_answered[reply] = deadline
+                self.process.write(reply.decode("ascii"))
 
     def _exit_code(self) -> int | None:
         try:
@@ -343,10 +400,13 @@ class Session:
             "cursor": self.cursor,
         }
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, terminal_response: bool = False) -> None:
         if self.exited:
             return
-        self.backend.write(data)
+        if terminal_response:
+            self.backend.write_terminal_response(data)
+        else:
+            self.backend.write(data)
 
     def resize(self, cols: int, rows: int) -> None:
         if self.exited:
@@ -511,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = self.read_json()
             data = base64.b64decode(str(body.get("dataBase64") or ""))
-            session.write(data)
+            session.write(data, terminal_response=body.get("terminalResponse") is True)
             self.send_json({"ok": True})
             return
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "resize":

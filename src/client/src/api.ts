@@ -1,5 +1,5 @@
 import { authHeaders } from "./token";
-import type { BootstrapPayload, DurableSessionAudit, SplitDirection, WmuxSettings } from "./types";
+import type { BootstrapPayload, DoctorReport, DurableSessionAudit, SplitDirection, WmuxSettings } from "./types";
 
 export class UnauthorizedError extends Error {
   constructor() {
@@ -62,6 +62,7 @@ export const api = {
       { method: "DELETE" },
     ),
   auditSessions: () => json<DurableSessionAudit>("/api/session-audit"),
+  doctor: () => json<DoctorReport>("/api/doctor"),
   cleanupSession: (backend: "tmux" | "screen", name: string) =>
     json<DurableSessionAudit>(`/api/session-audit/${backend}/${encodeURIComponent(name)}`, { method: "DELETE" }),
   updateSettings: (settings: WmuxSettings) =>
@@ -69,13 +70,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(settings),
     }),
-  createWorkspace: (machineId: string) =>
+  createWorkspace: (machineId: string, sourcePaneId?: string) =>
     json<{ workspace: BootstrapPayload["workspaces"][number]; state: BootstrapPayload }>("/api/workspaces", {
       method: "POST",
-      body: JSON.stringify({ machineId }),
+      body: JSON.stringify({ machineId, sourcePaneId }),
     }),
-  activateWorkspace: (workspaceId: string) =>
-    json<BootstrapPayload>(`/api/workspaces/${workspaceId}/active`, { method: "POST" }),
   closeWorkspace: (workspaceId: string) =>
     json<{ state: BootstrapPayload }>(`/api/workspaces/${workspaceId}`, { method: "DELETE" }),
   setWorkspaceTitle: (workspaceId: string, title: string) =>
@@ -88,14 +87,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ title, descriptor, tabId, tabOnlyIfMultiple: true }),
     }),
-  createTab: (workspaceId: string, machineId: string) =>
-    json<{ state: BootstrapPayload }>(`/api/workspaces/${workspaceId}/tabs`, {
+  createTab: (workspaceId: string, machineId: string, sourcePaneId?: string) =>
+    json<{ tab: BootstrapPayload["workspaces"][number]["tabs"][number]; state: BootstrapPayload }>(`/api/workspaces/${workspaceId}/tabs`, {
       method: "POST",
-      body: JSON.stringify({ machineId }),
-    }),
-  activateTab: (workspaceId: string, tabId: string) =>
-    json<BootstrapPayload>(`/api/workspaces/${workspaceId}/tabs/${tabId}/active`, {
-      method: "POST",
+      body: JSON.stringify({ machineId, sourcePaneId }),
     }),
   closeTab: (workspaceId: string, tabId: string) =>
     json<{ state: BootstrapPayload }>(`/api/workspaces/${workspaceId}/tabs/${tabId}`, {
@@ -107,7 +102,7 @@ export const api = {
       body: JSON.stringify({ title }),
     }),
   splitPane: (tabId: string, paneId: string, direction: SplitDirection, machineId?: string) =>
-    json<{ state: BootstrapPayload }>(`/api/tabs/${tabId}/split`, {
+    json<{ tab: BootstrapPayload["workspaces"][number]["tabs"][number]; state: BootstrapPayload }>(`/api/tabs/${tabId}/split`, {
       method: "POST",
       body: JSON.stringify({ paneId, direction, ...(machineId ? { machineId } : {}) }),
     }),
@@ -116,8 +111,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ path, ratio }),
     }),
-  activatePane: (tabId: string, paneId: string) =>
-    json<BootstrapPayload>(`/api/tabs/${tabId}/panes/${paneId}/active`, { method: "POST" }),
   closePane: (tabId: string, paneId: string) =>
     json<{ state: BootstrapPayload }>(`/api/tabs/${tabId}/panes/${paneId}`, { method: "DELETE" }),
   sendPaneInput: (paneId: string, data: string, cols = 96, rows = 32) =>
@@ -139,4 +132,6 @@ export const api = {
     json<BootstrapPayload>(`/api/notifications/${notificationId}/read`, { method: "POST" }),
   markWorkspaceNotificationsRead: (workspaceId: string) =>
     json<BootstrapPayload>(`/api/workspaces/${workspaceId}/notifications/read`, { method: "POST" }),
+  markPaneNotificationsRead: (paneId: string) =>
+    json<BootstrapPayload>(`/api/panes/${encodeURIComponent(paneId)}/notifications/read`, { method: "POST" }),
 };

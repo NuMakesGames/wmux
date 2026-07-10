@@ -30,9 +30,12 @@ interface OpenTuiPaneToolbarProps {
   canCopyLastCommand: boolean;
   canRerunLastCommand: boolean;
   canSplit: boolean;
+  canReconnect: boolean;
+  connectionIssue?: string;
   onSplit: (direction: SplitDirection) => void;
   onActivate: () => void;
   onClose: () => void;
+  onReconnect: () => void;
   onCopyLastCommand: () => void;
   onRerunLastCommand: () => void;
 }
@@ -41,6 +44,7 @@ type HitAction =
   | { type: "copy-last-command" }
   | { type: "rerun-last-command" }
   | { type: "split"; direction: SplitDirection }
+  | { type: "reconnect" }
   | { type: "focus" }
   | { type: "close" };
 
@@ -105,6 +109,7 @@ export function OpenTuiPaneToolbar(props: OpenTuiPaneToolbarProps) {
     if (action.type === "copy-last-command") props.onCopyLastCommand();
     if (action.type === "rerun-last-command") props.onRerunLastCommand();
     if (action.type === "split") props.onSplit(action.direction);
+    if (action.type === "reconnect") props.onReconnect();
     if (action.type === "focus") props.onActivate();
     if (action.type === "close") props.onClose();
   };
@@ -177,7 +182,9 @@ const drawPaneToolbar = (
 
   let right = cols - 1;
   right = button(right, "x", "Close pane and kill process", { type: "close" });
-  right = button(right, "max", "Focus pane", { type: "focus" });
+  if (props.canReconnect) {
+    right = button(right, "retry", props.connectionIssue ?? "Reconnect pane", { type: "reconnect" }, false, true);
+  }
   right = button(right, "down", `Split down on ${props.machineLabel}`, { type: "split", direction: "horizontal" }, !props.canSplit);
   right = button(right, "right", `Split right on ${props.machineLabel}`, { type: "split", direction: "vertical" }, !props.canSplit);
 

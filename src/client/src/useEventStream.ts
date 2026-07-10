@@ -7,15 +7,14 @@ import type { BootstrapPayload, TerminalMedia, TerminalNotification } from "./ty
 export type ServiceConnection = "connecting" | "online" | "offline";
 
 interface UseEventStreamCallbacks {
-  // Receives the freshly fetched bootstrap payload on every coalesced resync.
+  // Receives either a revisioned socket snapshot or a recovery bootstrap.
   onResync: (payload: BootstrapPayload) => void;
   onAuthRequired: () => void;
   onError: (message: string) => void;
 }
 
-// Owns the /ws/events socket: connection lifecycle with reconnect, the
-// coalesced full-bootstrap resync, browser notifications, the media shelf
-// feed, and clipboard pushes from wmux-copy.
+  // Owns the /ws/events socket: connection lifecycle with reconnect, recovery
+  // bootstrap, revisioned snapshots, notifications, media, and clipboard pushes.
 export function useEventStream(callbacks: UseEventStreamCallbacks) {
   const [serviceConnection, setServiceConnection] = useState<ServiceConnection>("connecting");
   const [mediaItems, setMediaItems] = useState<TerminalMedia[]>([]);
@@ -29,9 +28,8 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
     let reconnectTimer: number | undefined;
     let resyncTimer: number | undefined;
     let socket: WebSocket | null = null;
-    // Coalesce the full-bootstrap refetch: a burst of state/notification events
-    // (or a reconnect) collapses into a single trailing refresh instead of one
-    // network round-trip per event.
+    // Coalesce recovery bootstraps when a socket connects or a legacy server
+    // emits state-only events. Current servers send complete typed snapshots.
     const scheduleResync = () => {
       if (resyncTimer) return;
       resyncTimer = window.setTimeout(() => {
@@ -60,7 +58,13 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
         scheduleResync();
       };
       ws.onmessage = (event) => {
-        let message: { type?: string; notification?: unknown; media?: unknown; clipboard?: unknown };
+        let message: {
+          type?: string;
+          state?: BootstrapPayload;
+          notification?: unknown;
+          media?: unknown;
+          clipboard?: unknown;
+        };
         try {
           message = JSON.parse(event.data);
         } catch {
@@ -77,7 +81,10 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
           const clipboard = message.clipboard as { text?: string };
           if (typeof clipboard.text === "string") void writeBrowserClipboard(clipboard.text).catch(() => undefined);
         }
-        if (message.type === "state" || message.type === "notification") {
+        if (message.type === "snapshot" && message.state) {
+          callbacksRef.current.onResync(message.state);
+        }
+        if (message.type === "state") {
           scheduleResync();
         }
       };
