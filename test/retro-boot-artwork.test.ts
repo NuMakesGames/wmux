@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RETRO_BOOT_ARTWORK } from "../src/client/src/RetroBootArtwork";
+import { fitRetroFramebuffer, retroFramebufferStyle } from "../src/client/src/retro-framebuffer";
 import { RETRO_BOOT_PROFILES } from "../src/client/src/retro-boot-profiles";
 
 const ASSET_PROFILE_IDS = [
@@ -61,4 +62,19 @@ test("GUI systems stay graphical while native command consoles may use boot artw
   assert.deepEqual(graphicalShells, GRAPHICAL_SHELL_PROFILE_IDS);
   assert.deepEqual(terminalArtworkBoots, TERMINAL_ARTWORK_PROFILE_IDS);
   assert.deepEqual(artworkAssets, ASSET_PROFILE_IDS);
+});
+
+test("framebuffer styles use each profile's declared native aspect ratio", () => {
+  assert.deepEqual(retroFramebufferStyle("commodore-64"), { "--retro-framebuffer-aspect": "320 / 200" });
+  assert.deepEqual(retroFramebufferStyle("macintosh-system-6"), { "--retro-framebuffer-aspect": "512 / 342" });
+  assert.deepEqual(retroFramebufferStyle("acorn-archimedes"), { "--retro-framebuffer-aspect": "640 / 256" });
+});
+
+test("framebuffer fitting preserves aspect ratio under both width and height constraints", () => {
+  assert.deepEqual(fitRetroFramebuffer([320, 200], 1176, 696), { width: 920, height: 575 });
+  assert.deepEqual(fitRetroFramebuffer([320, 200], 390, 844), { width: 390, height: 243.75 });
+  assert.deepEqual(fitRetroFramebuffer([800, 240], 740, 286), { width: 740, height: 222 });
+  const portrait = fitRetroFramebuffer([176, 184], 1176, 696);
+  assert.equal(portrait.height, 696);
+  assert.ok(Math.abs(portrait.width / portrait.height - 176 / 184) < 0.000_001);
 });

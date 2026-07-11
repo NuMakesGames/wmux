@@ -1,6 +1,7 @@
 import { type CSSProperties, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { playRetroPostSound } from "./retro-boot-audio";
+import { retroFramebufferStyle, useRetroFramebuffer } from "./retro-framebuffer";
 import type { RetroBootProfile } from "./retro-boot-profiles";
 import { setToken } from "./token";
 
@@ -47,6 +48,7 @@ export function RetroGraphicalBootScreen({
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState(profile.bootStatus);
+  useRetroFramebuffer(hostRef, profile.id);
 
   useEffect(() => {
     const stopPostSound = playRetroPostSound(profile.id);
@@ -142,6 +144,7 @@ export function RetroGraphicalBootScreen({
   };
 
   const style = {
+    ...retroFramebufferStyle(profile.id),
     "--retro-page": profile.colors.page,
     "--retro-border": profile.colors.border,
     "--retro-background": profile.colors.background,

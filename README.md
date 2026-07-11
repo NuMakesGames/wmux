@@ -152,6 +152,10 @@ Artwork is rasterized once at the selected hardware framebuffer resolution and
 older bitmap modes use hard alpha edges and device-limited palettes. The short
 audio cues and wmux-specific disk, network, and authentication messages remain
 deliberately evocative rather than claims of literal ROM output.
+Both graphical and terminal profiles are contained within that native framebuffer
+aspect ratio. Terminal profiles retain their declared row and column grids, then
+uniformly scale the completed terminal surface inside the machine framebuffer
+without stretching glyphs or adding rows and columns to fill the browser viewport.
 
 ## Settings
 

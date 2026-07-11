@@ -2236,11 +2236,11 @@ button.active-tool {
 
 .retro-boot-bezel {
   position: relative;
-  width: min(920px, 100%);
-  height: min(680px, 100%);
+  width: var(--retro-framebuffer-width, min(920px, 100%));
+  height: var(--retro-framebuffer-height, auto);
   min-height: 0;
   overflow: hidden;
-  border: clamp(14px, 3vw, 42px) solid var(--retro-border);
+  aspect-ratio: var(--retro-framebuffer-aspect);
   background: var(--retro-background);
 }
 
@@ -2317,6 +2317,11 @@ button.active-tool {
 
 .retro-boot-terminal canvas {
   display: block;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
 }
 
 .retro-boot-terminal textarea {
@@ -2412,9 +2417,10 @@ button.active-tool {
 
 .retro-graphical-display {
   position: relative;
-  width: min(920px, 100%);
-  height: min(680px, 100%);
+  width: var(--retro-framebuffer-width, min(920px, 100%));
+  height: var(--retro-framebuffer-height, auto);
   overflow: hidden;
+  aspect-ratio: var(--retro-framebuffer-aspect);
   background: var(--retro-background);
   color: var(--retro-foreground);
   image-rendering: pixelated;
@@ -2993,14 +2999,13 @@ button.active-tool {
   }
 
   .retro-boot-bezel {
-    width: 100%;
-    height: 100%;
-    border-width: 18px 12px;
+    max-width: 100%;
+    max-height: 100%;
   }
 
   .retro-graphical-display {
-    width: 100%;
-    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
   }
 
   .retro-graphical-login {

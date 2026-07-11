@@ -1,9 +1,10 @@
 import { type CSSProperties, useEffect, useRef, useState } from "react";
-import { FitAddon, Terminal } from "ghostty-web";
+import { Terminal } from "ghostty-web";
 import { api } from "./api";
 import { RetroBootArtwork } from "./RetroBootArtwork";
 import { RetroGraphicalBootScreen } from "./RetroGraphicalBootScreen";
 import { playRetroPostSound } from "./retro-boot-audio";
+import { retroFramebufferStyle, useRetroFramebuffer } from "./retro-framebuffer";
 import { selectRetroBootProfile, type RetroBootProfile } from "./retro-boot-profiles";
 import { ensureGhostty } from "./terminal-loader";
 import { configureTerminalInput } from "./terminal-input";
@@ -48,6 +49,7 @@ function RetroTerminalBootScreen({
   onAuthenticated,
   onComplete,
 }: RetroBootScreenProps & { profile: RetroBootProfile }) {
+  const screenRef = useRef<HTMLElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const authRequiredRef = useRef(authRequired);
   const readyRef = useRef(ready);
@@ -59,6 +61,7 @@ function RetroTerminalBootScreen({
     !hasBootArtwork ? "terminal" : profile.specialBoot === "amiga-guru" ? "guru" : isAmiga ? "blank" : "artwork",
   );
   const [status, setStatus] = useState(`Starting ${profile.name}`);
+  useRetroFramebuffer(screenRef, profile.id);
 
   useEffect(() => {
     authRequiredRef.current = authRequired;
@@ -80,7 +83,6 @@ function RetroTerminalBootScreen({
     const stopPostSound = playRetroPostSound(profile.id);
     let cancelled = false;
     let terminal: Terminal | null = null;
-    let fitAddon: FitAddon | null = null;
     let authStage: "idle" | "username" | "password" | "submitting" = "idle";
     let username = "";
     let credentialInput = "";
@@ -195,15 +197,11 @@ function RetroTerminalBootScreen({
           selectionForeground: profile.colors.background,
         },
       });
-      fitAddon = new FitAddon();
-      terminal.loadAddon(fitAddon);
       terminal.open(hostRef.current);
       configureTerminalInput(terminal);
       terminal.onData(acceptCredentialInput);
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       if (cancelled) return;
-      fitAddon.fit();
-      fitAddon.observeResize();
 
       if (!hasBootArtwork) {
         setVisualPhase("terminal");
@@ -287,20 +285,21 @@ function RetroTerminalBootScreen({
     return () => {
       cancelled = true;
       stopPostSound();
-      fitAddon?.dispose();
       terminal?.dispose();
     };
   }, [hasBootArtwork, profile]);
 
+  const recoveredAmigaBackdrop = profile.specialBoot === "amiga-guru" && visualPhase !== "guru" ? "#ffffff" : null;
   const style = {
-    "--retro-page": profile.colors.page,
-    "--retro-border": profile.colors.border,
+    ...retroFramebufferStyle(profile.id),
+    "--retro-page": recoveredAmigaBackdrop ?? profile.colors.page,
+    "--retro-border": recoveredAmigaBackdrop ?? profile.colors.border,
     "--retro-background": profile.colors.background,
     "--retro-foreground": profile.colors.foreground,
   } as CSSProperties;
 
   return (
-    <main className={`retro-boot-screen retro-boot-${profile.id}`} style={style} data-boot-profile={profile.id}>
+    <main ref={screenRef} className={`retro-boot-screen retro-boot-${profile.id}`} style={style} data-boot-profile={profile.id}>
       <section className="retro-boot-bezel" aria-label={`${profile.name} wmux loading`}>
         <div className="retro-boot-terminal-frame">
           {isAmiga ? (
