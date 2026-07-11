@@ -396,7 +396,7 @@ The agent listens on the configured Tailscale/internal host and owns pane proces
 }
 ```
 
-The Windows agent uses `pywinpty` with its native ConPTY backend by default, so pane input, resize, rich line editing, and full-screen terminal applications go through Windows' pseudo console API instead of redirected PowerShell stdio. It answers fixed device-attribute and operating-status queries beside ConPTY to avoid delayed browser round trips being echoed into PSReadLine; browser terminal replies are tagged so locally answered duplicates can be discarded, while cursor-position replies still come from the renderer that owns cursor state. A `backend: "stdio"` config value remains available as an explicit fallback for debugging older hosts.
+The Windows agent uses `pywinpty` with its native ConPTY backend by default, so pane input, resize, rich line editing, and full-screen terminal applications go through Windows' pseudo console API instead of redirected PowerShell stdio. Each pane process is assigned to an agent-held Windows Job Object with kill-on-close enabled, so explicitly closing a pane also terminates descendants that detached from their original shell. The job remains alive when the wmux server merely detaches, preserving sessions across service restarts. The agent also answers fixed device-attribute and operating-status queries beside ConPTY to avoid delayed browser round trips being echoed into PSReadLine; browser terminal replies are tagged so locally answered duplicates can be discarded, while cursor-position replies still come from the renderer that owns cursor state. A `backend: "stdio"` config value remains available as an explicit fallback for debugging older hosts.
 
 ## Workspace Titles
 

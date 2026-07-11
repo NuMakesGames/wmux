@@ -113,7 +113,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 ## Current Gaps To Preserve In Docs
 
 - Remote per-platform wmux agents are partial. Windows has an experimental ConPTY session agent; Linux/macOS agents are not implemented.
-- Windows SSH PowerShell is validated on 9800x3d. The experimental Windows session agent now uses pywinpty-backed ConPTY by default, but broad full-screen app validation, graceful process-tree shutdown, and Windows-agent-restart durability are still pending.
+- Windows SSH PowerShell is validated on 9800x3d. The experimental Windows session agent now uses pywinpty-backed ConPTY by default and contains each pane in a kill-on-close Windows Job Object, but broad full-screen app validation and Windows-agent-restart durability are still pending.
 - Machine management is file-based; there is no in-app editor.
 - There is no login/token gate beyond private-network assumptions and request validation.
 - Full cmux-style transcript auto-naming is heuristic. Claude and Codex hook paths exist; OpenCode installation is not implemented.

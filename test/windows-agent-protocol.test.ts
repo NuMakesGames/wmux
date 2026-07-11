@@ -110,3 +110,104 @@ with tempfile.TemporaryDirectory() as root:
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { content: "Write-Output staged", version: "bundle123" });
 });
+
+test("Windows agent job ownership kills the full pane process tree on close", () => {
+  const source = String.raw`
+import json
+import runpy
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+
+class FakeJobApi:
+    def __init__(self):
+        self.events = []
+    def create_kill_on_close_job(self):
+        self.events.append(["create"])
+        return 42
+    def assign_process(self, handle, pid):
+        self.events.append(["assign", handle, pid])
+    def close(self, handle):
+        self.events.append(["close", handle])
+
+api = FakeJobApi()
+tree = module["WindowsProcessTree"](1234, api)
+tree.terminate()
+tree.terminate()
+print(json.dumps(api.events))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [["create"], ["assign", 42, 1234], ["close", 42]]);
+});
+
+test("Windows agent closes an unassigned job when process containment fails", () => {
+  const source = String.raw`
+import json
+import runpy
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+
+class FakeJobApi:
+    def __init__(self):
+        self.events = []
+    def create_kill_on_close_job(self):
+        self.events.append(["create"])
+        return 84
+    def assign_process(self, handle, pid):
+        self.events.append(["assign", handle, pid])
+        raise RuntimeError("assignment failed")
+    def close(self, handle):
+        self.events.append(["close", handle])
+
+api = FakeJobApi()
+try:
+    module["WindowsProcessTree"](5678, api)
+except RuntimeError as error:
+    message = str(error)
+else:
+    message = "missing error"
+print(json.dumps({"events": api.events, "message": message}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    events: [["create"], ["assign", 84, 5678], ["close", 84]],
+    message: "assignment failed",
+  });
+});
+
+test("Windows ConPTY closure releases pane job ownership before closing the pseudoconsole", () => {
+  const source = String.raw`
+import json
+import runpy
+import threading
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+events = []
+
+class FakeTree:
+    def terminate(self):
+        events.append("tree")
+
+class FakeProcess:
+    def terminate(self, force=False):
+        events.append("terminate")
+    def close(self, force=False):
+        events.append("close")
+
+backend = object.__new__(module["ConptyBackend"])
+backend.process_tree = FakeTree()
+backend.process = FakeProcess()
+backend.lock = threading.Lock()
+backend.closed = False
+backend.terminate()
+backend.terminate()
+print(json.dumps({"events": events, "closed": backend.closed}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    events: ["tree", "terminate", "close"],
+    closed: true,
+  });
+});

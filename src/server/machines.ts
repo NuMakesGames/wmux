@@ -1306,6 +1306,7 @@ const windowsStatusDetail = (
 ): string => {
   if (!agent) return detail;
   const backend = agent.health?.backend ? ` ${agent.health.backend}` : "";
+  const processTree = agent.health?.processTree ? `, ${agent.health.processTree}` : "";
   const dependency =
     agent.health?.backend === "conpty" && agent.health.conptyAvailable === false ? "; pywinpty missing" : "";
   const expectedVersion = expectedWindowsAgentVersion();
@@ -1314,7 +1315,7 @@ const windowsStatusDetail = (
       ? ` (expected ${expectedVersion} — restart the agent task to update)`
       : "";
   const agentDetail = agent.reachable
-    ? `agent ${agent.health?.version ?? "ready"}${versionNote}${backend} at ${agent.url}${dependency}`
+    ? `agent ${agent.health?.version ?? "ready"}${versionNote}${backend}${processTree} at ${agent.url}${dependency}`
     : `agent unavailable at ${agent.url ?? "unknown URL"}`;
   return `${detail}; ${agentDetail}`;
 };

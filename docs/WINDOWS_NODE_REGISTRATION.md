@@ -359,7 +359,7 @@ The agent task uses `Interactive` logon when a desktop user is logged in and fal
 
 ## Known Limits
 
-- Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent`; wmux service shutdown detaches its client while explicit pane closure deletes the owned ConPTY.
+- Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent`; wmux service shutdown detaches its client while explicit pane closure deletes the owned ConPTY and its Windows Job Object, terminating detached descendants.
 - Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
 - Windows screen streaming is validated on 9800x3d through FFmpeg/gdigrab and the supervised per-user Scheduled Task. Locked/logged-out behavior and a fuller Windows wmux agent are still not implemented.
 - The Windows session agent uses pywinpty-backed ConPTY by default. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running, but Windows-agent restarts still kill the owned ConPTY processes and broad full-screen app validation is still pending.

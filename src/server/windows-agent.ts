@@ -40,6 +40,7 @@ export interface WindowsAgentHealth {
   pid?: number;
   sessions?: number;
   backend?: string;
+  processTree?: string;
   helperBundleVersion?: string;
   conptyAvailable?: boolean;
   pywinptyAvailable?: boolean;

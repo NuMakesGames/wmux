@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import ctypes
 import hashlib
 import hmac
 import json
@@ -17,7 +18,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "0.5"
+VERSION = "0.6"
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
@@ -29,6 +30,121 @@ LOCAL_TERMINAL_QUERY_RESPONSES = {
 }
 
 OSC7_PATTERN = re.compile(rb"\x1b\]7;file://([^\x07\x1b]*)(?:\x07|\x1b\\)")
+
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+PROCESS_TERMINATE = 0x0001
+PROCESS_SET_QUOTA = 0x0100
+
+
+class WindowsJobApi:
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise RuntimeError("Windows Job Objects are only available on Windows")
+        from ctypes import wintypes
+
+        class JobObjectBasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JobObjectExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JobObjectBasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        self.extended_limit_type = JobObjectExtendedLimitInformation
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        self.kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        self.kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        self.kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        self.kernel32.OpenProcess.restype = wintypes.HANDLE
+        self.kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        self.kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def create_kill_on_close_job(self) -> Any:
+        handle = self.kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        info = self.extended_limit_type()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.kernel32.SetInformationJobObject(
+            handle,
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            error = ctypes.get_last_error()
+            self.kernel32.CloseHandle(handle)
+            raise ctypes.WinError(error)
+        return handle
+
+    def assign_process(self, job_handle: Any, pid: int) -> None:
+        process_handle = self.kernel32.OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA, False, pid)
+        if not process_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not self.kernel32.AssignProcessToJobObject(job_handle, process_handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            self.kernel32.CloseHandle(process_handle)
+
+    def close(self, handle: Any) -> None:
+        if not self.kernel32.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+class WindowsProcessTree:
+    def __init__(self, pid: int, api: Any | None = None) -> None:
+        self.api = api or WindowsJobApi()
+        self.lock = threading.Lock()
+        self.handle = self.api.create_kill_on_close_job()
+        try:
+            self.api.assign_process(self.handle, pid)
+        except Exception:
+            self.api.close(self.handle)
+            self.handle = None
+            raise
+
+    def terminate(self) -> None:
+        with self.lock:
+            handle = self.handle
+            if handle is None:
+                return
+            self.api.close(handle)
+            self.handle = None
 
 
 class CwdReporter:
@@ -297,6 +413,11 @@ class StdioBackend:
             stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
+        try:
+            self.process_tree = WindowsProcessTree(self.pid) if os.name == "nt" else None
+        except Exception:
+            self.process.terminate()
+            raise
 
     @property
     def pid(self) -> int:
@@ -315,6 +436,11 @@ class StdioBackend:
         return
 
     def terminate(self) -> None:
+        if self.process_tree:
+            try:
+                self.process_tree.terminate()
+            except Exception:
+                pass
         try:
             if os.name == "nt":
                 self.process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -324,12 +450,19 @@ class StdioBackend:
             pass
 
     def read_output(self, append: Any) -> int | None:
-        while True:
-            chunk = os.read(self.process.stdout.fileno(), 4096) if self.process.stdout else b""
-            if not chunk:
-                break
-            append(chunk)
-        return self.process.poll()
+        try:
+            while True:
+                chunk = os.read(self.process.stdout.fileno(), 4096) if self.process.stdout else b""
+                if not chunk:
+                    break
+                append(chunk)
+            return self.process.poll()
+        finally:
+            if self.process_tree:
+                try:
+                    self.process_tree.terminate()
+                except Exception:
+                    pass
 
 
 class ConptyBackend:
@@ -348,6 +481,15 @@ class ConptyBackend:
             dimensions=(max(1, int(rows)), max(2, int(cols))),
             backend=Backend.ConPTY,
         )
+        try:
+            self.process_tree = WindowsProcessTree(self.pid)
+        except Exception:
+            try:
+                self.process.terminate(force=True)
+                self.process.close(force=True)
+            except Exception:
+                pass
+            raise
         self.lock = threading.Lock()
         self.closed = False
         self.query_responder = TerminalQueryResponder()
@@ -389,6 +531,10 @@ class ConptyBackend:
         with self.lock:
             if self.closed:
                 return
+            try:
+                self.process_tree.terminate()
+            except Exception:
+                pass
             try:
                 self.process.terminate(force=True)
             except Exception:
@@ -440,6 +586,10 @@ class ConptyBackend:
         with self.lock:
             if self.closed:
                 return
+            try:
+                self.process_tree.terminate()
+            except Exception:
+                pass
             try:
                 self.process.close(force=True)
             except Exception:
@@ -615,6 +765,7 @@ class Handler(BaseHTTPRequestHandler):
                     "pid": os.getpid(),
                     "sessions": len(self.state.sessions),
                     "backend": self.state.backend,
+                    "processTree": "windows-job",
                     "helperBundleVersion": helper_bundle_version(self.state.config),
                     "conptyAvailable": conpty_available(),
                     "pywinptyAvailable": pywinpty_available(),
