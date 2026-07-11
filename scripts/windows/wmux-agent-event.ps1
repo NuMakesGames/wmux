@@ -169,7 +169,12 @@ if ($ClaudeHook -and $HookInput) {
   $HookEvent = [string]$HookInput.hook_event_name
   if ($HookEvent -eq 'UserPromptSubmit') {
     $Status = 'running'
-    if (-not $Summary) { $Summary = 'claude running' }
+    $Summary = 'claude running'
+    $Message = ''
+  } elseif ($HookEvent -eq 'Notification') {
+    $Status = 'updated'
+    $Summary = if ($HookInput.message) { Clean-Text ([string]$HookInput.message) 500 } else { 'claude notification' }
+    $Message = ''
   } elseif ($HookEvent) {
     $Status = 'completed'
     if (-not $Summary) { $Summary = 'claude completed' }
@@ -181,7 +186,8 @@ if ($CodexHook -and $HookInput) {
   $HookEvent = [string]$HookInput.hook_event_name
   if ($HookEvent -eq 'UserPromptSubmit') {
     $Status = 'running'
-    if (-not $Summary) { $Summary = 'codex running' }
+    $Summary = 'codex running'
+    $Message = ''
   } elseif ($HookEvent) {
     $Status = 'completed'
     if (-not $Summary) { $Summary = 'codex completed' }

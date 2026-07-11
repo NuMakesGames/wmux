@@ -28,5 +28,10 @@ export const reconcile = <T>(prev: unknown, next: T): T => {
   return next;
 };
 
+export const isIncomingRevisionStale = (
+  current: { revision: number } | null | undefined,
+  incoming: { revision: number },
+): boolean => Boolean(current && incoming.revision < current.revision);
+
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);

@@ -45,7 +45,8 @@ test("agent-event helper sends bearer auth and maps Claude start hooks to runnin
   assert.ok(content.includes(".wmux\\token"), "agent-event helper must fall back to the staged token");
   assert.ok(content.includes(".wmux\\url"), "agent-event helper must fall back to the staged URL");
   assert.ok(content.includes("$HookEvent -eq 'UserPromptSubmit'"), "Claude start hooks must be recognized");
-  assert.ok(content.includes("$Summary = 'claude running'"), "Claude start hooks must emit a running summary fallback");
+  assert.ok(content.includes("$Summary = 'claude running'"), "Claude start hooks must emit a fresh running summary");
+  assert.ok(content.includes("$Message = ''"), "start hooks must discard the previous assistant response");
   assert.ok(content.includes("-TimeoutSec 10"), "agent events must not hang indefinitely during delivery");
   assert.ok(content.includes("hook is missing WMUX_PANE_ID"), "missing hook context must be observable");
 });

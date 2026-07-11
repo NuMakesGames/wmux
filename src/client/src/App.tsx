@@ -241,6 +241,7 @@ export function App() {
   const streams = state?.streams ?? [];
   const bellByWorkspaceId = useMemo(() => bellWorkspaces(state, bellPaneIds), [bellPaneIds, state]);
   const latestAgentByWorkspaceId = useMemo(() => latestAgentByWorkspace(agentEvents), [agentEvents]);
+  const latestAgentByPaneId = useMemo(() => latestAgentByPane(agentEvents), [agentEvents]);
   const latestRunByPaneId = useMemo(() => latestRunByPane(runs), [runs]);
 
   useEffect(() => {
@@ -456,7 +457,7 @@ export function App() {
     : activeWorkspace
       ? machineFor(displayMachines, activeWorkspace.machineId)
       : undefined;
-  const mobileHeaderAgent = activeWorkspace ? latestAgentByWorkspaceId.get(activeWorkspace.id) : undefined;
+  const mobileHeaderAgent = activePane ? latestAgentByPaneId.get(activePane.id) : undefined;
   const mobileHeaderStatus = mobileHeaderAgent
     ? agentStatusClass(mobileHeaderAgent.status)
     : activePane?.status === "running"
@@ -1652,6 +1653,14 @@ const latestAgentByWorkspace = (events: AgentActivity[]): Map<string, AgentActiv
   const latest = new Map<string, AgentActivity>();
   for (const event of events) {
     if (!latest.has(event.workspaceId)) latest.set(event.workspaceId, event);
+  }
+  return latest;
+};
+
+const latestAgentByPane = (events: AgentActivity[]): Map<string, AgentActivity> => {
+  const latest = new Map<string, AgentActivity>();
+  for (const event of events) {
+    if (!latest.has(event.paneId)) latest.set(event.paneId, event);
   }
   return latest;
 };

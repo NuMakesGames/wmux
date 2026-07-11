@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { reconcile } from "../src/client/src/reconcile.js";
+import { isIncomingRevisionStale, reconcile } from "../src/client/src/reconcile.js";
 
 test("returns the previous reference when content is deep-equal", () => {
   const prev = { workspaces: [{ id: "a", tabs: [{ id: "t", panes: [] }] }], count: 1 };
@@ -52,4 +52,11 @@ test("always reflects next's content, never prev's", () => {
   assert.equal(result.a, prev.a);
   assert.equal(result.added, "yes");
   assert.equal("gone" in result, false);
+});
+
+test("rejects delayed snapshots without rejecting same-revision health refreshes", () => {
+  assert.equal(isIncomingRevisionStale({ revision: 12 }, { revision: 11 }), true);
+  assert.equal(isIncomingRevisionStale({ revision: 12 }, { revision: 12 }), false);
+  assert.equal(isIncomingRevisionStale({ revision: 12 }, { revision: 13 }), false);
+  assert.equal(isIncomingRevisionStale(null, { revision: 1 }), false);
 });

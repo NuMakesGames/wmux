@@ -206,7 +206,12 @@ def main():
     if args.claude_hook:
         if hook_event == "UserPromptSubmit":
             status = "running"
-            summary = summary or "claude running"
+            summary = "claude running"
+            message = ""
+        elif hook_event == "Notification":
+            status = "updated"
+            summary = clean_text(hook_input.get("message") or "claude notification", 500)
+            message = ""
         elif hook_event:
             status = "completed"
             summary = summary or "claude completed"
@@ -215,7 +220,8 @@ def main():
     if args.codex_hook:
         if hook_event == "UserPromptSubmit":
             status = "running"
-            summary = summary or "codex running"
+            summary = "codex running"
+            message = ""
         elif hook_event:
             status = "completed"
             summary = summary or "codex completed"

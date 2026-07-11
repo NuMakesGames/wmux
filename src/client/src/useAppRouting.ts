@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { api } from "./api";
 import type { AppStore } from "./app-store";
-import { reconcile } from "./reconcile";
+import { isIncomingRevisionStale, reconcile } from "./reconcile";
 import {
   activatePaneInState,
   activateWorkspaceTabInState,
@@ -55,6 +55,7 @@ export function useAppRouting(options: UseAppRoutingOptions) {
   const refresh = useCallback(
     async (nextState?: BootstrapPayload) => {
       const incoming = nextState ?? (await api.bootstrap());
+      if (isIncomingRevisionStale(store.get(), incoming)) return;
       const routed = applyClientViewToState(
         incoming,
         parseRouteTarget(window.location.pathname),

@@ -73,3 +73,55 @@ test("agent event helper sends the full assistant response as structured JSON", 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("agent start hooks never replay the previous assistant response", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-start-"));
+  const transcriptPath = path.join(dir, "transcript.jsonl");
+  fs.writeFileSync(
+    transcriptPath,
+    [
+      JSON.stringify({ message: { role: "user", content: "new mobile prompt" } }),
+      JSON.stringify({ message: { role: "assistant", content: "response from the prior turn" } }),
+    ].join("\n"),
+  );
+  let captured: Record<string, unknown> | undefined;
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      captured = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end("{}");
+    });
+  });
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    await execFileAsync(
+      path.join(repoRoot, "scripts", "wmux-agent-event"),
+      ["--url", `http://127.0.0.1:${address.port}`, "--agent", "codex", "--codex-hook", "--pane", "pane-1", "--force"],
+      {
+        env: {
+          ...process.env,
+          HOME: dir,
+          WMUX_TOKEN: "",
+          WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
+          HOOK_INPUT: JSON.stringify({
+            hook_event_name: "UserPromptSubmit",
+            prompt: "new mobile prompt",
+            transcript_path: transcriptPath,
+            last_assistant_message: "response from the prior turn",
+          }),
+        },
+      },
+    );
+    assert.equal(captured?.status, "running");
+    assert.equal(captured?.title, "new mobile prompt");
+    assert.equal(captured?.summary, "codex running");
+    assert.equal("message" in (captured ?? {}), false);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

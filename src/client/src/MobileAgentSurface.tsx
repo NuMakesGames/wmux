@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
-import { Activity, Bell, Bot, CheckCircle2, Command as CommandIcon, Image as ImageIcon, MessageSquare, Play, Send, Square, TerminalSquare, X, Zap } from "lucide-react";
+import { Activity, ArrowDown, Bell, Bot, CheckCircle2, Command as CommandIcon, Image as ImageIcon, LoaderCircle, MessageSquare, Play, Send, Square, TerminalSquare, X, Zap } from "lucide-react";
 import type { PaneAttachment } from "./api";
 import type {
   AgentActivity,
@@ -36,6 +36,7 @@ type LocalMobileMessage = {
   createdAt: string;
   text: string;
   attachments?: LocalSentAttachment[];
+  delivery?: "sending" | "sent";
 };
 
 interface PaneAttachmentUpload {
@@ -87,6 +88,7 @@ interface AgentSessionSignal {
 }
 
 const maxPastedImageBytes = 8 * 1024 * 1024;
+const localMessagesStorageKey = "wmux:mobile-agent-messages";
 
 export function MobileAgentSurface({
   state,
@@ -106,25 +108,22 @@ export function MobileAgentSurface({
   const [sendNotice, setSendNotice] = useState("");
   const [launchingAgent, setLaunchingAgent] = useState<AgentLauncher | null>(null);
   const [trustedAgentLaunch, setTrustedAgentLaunch] = useState<{ paneId: string; agent: AgentLauncher; createdAt: number } | null>(null);
-  const [localMessages, setLocalMessages] = useState<LocalMobileMessage[]>([]);
+  const [localMessages, setLocalMessages] = useState<LocalMobileMessage[]>(loadLocalMobileMessages);
+  const [threadAtBottom, setThreadAtBottom] = useState(true);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const previewUrlsRef = useRef(new Set<string>());
+  const stickToBottomRef = useRef(true);
+  const composerPaneRef = useRef(pane?.id);
 
   const machine = workspace ? machines.find((candidate) => candidate.id === workspace.machineId) : undefined;
-  const latestWorkspaceAgent = useMemo(() => {
-    if (!workspace) return undefined;
-    return state.agentEvents
-      .filter((event) => event.workspaceId === workspace.id)
-      .sort((first, second) => Date.parse(second.createdAt) - Date.parse(first.createdAt))[0];
-  }, [state.agentEvents, workspace]);
   const latestPaneAgent = useMemo(() => {
     if (!pane) return undefined;
     return state.agentEvents
       .filter((event) => event.paneId === pane.id)
       .sort((first, second) => Date.parse(second.createdAt) - Date.parse(first.createdAt))[0];
   }, [pane, state.agentEvents]);
-  const latestAgent = latestPaneAgent ?? latestWorkspaceAgent;
+  const latestAgent = latestPaneAgent;
   const localAgentLaunch =
     pane && trustedAgentLaunch?.paneId === pane.id && Date.now() - trustedAgentLaunch.createdAt < 12 * 60 * 60 * 1000
       ? trustedAgentLaunch.agent
@@ -133,6 +132,7 @@ export function MobileAgentSurface({
     () => detectAgentSession(pane, latestPaneAgent, localAgentLaunch),
     [latestPaneAgent, localAgentLaunch, pane],
   );
+  const agentRunning = Boolean(latestPaneAgent && isActiveAgentStatus(latestPaneAgent.status));
   const status = latestAgent ? agentStatusClass(latestAgent.status) : pane?.status === "running" ? "running" : "updated";
   const statusLabel = latestAgent ? `${latestAgent.agent} ${latestAgent.status}` : pane?.status ?? "idle";
   const paneIndex = tab && pane ? tab.panes.findIndex((candidate) => candidate.id === pane.id) : -1;
@@ -140,24 +140,29 @@ export function MobileAgentSurface({
   const threadItems = useMemo(
     () =>
       workspace
-        ? buildMobileThreadItems(workspace.id, state.agentEvents, state.runs, state.notifications, localMessages)
+        ? buildMobileThreadItems(workspace.id, pane?.id, state.agentEvents, state.runs, state.notifications, localMessages)
         : [],
-    [localMessages, state.agentEvents, state.notifications, state.runs, workspace],
+    [localMessages, pane?.id, state.agentEvents, state.notifications, state.runs, workspace],
   );
   const threadScrollKey = useMemo(() => threadItems.map(threadItemScrollKey).join("|"), [threadItems]);
   const recentItems = useMemo(
-    () => buildRecentActivityItems(state.agentEvents, state.runs, state.notifications).slice(0, 5),
-    [state.agentEvents, state.notifications, state.runs],
+    () => buildRecentActivityItems(state.agentEvents, state.runs, state.notifications, pane?.id).slice(0, 5),
+    [pane?.id, state.agentEvents, state.notifications, state.runs],
   );
 
   useEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
     const frame = window.requestAnimationFrame(() => {
-      thread.scrollTop = thread.scrollHeight;
+      if (stickToBottomRef.current) thread.scrollTop = thread.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [threadScrollKey, workspace?.id]);
+  }, [threadScrollKey, workspace?.id, pane?.id]);
+
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    setThreadAtBottom(true);
+  }, [workspace?.id, pane?.id]);
 
   useEffect(() => {
     const composer = composerRef.current;
@@ -173,6 +178,25 @@ export function MobileAgentSurface({
     },
     [],
   );
+
+  useEffect(() => {
+    saveLocalMobileMessages(localMessages);
+  }, [localMessages]);
+
+  useEffect(() => {
+    if (composerPaneRef.current === pane?.id) return;
+    composerPaneRef.current = pane?.id;
+    setDraft("");
+    setPendingImages((current) => {
+      for (const attachment of current) {
+        URL.revokeObjectURL(attachment.previewUrl);
+        previewUrlsRef.current.delete(attachment.previewUrl);
+      }
+      return [];
+    });
+    setSendError("");
+    setSendNotice("");
+  }, [pane?.id]);
 
   const appendPastedImages = (files: File[]) => {
     if (files.length === 0) return;
@@ -231,6 +255,11 @@ export function MobileAgentSurface({
     setSending(true);
     setSendError("");
     setSendNotice("");
+    stickToBottomRef.current = true;
+    setThreadAtBottom(true);
+    const submittedAt = new Date().toISOString();
+    const localMessageId = `local:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    let optimisticMessageAdded = false;
     try {
       const sentAttachments = await Promise.all(
         imagesToSend.map(async (image) => {
@@ -249,23 +278,34 @@ export function MobileAgentSurface({
           };
         }),
       );
-      await onSendInput(pane.id, formatComposerTextInput(text, sentAttachments));
-      await onSendInput(pane.id, "\r");
       setLocalMessages((current) => [
         ...current,
         {
           kind: "user",
-          id: `local:${Date.now()}:${current.length}`,
+          id: localMessageId,
           workspaceId: workspace?.id ?? "",
           paneId: pane.id,
-          createdAt: new Date().toISOString(),
+          createdAt: submittedAt,
           text,
           attachments: sentAttachments,
+          delivery: "sending",
         },
       ]);
+      optimisticMessageAdded = true;
       setDraft("");
       setPendingImages([]);
+      await onSendInput(pane.id, `${formatComposerTextInput(text, sentAttachments)}\r`);
+      setLocalMessages((current) =>
+        current.map((message) => message.id === localMessageId ? { ...message, delivery: "sent" } : message),
+      );
     } catch (error) {
+      if (optimisticMessageAdded) {
+        setLocalMessages((current) => current.filter((message) => message.id !== localMessageId));
+        if (composerPaneRef.current === pane.id) {
+          setDraft(text);
+          setPendingImages(imagesToSend);
+        }
+      }
       setSendError(error instanceof Error ? error.message : "Send failed");
     } finally {
       setSending(false);
@@ -273,7 +313,7 @@ export function MobileAgentSurface({
   };
 
   const sendInterrupt = async () => {
-    if (!pane || sending) return;
+    if (!pane || !agentRunning || sending) return;
     setSending(true);
     setSendError("");
     setSendNotice("");
@@ -304,28 +344,56 @@ export function MobileAgentSurface({
 
   return (
     <div className="mobile-agent-surface">
-      <div ref={threadRef} className="mobile-agent-thread">
-        {threadItems.length ? (
-          threadItems.map((item) =>
-            item.kind === "separator" ? (
-              <div key={item.id} className="mobile-agent-separator">
-                <span>{item.label}</span>
-              </div>
-            ) : (
-              <MobileThreadMessage key={item.id} item={item} />
-            ),
-          )
-        ) : (
-          <MobileAgentEmptyState
-            workspace={workspace}
-            tab={tab}
-            pane={pane}
-            machineName={machine?.name ?? workspace?.machineId}
-            status={status}
-            statusLabel={statusLabel}
-            paneLabel={paneLabel}
-          />
-        )}
+      <div className="mobile-agent-thread-shell">
+        <div
+          ref={threadRef}
+          className="mobile-agent-thread"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+          onScroll={(event) => {
+            const thread = event.currentTarget;
+            const atBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 72;
+            stickToBottomRef.current = atBottom;
+            setThreadAtBottom(atBottom);
+          }}
+        >
+          {threadItems.length ? (
+            threadItems.map((item) =>
+              item.kind === "separator" ? (
+                <div key={item.id} className="mobile-agent-separator">
+                  <span>{item.label}</span>
+                </div>
+              ) : (
+                <MobileThreadMessage key={item.id} item={item} />
+              ),
+            )
+          ) : (
+            <MobileAgentEmptyState
+              workspace={workspace}
+              tab={tab}
+              pane={pane}
+              machineName={machine?.name ?? workspace?.machineId}
+              status={status}
+              statusLabel={statusLabel}
+              paneLabel={paneLabel}
+            />
+          )}
+        </div>
+        {!threadAtBottom ? (
+          <button
+            type="button"
+            className="mobile-agent-jump-latest"
+            onClick={() => {
+              stickToBottomRef.current = true;
+              setThreadAtBottom(true);
+              threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
+            }}
+          >
+            <ArrowDown size={14} />
+            <span>Latest</span>
+          </button>
+        ) : null}
       </div>
       <MobileRecentActivity items={recentItems} />
       <form
@@ -401,10 +469,11 @@ export function MobileAgentSurface({
           <button
             type="submit"
             className="mobile-agent-send"
-            title="Send"
+            title={sending ? "Sending" : "Send"}
+            aria-label={sending ? "Sending message" : "Send message"}
             disabled={!pane || !agentSession.canSend || (!draft.trim() && pendingImages.length === 0) || sending}
           >
-            <Send size={16} />
+            {sending ? <LoaderCircle className="mobile-agent-send-spinner" size={17} /> : <Send size={16} />}
           </button>
         </div>
         <div className="mobile-agent-composer-actions">
@@ -412,7 +481,7 @@ export function MobileAgentSurface({
             type="button"
             className="mobile-agent-stop"
             title="Interrupt"
-            disabled={!pane || sending}
+            disabled={!pane || !agentRunning || sending}
             onClick={() => void sendInterrupt()}
           >
             <Square size={14} />
@@ -478,10 +547,11 @@ function MobileAgentEmptyState({
 function MobileRecentActivity({ items }: { items: MobileRecentItem[] }) {
   if (items.length === 0) return null;
   return (
-    <section className="mobile-agent-recent" aria-label="Recent activity">
-      <div className="mobile-agent-recent-header">
+    <details className="mobile-agent-recent">
+      <summary className="mobile-agent-recent-header">
         <span>Recent activity</span>
-      </div>
+        <small>{items.length}</small>
+      </summary>
       <div className="mobile-agent-recent-list">
         {items.map((item) => (
           <div key={item.id} className={`mobile-agent-recent-card ${item.status}`}>
@@ -492,7 +562,7 @@ function MobileRecentActivity({ items }: { items: MobileRecentItem[] }) {
           </div>
         ))}
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -525,9 +595,10 @@ function MobileThreadMessage({ item }: { item: MobileMessageItem }) {
       <article className="mobile-agent-message user">
         <div className="mobile-agent-message-meta">
           <span>you</span>
+          {item.delivery === "sending" ? <span className="mobile-agent-delivery">sending…</span> : null}
           <span>{formatRelativeTime(item.createdAt)}</span>
         </div>
-        {item.text ? <p>{limitText(item.text, 1400)}</p> : null}
+        {item.text ? <MobileMessageText text={item.text} collapsedLimit={1400} /> : null}
         {item.attachments?.length ? <MobileMessageAttachments attachments={item.attachments} /> : null}
       </article>
     );
@@ -536,8 +607,12 @@ function MobileThreadMessage({ item }: { item: MobileMessageItem }) {
   if (item.kind === "agent") {
     const status = agentStatusClass(item.event.status);
     const title = item.event.title || item.event.agent;
-    const message = item.event.message?.trim();
+    const message = agentResponseMessage(item.event);
     const summary = compactText(item.event.summary, 1200);
+    const visibleSummary =
+      isActiveAgentStatus(item.event.status) || summary.toLowerCase() === `${item.event.agent} ${item.event.status}`.toLowerCase()
+        ? ""
+        : summary;
     return (
       <article className={`mobile-agent-message agent ${status}`}>
         <div className="mobile-agent-message-meta">
@@ -546,7 +621,7 @@ function MobileThreadMessage({ item }: { item: MobileMessageItem }) {
           <span>{formatRelativeTime(item.createdAt)}</span>
         </div>
         <strong className="mobile-agent-message-title">{title}</strong>
-        {message ? <p>{limitText(message, 6000)}</p> : summary ? <p>{summary}</p> : null}
+        {message ? <MobileMessageText text={message} collapsedLimit={1600} /> : visibleSummary ? <p>{visibleSummary}</p> : null}
       </article>
     );
   }
@@ -578,23 +653,56 @@ function MobileThreadMessage({ item }: { item: MobileMessageItem }) {
   );
 }
 
-const buildMobileThreadItems = (
+function MobileMessageText({ text, collapsedLimit }: { text: string; collapsedLimit: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = text.length > collapsedLimit;
+  const visibleText = collapsible && !expanded ? limitText(text, collapsedLimit) : text;
+  return (
+    <div className="mobile-agent-message-body">
+      <p>{linkifyMessageText(visibleText)}</p>
+      {collapsible ? (
+        <button type="button" onClick={() => setExpanded((current) => !current)}>
+          {expanded ? "Show less" : "Show full response"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+const linkifyMessageText = (text: string) =>
+  text.split(/(https?:\/\/[^\s<>"']+)/g).map((part, index) => {
+    if (!/^https?:\/\//.test(part)) return part;
+    const trailing = part.match(/[),.;!?]+$/)?.[0] ?? "";
+    const url = trailing ? part.slice(0, -trailing.length) : part;
+    return (
+      <span key={`${url}:${index}`}>
+        <a href={url} target="_blank" rel="noreferrer">{url}</a>
+        {trailing}
+      </span>
+    );
+  });
+
+export const buildMobileThreadItems = (
   workspaceId: string,
+  paneId: string | undefined,
   agentEvents: AgentActivity[],
   runs: TerminalRun[],
   notifications: TerminalNotification[],
   localMessages: LocalMobileMessage[],
 ): MobileThreadItem[] => {
+  if (!paneId) return [];
+  const scopedAgentEvents = collapseAgentLifecycleEvents(
+    agentEvents.filter((event) => event.workspaceId === workspaceId && event.paneId === paneId),
+  );
   const rawItems: MobileMessageItem[] = [
-    ...localMessages.filter((message) => message.workspaceId === workspaceId),
-    ...agentEvents
-      .filter((event) => event.workspaceId === workspaceId)
+    ...localMessages.filter((message) => message.workspaceId === workspaceId && message.paneId === paneId),
+    ...scopedAgentEvents
       .map((event) => ({ kind: "agent" as const, id: `agent:${event.id}`, createdAt: event.createdAt, event })),
     ...runs
-      .filter((run) => run.workspaceId === workspaceId)
+      .filter((run) => run.workspaceId === workspaceId && run.paneId === paneId)
       .map((run) => ({ kind: "run" as const, id: `run:${run.id}`, createdAt: run.completedAt ?? run.startedAt, run })),
     ...notifications
-      .filter((notification) => notification.workspaceId === workspaceId)
+      .filter((notification) => notification.workspaceId === workspaceId && notification.paneId === paneId)
       .map((notification) => ({
         kind: "notification" as const,
         id: `notification:${notification.id}`,
@@ -604,7 +712,7 @@ const buildMobileThreadItems = (
   ].filter(
     (item) =>
       item.kind !== "notification" ||
-      !isRedundantAgentNotification(item.notification, agentEvents),
+      !isRedundantAgentNotification(item.notification, scopedAgentEvents),
   );
   const visibleItems = rawItems
     .sort((first, second) => Date.parse(first.createdAt) - Date.parse(second.createdAt))
@@ -627,6 +735,19 @@ const buildMobileThreadItems = (
   return groupedItems;
 };
 
+const collapseAgentLifecycleEvents = (events: AgentActivity[]): AgentActivity[] => {
+  const ordered = [...events].sort((first, second) => Date.parse(first.createdAt) - Date.parse(second.createdAt));
+  return ordered.filter((event, index) => {
+    if (!isActiveAgentStatus(event.status)) return true;
+    return !ordered.slice(index + 1).some(
+      (candidate) =>
+        candidate.paneId === event.paneId &&
+        candidate.agent === event.agent &&
+        (isActiveAgentStatus(candidate.status) || isSettledAgentStatus(candidate.status)),
+    );
+  });
+};
+
 const isRedundantAgentNotification = (
   notification: TerminalNotification,
   agentEvents: AgentActivity[],
@@ -647,16 +768,18 @@ const buildRecentActivityItems = (
   agentEvents: AgentActivity[],
   runs: TerminalRun[],
   notifications: TerminalNotification[],
+  paneId?: string,
 ): MobileRecentItem[] => {
+  if (!paneId) return [];
   const items: MobileRecentItem[] = [
-    ...agentEvents.map((event) => ({
+    ...agentEvents.filter((event) => event.paneId === paneId).map((event) => ({
       id: `agent:${event.id}`,
       kind: "Agent" as const,
       status: agentStatusClass(event.status),
       title: compactText(event.title || event.summary || `${event.agent} ${event.status}`, 56),
       createdAt: event.createdAt,
     })),
-    ...runs.map((run) => ({
+    ...runs.filter((run) => run.paneId === paneId).map((run) => ({
       id: `run:${run.id}`,
       kind: "Run" as const,
       status: run.status === "started" ? "running" as const : run.status === "failed" ? "failed" as const : "completed" as const,
@@ -664,7 +787,7 @@ const buildRecentActivityItems = (
       createdAt: run.completedAt ?? run.startedAt,
     })),
     ...notifications
-      .filter((notification) => !isRedundantAgentNotification(notification, agentEvents))
+      .filter((notification) => notification.paneId === paneId && !isRedundantAgentNotification(notification, agentEvents))
       .map((notification) => ({
         id: `notification:${notification.id}`,
         kind: "Notify" as const,
@@ -689,8 +812,8 @@ const formatDateGroup = (iso: string): string => {
 
 const threadItemScrollKey = (item: MobileThreadItem): string => {
   if (item.kind === "separator") return `${item.id}:${item.label}`;
-  if (item.kind === "user") return `${item.id}:${item.text}`;
-  if (item.kind === "agent") return `${item.id}:${item.event.status}:${item.event.title}:${item.event.summary}`;
+  if (item.kind === "user") return `${item.id}:${item.delivery ?? "sent"}:${item.text}`;
+  if (item.kind === "agent") return `${item.id}:${item.event.status}:${item.event.title}:${item.event.summary}:${item.event.message ?? ""}`;
   if (item.kind === "run") return `${item.id}:${item.run.status}:${item.run.exitCode ?? ""}:${item.run.command}`;
   return `${item.id}:${item.notification.title}:${item.notification.subtitle}:${item.notification.body}`;
 };
@@ -817,6 +940,17 @@ const agentStatusClass = (status: string): MobileAgentStatus => {
   return "updated";
 };
 
+const isActiveAgentStatus = (status: string): boolean =>
+  ["running", "started", "working"].includes(status.toLowerCase());
+
+const isSettledAgentStatus = (status: string): boolean =>
+  ["completed", "done", "success", "failed", "error", "cancelled", "stopped", "interrupted"].includes(
+    status.toLowerCase(),
+  );
+
+export const agentResponseMessage = (event: AgentActivity): string =>
+  ["completed", "done", "success"].includes(event.status.toLowerCase()) ? event.message?.trim() ?? "" : "";
+
 const formatRelativeTime = (iso: string): string => {
   const elapsedMs = Date.now() - Date.parse(iso);
   if (!Number.isFinite(elapsedMs)) return "";
@@ -847,3 +981,40 @@ const stripMarkdown = (value: string): string =>
     .replace(/[*_~]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+const loadLocalMobileMessages = (): LocalMobileMessage[] => {
+  try {
+    const parsed = JSON.parse(window.sessionStorage.getItem(localMessagesStorageKey) ?? "[]") as LocalMobileMessage[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (message) =>
+          message?.kind === "user" &&
+          typeof message.id === "string" &&
+          typeof message.workspaceId === "string" &&
+          typeof message.paneId === "string" &&
+          typeof message.createdAt === "string" &&
+          typeof message.text === "string",
+      )
+      .slice(-120)
+      .map((message) => ({ ...message, delivery: "sent" }));
+  } catch {
+    return [];
+  }
+};
+
+const saveLocalMobileMessages = (messages: LocalMobileMessage[]) => {
+  try {
+    const serializable = messages.slice(-120).map((message) => ({
+      ...message,
+      delivery: "sent" as const,
+      attachments: message.attachments?.map((attachment) => ({
+        ...attachment,
+        previewUrl: attachment.url,
+      })),
+    }));
+    window.sessionStorage.setItem(localMessagesStorageKey, JSON.stringify(serializable));
+  } catch {
+    // Chat remains usable when session storage is unavailable or full.
+  }
+};

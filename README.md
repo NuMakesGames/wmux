@@ -228,7 +228,7 @@ wmux can update workspace names/descriptors and send completion notifications fr
 wmux-agent-event --agent codex --status completed --title "Remote helpers" --summary "Fixed Away-Team helper staging"
 ```
 
-The helper posts to `POST /api/agent-events`. It uses the pane environment variables when available and exits without changing state if it is run outside a wmux pane. Completion hooks include the sanitized full assistant message as structured event data; short summaries remain separate workspace and notification metadata.
+The helper posts to `POST /api/agent-events`. It uses the pane environment variables when available and exits without changing state if it is run outside a wmux pane. Stop/completion hooks include the sanitized full assistant message as structured event data; prompt-start and notification hooks deliberately omit assistant message text so they cannot replay the prior turn. Short summaries remain separate workspace and notification metadata.
 
 Install agent hooks on this machine with:
 
@@ -242,6 +242,11 @@ This merges `UserPromptSubmit`, `Stop`, and `Notification` hooks into `~/.claude
 The Codex installer merges `UserPromptSubmit` and `Stop` hooks into `~/.codex/hooks.json`. On Windows it migrates older wmux entries to a direct PowerShell `commandWindows`, avoiding the extra CMD shim in Codex's stdin hook path. Codex requires you to run `/hooks` inside Codex and trust the new command hook before it will run. Start a new Codex session after installing or trusting hooks if an existing session does not pick up the config. Hook invocations without wmux pane/workspace context and failed HTTP deliveries return an error instead of silently succeeding.
 
 OpenCode wrappers can call `wmux-agent-event` manually until wmux has verified a stable hook config surface for that tool.
+
+On narrow viewports, the Agent surface is scoped to the selected pane. It keeps
+browser-submitted prompts for the current browser session, collapses completed
+start/stop lifecycle pairs into one response, and leaves historical scrolling
+alone until the viewer returns to the latest message.
 
 ## Codex Skill
 

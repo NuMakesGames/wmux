@@ -1142,12 +1142,20 @@ button.active-tool {
   font-size: 11px;
 }
 
+.mobile-agent-thread-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .mobile-agent-thread {
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   overflow: auto;
   overscroll-behavior: contain;
   padding:
@@ -1156,6 +1164,26 @@ button.active-tool {
     14px
     calc(14px + var(--wmux-mobile-left-inset, 0px));
   scrollbar-width: thin;
+}
+
+.mobile-agent-jump-latest {
+  position: absolute;
+  z-index: 2;
+  right: 50%;
+  bottom: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid rgba(80, 151, 255, 0.42);
+  border-radius: 999px;
+  background: rgba(12, 18, 28, 0.94);
+  box-shadow: 0 5px 22px rgba(0, 0, 0, 0.46);
+  padding: 0 13px;
+  color: #c8ddff;
+  font-size: 12px;
+  font-weight: 800;
+  translate: 50% 0;
 }
 
 .mobile-agent-empty {
@@ -1334,6 +1362,11 @@ button.active-tool {
   color: #c8bea8;
 }
 
+.mobile-agent-message-meta .mobile-agent-delivery {
+  color: #8ebdff;
+  font-weight: 700;
+}
+
 .mobile-agent-message-title {
   overflow-wrap: anywhere;
   color: var(--ivory);
@@ -1355,6 +1388,29 @@ button.active-tool {
 .mobile-agent-message code {
   font-family: var(--wmux-mono-font);
   color: #cbd7e6;
+}
+
+.mobile-agent-message-body {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mobile-agent-message-body a {
+  color: #8ebdff;
+  text-decoration: underline;
+  text-decoration-color: rgba(142, 189, 255, 0.45);
+  text-underline-offset: 2px;
+}
+
+.mobile-agent-message-body > button {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  color: #8ebdff;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .mobile-agent-message-attachments {
@@ -1446,6 +1502,30 @@ button.active-tool {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+}
+
+.mobile-agent-recent-header::-webkit-details-marker {
+  display: none;
+}
+
+.mobile-agent-recent-header::after {
+  content: "+";
+  color: var(--gold);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.mobile-agent-recent[open] .mobile-agent-recent-header::after {
+  content: "−";
+}
+
+.mobile-agent-recent-header small {
+  margin-left: auto;
+  margin-right: 8px;
+  color: #756d5f;
+  font-size: 11px;
 }
 
 .mobile-agent-recent-list {
@@ -1459,6 +1539,10 @@ button.active-tool {
     0
     calc(14px + var(--wmux-mobile-left-inset, 0px));
   scrollbar-width: none;
+}
+
+.mobile-agent-recent[open] .mobile-agent-recent-list {
+  margin-top: 8px;
 }
 
 .mobile-agent-recent-list::-webkit-scrollbar {
@@ -1769,6 +1853,10 @@ button.active-tool {
 .mobile-agent-send {
   width: 100%;
   height: 52px;
+}
+
+.mobile-agent-send-spinner {
+  animation: wmux-state-spin 780ms linear infinite;
 }
 
 .mobile-agent-stop {
