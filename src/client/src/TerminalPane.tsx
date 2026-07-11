@@ -145,6 +145,9 @@ export const TerminalPane = memo(function TerminalPane({
     let renderDisposable: { dispose: () => void } | undefined;
     let mouseDownListener: ((event: MouseEvent) => void) | undefined;
     let mouseUpListener: ((event: MouseEvent) => void) | undefined;
+    let mouseShieldDownListener: ((event: MouseEvent) => void) | undefined;
+    let mouseShieldMoveListener: ((event: MouseEvent) => void) | undefined;
+    let mouseGestureEndListener: (() => void) | undefined;
     let contextMenuListener: ((event: MouseEvent) => void) | undefined;
     let copyListener: ((event: ClipboardEvent) => void) | undefined;
     let pasteListener: ((event: ClipboardEvent) => void) | undefined;
@@ -154,6 +157,7 @@ export const TerminalPane = memo(function TerminalPane({
     let visibilityChangeListener: (() => void) | undefined;
     let contextMenuSelection = "";
     let pendingCursorPlacement: { sequence: string; x: number; y: number } | null = null;
+    let browserPrimaryMouseGesture = false;
     let contextCopyBridge: HTMLTextAreaElement | undefined;
     let contextCopyBridgeTimer: number | undefined;
     let selectionRestoreTimer: number | undefined;
@@ -163,6 +167,7 @@ export const TerminalPane = memo(function TerminalPane({
     let replayChunks: string[] = [];
     let replayBufferedOutput: string[] = [];
     let replayDrainTimer: number | undefined;
+    let replayingTerminalOutput = false;
     let reconnectDelayMs = 350;
     // The server preserves a pane whose process died abnormally instead of
     // deleting it, so a keypress here re-attaches (and re-spawns) on demand
@@ -355,7 +360,7 @@ export const TerminalPane = memo(function TerminalPane({
           placeholderCells.push({ imageId, col: cursor.x, row: cursor.y });
         },
         (privateMode) => {
-          sendInput(socketRef.current, cursorPositionResponse(term, privateMode));
+          if (!replayingTerminalOutput) sendInput(socketRef.current, cursorPositionResponse(term, privateMode), true);
         },
       );
       recordKittyPlaceholderCells(placeholderCells);
@@ -425,11 +430,15 @@ export const TerminalPane = memo(function TerminalPane({
       }
       replayChunks = [];
       replayBufferedOutput = [];
+      replayingTerminalOutput = false;
     };
 
     const startReplayDrain = (term: Terminal, replay: string) => {
+      replayingTerminalOutput = true;
       if (replay.length <= REPLAY_CHUNK_CHARS) {
         handleOutput(term, replay);
+        flushQueuedTerminalText(term);
+        replayingTerminalOutput = false;
         return;
       }
       for (let index = 0; index < replay.length; index += REPLAY_CHUNK_CHARS) {
@@ -449,6 +458,8 @@ export const TerminalPane = memo(function TerminalPane({
           scheduleReplayDrainStep(term);
           return;
         }
+        flushQueuedTerminalText(term);
+        replayingTerminalOutput = false;
         const buffered = replayBufferedOutput;
         replayBufferedOutput = [];
         for (const data of buffered) handleOutput(term, data);
@@ -463,6 +474,8 @@ export const TerminalPane = memo(function TerminalPane({
       const chunks = replayChunks;
       replayChunks = [];
       for (const chunk of chunks) handleOutput(term, chunk);
+      flushQueuedTerminalText(term);
+      replayingTerminalOutput = false;
       const buffered = replayBufferedOutput;
       replayBufferedOutput = [];
       for (const data of buffered) handleOutput(term, data);
@@ -609,8 +622,33 @@ export const TerminalPane = memo(function TerminalPane({
         pendingCursorPlacement = { sequence, x: event.clientX, y: event.clientY };
       };
       term.element?.addEventListener("mousedown", mouseDownListener, { capture: true });
+      mouseShieldDownListener = (event) => {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey) return;
+        browserPrimaryMouseGesture = true;
+        // SelectionManager's canvas listener runs first. Stop here so Ghostty's
+        // parent input handler cannot turn the same gesture into terminal mouse
+        // bytes that clear the selection. Plain clicks are replayed on mouseup.
+        event.stopPropagation();
+      };
+      mouseShieldMoveListener = (event) => {
+        if (browserPrimaryMouseGesture) event.stopPropagation();
+      };
+      term.renderer?.getCanvas().addEventListener("mousedown", mouseShieldDownListener);
+      term.renderer?.getCanvas().addEventListener("mousemove", mouseShieldMoveListener);
       mouseUpListener = (event) => {
+        const browserGesture = browserPrimaryMouseGesture;
+        browserPrimaryMouseGesture = false;
         const selectionPosition = readTerminalSelectionPosition(term);
+        const selectionManager = terminalSelectionManager(term);
+        if (browserGesture && selectionManager?.finishMouseSelection) {
+          selectionManager.finishMouseSelection(event);
+          if (selectionPosition) {
+            pendingCursorPlacement = null;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            return;
+          }
+        }
         if (selectionPosition) {
           if (selectionRestoreTimer !== undefined) window.clearTimeout(selectionRestoreTimer);
           selectionRestoreTimer = window.setTimeout(() => {
@@ -620,15 +658,28 @@ export const TerminalPane = memo(function TerminalPane({
         }
         const pending = pendingCursorPlacement;
         pendingCursorPlacement = null;
-        if (!pending || event.button !== 0) return;
-        const dragged = Math.hypot(event.clientX - pending.x, event.clientY - pending.y) > 4;
-        if (dragged || term.getSelection()) return;
-        onActivateRef.current();
-        term.focus();
-        term.clearSelection();
-        sendInput(socketRef.current, pending.sequence);
+        if (pending && event.button === 0) {
+          const dragged = Math.hypot(event.clientX - pending.x, event.clientY - pending.y) > 4;
+          if (!dragged && !term.getSelection()) {
+            onActivateRef.current();
+            term.focus();
+            term.clearSelection();
+            sendInput(socketRef.current, pending.sequence);
+          }
+        } else if (browserGesture && event.button === 0 && hasMouseTracking(term)) {
+          sendInput(socketRef.current, mousePressSequence(event, term));
+          sendInput(socketRef.current, mouseReleaseSequence(event, term));
+        }
+        if (browserGesture) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
       };
       term.element?.addEventListener("mouseup", mouseUpListener, { capture: true });
+      mouseGestureEndListener = () => {
+        browserPrimaryMouseGesture = false;
+      };
+      document.addEventListener("mouseup", mouseGestureEndListener);
       contextMenuListener = () => {
         const selection = term.getSelection() || contextMenuSelection;
         contextMenuSelection = "";
@@ -718,7 +769,9 @@ export const TerminalPane = memo(function TerminalPane({
         }
         if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
         if (term.getViewportY() > 0) term.scrollToBottom();
-        sendInput(socketRef.current, data, isTerminalProtocolResponse(data));
+        const terminalResponse = isTerminalProtocolResponse(data);
+        if (terminalResponse && replayingTerminalOutput) return;
+        sendInput(socketRef.current, data, terminalResponse);
       });
       term.onResize(() => {
         const ws = socketRef.current;
@@ -741,6 +794,9 @@ export const TerminalPane = memo(function TerminalPane({
       clearContextCopyBridge();
       if (mouseDownListener) terminalRef.current?.element?.removeEventListener("mousedown", mouseDownListener, { capture: true });
       if (mouseUpListener) terminalRef.current?.element?.removeEventListener("mouseup", mouseUpListener, { capture: true });
+      if (mouseShieldDownListener) terminalRef.current?.renderer?.getCanvas().removeEventListener("mousedown", mouseShieldDownListener);
+      if (mouseShieldMoveListener) terminalRef.current?.renderer?.getCanvas().removeEventListener("mousemove", mouseShieldMoveListener);
+      if (mouseGestureEndListener) document.removeEventListener("mouseup", mouseGestureEndListener);
       if (contextMenuListener) terminalRef.current?.element?.removeEventListener("contextmenu", contextMenuListener, { capture: true });
       if (copyListener) terminalRef.current?.element?.removeEventListener("copy", copyListener, { capture: true });
       if (pasteListener) terminalRef.current?.element?.removeEventListener("paste", pasteListener, { capture: true });
@@ -1126,13 +1182,32 @@ interface TerminalSelectionPosition {
   end: { x: number; y: number };
 }
 
+interface TerminalSelectionManagerAccess {
+  getSelectionPosition: () => TerminalSelectionPosition | undefined;
+  finishMouseSelection?: (event: MouseEvent) => void;
+}
+
+const terminalSelectionManager = (term: Terminal): TerminalSelectionManagerAccess | undefined => {
+  const selectionManager = (term as unknown as {
+    selectionManager?: {
+      getSelectionPosition: () => TerminalSelectionPosition | undefined;
+      boundMouseUpHandler?: (event: MouseEvent) => void;
+    };
+  }).selectionManager;
+  if (!selectionManager) return undefined;
+  return {
+    getSelectionPosition: selectionManager.getSelectionPosition.bind(selectionManager),
+    ...(selectionManager.boundMouseUpHandler
+      ? { finishMouseSelection: selectionManager.boundMouseUpHandler.bind(selectionManager) }
+      : {}),
+  };
+};
+
 // Mouse-aware apps clear Ghostty's selection when the release is encoded as
 // terminal input. Preserve its viewport range so browser selection still wins.
 const readTerminalSelectionPosition = (term: Terminal): TerminalSelectionPosition | undefined => {
   if (!term.hasSelection()) return undefined;
-  return (term as unknown as {
-    selectionManager?: { getSelectionPosition: () => TerminalSelectionPosition | undefined };
-  }).selectionManager?.getSelectionPosition();
+  return terminalSelectionManager(term)?.getSelectionPosition();
 };
 
 const restoreTerminalSelection = (term: Terminal, position: TerminalSelectionPosition): void => {
@@ -1222,6 +1297,20 @@ const mouseWheelSequence = (event: WheelEvent, term: Terminal): string => {
   return sequence.repeat(lines);
 };
 
+const mouseReleaseSequence = (event: MouseEvent, term: Terminal): string => {
+  const modifier = (event.shiftKey ? 4 : 0) + (event.metaKey ? 8 : 0) + (event.ctrlKey ? 16 : 0);
+  const { col, row } = mouseCell(event, term);
+  if (supportsSgrMouse(term)) return `\x1b[<${event.button + modifier};${col};${row}m`;
+  return `\x1b[M${String.fromCharCode(32 + 3 + modifier)}${String.fromCharCode(32 + col)}${String.fromCharCode(32 + row)}`;
+};
+
+const mousePressSequence = (event: MouseEvent, term: Terminal): string => {
+  const modifier = (event.shiftKey ? 4 : 0) + (event.metaKey ? 8 : 0) + (event.ctrlKey ? 16 : 0);
+  const { col, row } = mouseCell(event, term);
+  if (supportsSgrMouse(term)) return `\x1b[<${event.button + modifier};${col};${row}M`;
+  return `\x1b[M${String.fromCharCode(32 + event.button + modifier)}${String.fromCharCode(32 + col)}${String.fromCharCode(32 + row)}`;
+};
+
 const supportsSgrMouse = (term: Terminal): boolean => {
   try {
     return term.getMode(1006);
@@ -1230,7 +1319,7 @@ const supportsSgrMouse = (term: Terminal): boolean => {
   }
 };
 
-const mouseCell = (event: WheelEvent, term: Terminal): { col: number; row: number } => {
+const mouseCell = (event: MouseEvent | WheelEvent, term: Terminal): { col: number; row: number } => {
   const rect = term.element?.getBoundingClientRect();
   const metrics = term.renderer?.getMetrics?.();
   const width = metrics?.width ?? 8;

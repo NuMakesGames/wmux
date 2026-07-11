@@ -15,11 +15,10 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "0.3"
+VERSION = "0.4"
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
-LOCAL_RESPONSE_TTL_SECONDS = 30.0
 
 LOCAL_TERMINAL_QUERY_RESPONSES = {
     b"\x1b[c": b"\x1b[?62;22c",
@@ -264,7 +263,7 @@ class ConptyBackend:
         self.lock = threading.Lock()
         self.closed = False
         self.query_responder = TerminalQueryResponder()
-        self.locally_answered: dict[bytes, float] = {}
+        self.locally_answered: set[bytes] = set()
 
     @property
     def pid(self) -> int:
@@ -284,10 +283,6 @@ class ConptyBackend:
         with self.lock:
             if self.closed:
                 return
-            current = time.monotonic()
-            self.locally_answered = {
-                response: deadline for response, deadline in self.locally_answered.items() if deadline > current
-            }
             if data in self.locally_answered:
                 return
             self.process.write(data.decode("utf-8", errors="replace"))
@@ -340,9 +335,8 @@ class ConptyBackend:
         with self.lock:
             if self.closed:
                 return
-            deadline = time.monotonic() + LOCAL_RESPONSE_TTL_SECONDS
             for reply in replies:
-                self.locally_answered[reply] = deadline
+                self.locally_answered.add(reply)
                 self.process.write(reply.decode("ascii"))
 
     def _exit_code(self) -> int | None:

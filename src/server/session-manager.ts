@@ -88,7 +88,9 @@ export class SessionManager {
       if (message.type === "input") {
         this.promoteResizeOwner(paneId, socket, session);
         if (isAgentInterruptInput(message.data)) this.state.interruptAgentForPane(paneId);
-        if (message.terminalResponse && session.writeTerminalResponse) session.writeTerminalResponse(message.data);
+        if ((message.terminalResponse || isTerminalProtocolResponseInput(message.data)) && session.writeTerminalResponse) {
+          session.writeTerminalResponse(message.data);
+        }
         else session.write(message.data);
       }
       if (message.type === "resize") {
@@ -499,6 +501,10 @@ export const parseClientMessage = (raw: string): ClientMessage | null => {
   }
   return null;
 };
+
+const TERMINAL_PROTOCOL_RESPONSE_INPUT = /^(?:(?:\x1b\[[?>]?[0-9;]*c)|(?:\x1b\[(?:0n|[0-9]+;[0-9]+R)))+$/;
+
+export const isTerminalProtocolResponseInput = (data: string): boolean => TERMINAL_PROTOCOL_RESPONSE_INPUT.test(data);
 
 const normalizeSize = (cols: number, rows: number): { cols: number; rows: number } => ({
   cols: Number.isFinite(cols) && cols >= 2 ? Math.floor(cols) : 80,

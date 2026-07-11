@@ -7,7 +7,12 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import type { WebSocket } from "ws";
 import { durableSessionName } from "../src/server/machines.js";
-import { isAgentInterruptInput, parseClientMessage, SessionManager } from "../src/server/session-manager.js";
+import {
+  isAgentInterruptInput,
+  isTerminalProtocolResponseInput,
+  parseClientMessage,
+  SessionManager,
+} from "../src/server/session-manager.js";
 import { StateStore } from "../src/server/state.js";
 import type { MachineConfig } from "../src/server/types.js";
 
@@ -87,6 +92,13 @@ test("terminal-generated response metadata survives client message parsing", () 
     type: "input",
     data: "text",
   });
+});
+
+test("server recognizes terminal replies from stale browser clients", () => {
+  assert.equal(isTerminalProtocolResponseInput("\x1b[?62;22c"), true);
+  assert.equal(isTerminalProtocolResponseInput("\x1b[?62;22c\x1b[?62;22c"), true);
+  assert.equal(isTerminalProtocolResponseInput("\x1b[12;40R"), true);
+  assert.equal(isTerminalProtocolResponseInput("\x1b[A"), false);
 });
 
 test("multi-client PTY attach broadcasts output, replays, and removes cleanly", async () => {

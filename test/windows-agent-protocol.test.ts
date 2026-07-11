@@ -28,9 +28,11 @@ backend.process = FakeProcess()
 backend.lock = __import__("threading").Lock()
 backend.closed = False
 backend.query_responder = module["TerminalQueryResponder"]()
-backend.locally_answered = {}
+backend.locally_answered = set()
 backend._answer_terminal_queries(b"\x1b[c")
 backend.write_terminal_response(b"\x1b[?62;22c")
+backend.write_terminal_response(b"\x1b[?62;22c")
+__import__("time").sleep(0.01)
 backend.write_terminal_response(b"\x1b[?62;22c")
 backend.write_terminal_response(b"user-input")
 
