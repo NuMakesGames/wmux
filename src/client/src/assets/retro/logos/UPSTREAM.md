@@ -21,7 +21,6 @@ unchanged.
 | `amstrad-cpc.svg` | [Amstrad CPC logo](https://commons.wikimedia.org/wiki/File:Amstrad_CPC_logo.svg) | Amstrad | Public-domain text logo |
 | `msx.svg` | [MSX logo](https://commons.wikimedia.org/wiki/File:MSX-Logo.svg) | Unknown | Public-domain text logo |
 | `dec.svg` | [1987 Digital Equipment Corporation logo](https://commons.wikimedia.org/wiki/File:Digital_Equipment_Corporation_1987_logo.svg) | Digital Equipment Corporation | Public-domain text logo |
-| `pico8.svg` | [Modern PICO-8 logo](https://commons.wikimedia.org/wiki/File:PICO-8_logo_modern.svg) | VectorVoyager | CC0 1.0 |
 | `sun.svg` | [1980s Sun Microsystems logo](https://commons.wikimedia.org/wiki/File:Sun_Microsystems_1980s_logo.svg) | Sun Microsystems | Public-domain text/geometric logo |
 | `sgi.svg` | [Silicon Graphics cube logo](https://commons.wikimedia.org/wiki/File:SGI_Logo.svg) | Aonc | CC BY-SA 3.0 |
 | `next.svg` | [NeXT logo](https://commons.wikimedia.org/wiki/File:NeXT_logo.svg) | Paul Rand / NeXT | Public-domain text/geometric logo |

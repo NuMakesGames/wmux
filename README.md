@@ -136,8 +136,9 @@ The randomized login screen separates historical startup behavior from the
 fictional wmux loading and authentication that follows it. Macintosh System 6,
 Acorn RISC OS, Atari TOS/GEM, Lisa Office System, SGI IRIX, NeXTSTEP, and OS/2
 remain graphical through authentication instead of falling through to a generic
-terminal. Amiga Workbench keeps its intentional Workbench-to-AmigaShell one-off;
-MSX2 and PICO-8 retain their native logo-to-command-console transitions. Other
+terminal. Amiga Workbench keeps its intentional Workbench-to-AmigaShell one-off,
+with a bonus Guru Meditation recovery variant; MSX2 retains its native
+logo-to-command-console transition. Other
 text/firmware machines enter their native display immediately; brand logos are
 not inserted merely because an asset exists. In particular, the C64
 starts directly at its BASIC V2 display, consistent with the

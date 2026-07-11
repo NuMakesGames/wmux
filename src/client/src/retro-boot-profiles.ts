@@ -21,6 +21,7 @@ export interface RetroBootProfile {
   bootStatus: string;
   showBootArtwork?: boolean;
   graphicalShell?: "risc-os" | "atari-st" | "lisa" | "irix" | "nextstep" | "macintosh" | "os2";
+  specialBoot?: "amiga-guru";
   boot: readonly RetroBootStep[];
   auth: {
     required: string;
@@ -41,6 +42,7 @@ const typed = (text: string, delay = 90, prompt = ""): RetroBootStep => ({
   delay,
   typedFrom: prompt.length,
 });
+const centeredLine = (text: string, columns: number) => `${" ".repeat(Math.max(0, Math.floor((columns - text.length) / 2)))}${text}\n`;
 
 const standardAuth = {
   required: "\nAUTHENTICATION REQUIRED\n",
@@ -97,10 +99,10 @@ export const RETRO_BOOT_PROFILES: readonly RetroBootProfile[] = [
     bootStatus: "Starting Commodore 128 CP/M services",
     showBootArtwork: false,
     boot: [
-      step("COMMODORE BASIC V7.0 122365 BYTES FREE\n", 110),
-      step("  (C)1986 COMMODORE ELECTRONICS, LTD.\n"),
-      step("       (C)1977 MICROSOFT CORP.\n"),
-      step("         ALL RIGHTS RESERVED\n\n", 120),
+      step(centeredLine("COMMODORE BASIC V7.0 122365 BYTES FREE", 40), 110),
+      step(centeredLine("(C)1986 COMMODORE ELECTRONICS, LTD.", 40)),
+      step(centeredLine("(C)1977 MICROSOFT CORP.", 40)),
+      step(`${centeredLine("ALL RIGHTS RESERVED", 40)}\n`, 120),
       step("READY.\n", 100),
       typed('DIRECTORY "WMUX"\n\n'),
       step('"GHOSTTY"       PRG   "MACHINES"  SEQ\n', 55),
@@ -301,6 +303,36 @@ export const RETRO_BOOT_PROFILES: readonly RetroBootProfile[] = [
     fontSize: { desktop: 16, mobile: 9 },
     colors: { page: "#ffffff", border: "#ffffff", background: "#aaaaaa", foreground: "#111111" },
     bootStatus: "Opening AmigaShell",
+    boot: [
+      step("AmigaShell\n", 130),
+      step("Copyright 1987 Commodore-Amiga, Inc.\n\n", 90),
+      typed("assign WMUX: NET:wmux\n", 75, "1.System:> "),
+      typed("WMUX:wmux\n", 100, "1.System:> "),
+      step("wmux-handler ............. loaded\n", 55),
+      step("workspace.library ........ loaded\n", 55),
+    ],
+    auth: {
+      ...standardAuth,
+      required: "\nAuthentication required.\n",
+      usernamePrompt: "User name: ",
+      passwordPrompt: "Password: ",
+      verifying: "Checking...\n",
+      failed: "Login incorrect\n1.System:> ",
+      granted: "\nAccess granted.\n",
+      ready: "WMUX ready.\n",
+    },
+  },
+  {
+    id: "amiga-guru-meditation",
+    name: "Amiga Guru Meditation",
+    ariaLabel: "Amiga Guru Meditation recovery and AmigaShell authentication console",
+    columns: 40,
+    rows: 25,
+    fontFamily: '"Retro Amiga Topaz", monospace',
+    fontSize: { desktop: 16, mobile: 9 },
+    colors: { page: "#000000", border: "#000000", background: "#aaaaaa", foreground: "#111111" },
+    bootStatus: "Recovering Amiga Workbench",
+    specialBoot: "amiga-guru",
     boot: [
       step("AmigaShell\n", 130),
       step("Copyright 1987 Commodore-Amiga, Inc.\n\n", 90),
@@ -934,37 +966,6 @@ export const RETRO_BOOT_PROFILES: readonly RetroBootProfile[] = [
       step("R: HANDLER INSTALLED\n", 70),
     ],
     auth: { ...standardAuth, usernamePrompt: "USER? ", passwordPrompt: "PASS? ", failed: "ERROR- 165\nREADY\n" },
-  },
-  {
-    id: "pico-8",
-    name: "PICO-8",
-    ariaLabel: "PICO-8 fantasy console authentication terminal",
-    columns: 32,
-    rows: 24,
-    fontFamily: '"Retro Spectrum", monospace',
-    fontSize: { desktop: 18, mobile: 11 },
-    colors: { page: "#1d2b53", border: "#1d2b53", background: "#1d2b53", foreground: "#fff1e8" },
-    bootStatus: "Loading PICO-8 cartridge",
-    boot: [
-      step("\n      PICO-8\n", 140),
-      step("   FANTASY CONSOLE\n\n", 100),
-      step("VERSION 0.2.6B\n", 65),
-      step("(C) 2014-2024 LEXALOFFLE\n\n", 80),
-      step("TYPE HELP FOR HELP\n\n", 70),
-      typed("LOAD #WMUX\n", 90, "> "),
-      step("LOADING CARTRIDGE...\n", 80),
-      typed("RUN\n", 75, "> "),
-      step("WMUX TERMINAL CART\n", 80),
-    ],
-    auth: {
-      ...standardAuth,
-      required: "\nLOGIN REQUIRED\n",
-      usernamePrompt: "USER> ",
-      passwordPrompt: "PASS> ",
-      verifying: "CHECKING...\n",
-      failed: "NOPE!\n> ",
-      granted: "\nOK!\n",
-    },
   },
 ] as const;
 

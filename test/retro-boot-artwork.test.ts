@@ -5,11 +5,11 @@ import { RETRO_BOOT_PROFILES } from "../src/client/src/retro-boot-profiles";
 
 const ASSET_PROFILE_IDS = [
   "amiga-workbench",
+  "amiga-guru-meditation",
   "msx2",
   "sgi-irix",
   "nextcube",
   "macintosh-system-6",
-  "pico-8",
 ];
 
 const GRAPHICAL_SHELL_PROFILE_IDS = [
@@ -22,7 +22,7 @@ const GRAPHICAL_SHELL_PROFILE_IDS = [
   "os2-warp",
 ];
 
-const TERMINAL_ARTWORK_PROFILE_IDS = ["amiga-workbench", "msx2", "pico-8"];
+const TERMINAL_ARTWORK_PROFILE_IDS = ["amiga-workbench", "amiga-guru-meditation", "msx2"];
 
 test("every retro boot profile has an image placeholder", () => {
   assert.deepEqual(
@@ -43,10 +43,10 @@ test("every retro boot profile has an image placeholder", () => {
   assert.deepEqual(RETRO_BOOT_ARTWORK.msx2.framebuffer, [256, 212]);
   assert.deepEqual(RETRO_BOOT_ARTWORK["amiga-workbench"].framebuffer, [640, 400]);
   assert.equal(RETRO_BOOT_ARTWORK["amiga-workbench"].fullFrame, true);
+  assert.deepEqual(RETRO_BOOT_ARTWORK["amiga-guru-meditation"].framebuffer, [640, 400]);
   assert.deepEqual(RETRO_BOOT_ARTWORK["macintosh-system-6"].framebuffer, [512, 342]);
   assert.equal(RETRO_BOOT_ARTWORK["macintosh-system-6"].fullFrame, true);
   assert.deepEqual(RETRO_BOOT_ARTWORK["commodore-vic-20"].framebuffer, [176, 184]);
-  assert.deepEqual(RETRO_BOOT_ARTWORK["pico-8"].framebuffer, [128, 128]);
   assert.equal(RETRO_BOOT_PROFILES.find((profile) => profile.id === "commodore-64")?.showBootArtwork, false);
 });
 

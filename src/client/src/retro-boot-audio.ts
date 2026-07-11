@@ -26,6 +26,7 @@ export const RETRO_POST_SOUNDS: Readonly<Record<string, readonly RetroPostTone[]
   "zx-spectrum": [tone(1200, 45), tone(2400, 45, 48), tone(1200, 55, 96)],
   "atari-st": [tone(620, 90), tone(930, 105, 100)],
   "amiga-workbench": [tone(220, 35), tone(440, 35, 45), tone(660, 35, 90), tone(880, 120, 135)],
+  "amiga-guru-meditation": [tone(130, 180, 0, "sawtooth"), tone(110, 260, 170, "sawtooth")],
   "osborne-1": [tone(880, 145, 0, "sine")],
   "sinclair-ql": [tone(698, 65), tone(932, 100, 75)],
   "amstrad-cpc": [tone(262, 55), tone(392, 55, 60), tone(523, 110, 120)],
@@ -52,7 +53,6 @@ export const RETRO_POST_SOUNDS: Readonly<Record<string, readonly RetroPostTone[]
   "memotech-mtx": [tone(700, 100)],
   "tatung-einstein": [tone(880, 110, 0, "sine")],
   "atari-8-bit": [tone(440, 70), tone(660, 90, 80)],
-  "pico-8": [tone(262, 55), tone(330, 55, 60), tone(392, 55, 120), tone(523, 100, 180)],
 };
 
 type AudioContextConstructor = new () => AudioContext;

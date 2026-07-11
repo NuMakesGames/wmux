@@ -8,6 +8,7 @@ test("retro boot profiles cover the requested computer families", () => {
   assert.deepEqual(
     [
       "acorn-archimedes",
+      "amiga-guru-meditation",
       "amiga-workbench",
       "amstrad-cpc",
       "amstrad-pcw",
@@ -32,7 +33,6 @@ test("retro boot profiles cover the requested computer families", () => {
       "os2-warp",
       "osborne-1",
       "pdp-11-rt11",
-      "pico-8",
       "sam-coupe",
       "sharp-x68000",
       "sgi-irix",
@@ -47,6 +47,19 @@ test("retro boot profiles cover the requested computer families", () => {
     ].filter((id) => !ids.has(id)),
     [],
   );
+});
+
+test("Commodore startup banners are centered in their 40-column display", () => {
+  for (const profileId of ["commodore-64", "commodore-128"]) {
+    const profile = RETRO_BOOT_PROFILES.find((candidate) => candidate.id === profileId);
+    assert.ok(profile);
+    const bannerSteps = profileId === "commodore-64" ? profile.boot.slice(0, 2) : profile.boot.slice(0, 4);
+    for (const bootStep of bannerSteps) {
+      const line = bootStep.text.split("\n")[0];
+      const content = line.trimStart();
+      assert.equal(line.length - content.length, Math.floor((profile.columns - content.length) / 2), `${profileId}: ${content}`);
+    }
+  }
 });
 
 test("every retro profile has a complete keyboard authentication loop", () => {

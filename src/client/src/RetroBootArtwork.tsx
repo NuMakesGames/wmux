@@ -3,7 +3,6 @@ import { useEffect, useRef } from "react";
 const system6HappyMac = new URL("./assets/retro/system6-happy-mac.png", import.meta.url).href;
 const msxLogo = new URL("./assets/retro/logos/msx.svg", import.meta.url).href;
 const nextLogo = new URL("./assets/retro/logos/next.svg", import.meta.url).href;
-const pico8Logo = new URL("./assets/retro/logos/pico8.svg", import.meta.url).href;
 const sgiLogo = new URL("./assets/retro/logos/sgi.svg", import.meta.url).href;
 const workbench13Bootscreen = new URL("./assets/retro/workbench13-bootscreen.gif", import.meta.url).href;
 
@@ -88,6 +87,13 @@ export const RETRO_BOOT_ARTWORK: Readonly<Record<string, RetroBootArtworkDefinit
     framebuffer: [640, 400],
     fullFrame: true,
   },
+  "amiga-guru-meditation": {
+    kind: "boing",
+    label: "Workbench 1.3",
+    asset: workbench13Bootscreen,
+    framebuffer: [640, 400],
+    fullFrame: true,
+  },
   "osborne-1": { kind: "portable", label: "O1", framebuffer: [416, 240], hardEdges: true },
   "sinclair-ql": {
     kind: "cassette",
@@ -164,13 +170,6 @@ export const RETRO_BOOT_ARTWORK: Readonly<Record<string, RetroBootArtworkDefinit
   "memotech-mtx": { kind: "cassette", label: "MTX", framebuffer: [320, 192], hardEdges: true },
   "tatung-einstein": { kind: "disk", label: "TC-01", framebuffer: [320, 192], hardEdges: true },
   "atari-8-bit": { kind: "cartridge", label: "ATARI", framebuffer: [320, 192], hardEdges: true },
-  "pico-8": {
-    kind: "cartridge",
-    label: "PICO-8",
-    asset: pico8Logo,
-    framebuffer: [128, 128],
-    hardEdges: true,
-  },
 };
 
 interface RetroBootArtworkProps {

@@ -17,7 +17,7 @@ interface RetroBootScreenProps {
 }
 
 const LAST_BOOT_PROFILE_KEY = "wmux:last-retro-boot-profile";
-type BootVisualPhase = "blank" | "artwork" | "terminal";
+type BootVisualPhase = "blank" | "artwork" | "guru" | "terminal";
 
 const chooseBootProfile = () => {
   let previousId: string | null = null;
@@ -54,8 +54,9 @@ function RetroTerminalBootScreen({
   const onAuthenticatedRef = useRef(onAuthenticated);
   const onCompleteRef = useRef(onComplete);
   const hasBootArtwork = profile.showBootArtwork !== false;
+  const isAmiga = profile.id === "amiga-workbench" || profile.id === "amiga-guru-meditation";
   const [visualPhase, setVisualPhase] = useState<BootVisualPhase>(() =>
-    !hasBootArtwork ? "terminal" : profile.id === "amiga-workbench" ? "blank" : "artwork",
+    !hasBootArtwork ? "terminal" : profile.specialBoot === "amiga-guru" ? "guru" : isAmiga ? "blank" : "artwork",
   );
   const [status, setStatus] = useState(`Starting ${profile.name}`);
 
@@ -206,7 +207,17 @@ function RetroTerminalBootScreen({
 
       if (!hasBootArtwork) {
         setVisualPhase("terminal");
-      } else if (profile.id === "amiga-workbench") {
+      } else if (profile.specialBoot === "amiga-guru") {
+        await pause(2_000);
+        if (cancelled) return;
+        setStatus("Restarting after Guru Meditation");
+        setVisualPhase("blank");
+        await pause(450);
+        if (cancelled) return;
+        setStatus("Waiting for Workbench disk");
+        setVisualPhase("artwork");
+        await pause(1_600);
+      } else if (isAmiga) {
         await pause(600);
         if (cancelled) return;
         setStatus("Waiting for Workbench disk");
@@ -292,7 +303,7 @@ function RetroTerminalBootScreen({
     <main className={`retro-boot-screen retro-boot-${profile.id}`} style={style} data-boot-profile={profile.id}>
       <section className="retro-boot-bezel" aria-label={`${profile.name} wmux loading`}>
         <div className="retro-boot-terminal-frame">
-          {profile.id === "amiga-workbench" ? (
+          {isAmiga ? (
             <div className="retro-amiga-shell-titlebar" aria-hidden="true">
               <span className="retro-amiga-shell-gadget">0</span>
               <span>AmigaShell</span>
@@ -302,6 +313,14 @@ function RetroTerminalBootScreen({
           <div ref={hostRef} className="retro-boot-terminal" aria-label={profile.ariaLabel} />
         </div>
         {visualPhase === "blank" ? <div className="retro-boot-amiga-blank" aria-hidden="true" /> : null}
+        {visualPhase === "guru" ? (
+          <div className="retro-amiga-guru" role="img" aria-label="Amiga Guru Meditation software failure">
+            <div className="retro-amiga-guru-alert">
+              <span>Software Failure. Press left mouse button to continue.</span>
+              <span>Guru Meditation #0000000B.00C01570</span>
+            </div>
+          </div>
+        ) : null}
         {visualPhase === "artwork" ? <RetroBootArtwork profileId={profile.id} profileName={profile.name} /> : null}
         <span className="visually-hidden" role="status" aria-live="polite">
           {status}

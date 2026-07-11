@@ -2260,7 +2260,8 @@ button.active-tool {
   min-height: 0;
 }
 
-.retro-boot-amiga-workbench .retro-boot-terminal-frame {
+.retro-boot-amiga-workbench .retro-boot-terminal-frame,
+.retro-boot-amiga-guru-meditation .retro-boot-terminal-frame {
   display: grid;
   grid-template-rows: 22px minmax(0, 1fr);
   box-sizing: border-box;
@@ -2340,8 +2341,39 @@ button.active-tool {
   background: #fff;
 }
 
-.retro-boot-amiga-workbench .retro-boot-artwork {
+.retro-boot-amiga-workbench .retro-boot-artwork,
+.retro-boot-amiga-guru-meditation .retro-boot-artwork {
   background: #fff;
+}
+
+.retro-amiga-guru {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: #000;
+  color: #f22;
+  font-family: "Retro Amiga Topaz", monospace;
+}
+
+.retro-amiga-guru-alert {
+  position: absolute;
+  top: 7%;
+  right: 2.5%;
+  left: 2.5%;
+  display: grid;
+  gap: clamp(8px, 1.4vh, 14px);
+  border: clamp(2px, 0.35vw, 4px) solid currentColor;
+  padding: clamp(8px, 1.6vw, 16px);
+  font-size: clamp(8px, 1.7vw, 16px);
+  line-height: 1;
+  text-align: center;
+  animation: retro-amiga-guru-flash 1.2s steps(1) infinite;
+}
+
+@keyframes retro-amiga-guru-flash {
+  50% {
+    border-color: #000;
+  }
 }
 
 .retro-boot-artwork svg {
