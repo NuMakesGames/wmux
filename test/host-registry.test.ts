@@ -383,6 +383,57 @@ test("legacy persisted records load with host overrides and unsafe extras remove
   }
 });
 
+test("legacy ID-keyed registries migrate remoteAddress records", () => {
+  const { dir, filePath } = tempRegistry();
+  const now = Date.now();
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify({
+      hosts: {
+        "legacy-map": {
+          id: "legacy-map",
+          machine: {
+            id: "legacy-map",
+            name: "Legacy map",
+            kind: "powershell-ssh",
+            host: "ignored.example",
+            user: "operator",
+            sessionBackend: "agent",
+            agentPort: 3481,
+            agentToken: "legacy-map-agent-token",
+          },
+          registeredAt: new Date(now - 1_000).toISOString(),
+          lastSeenAt: new Date(now - 1_000).toISOString(),
+          expiresAt: new Date(now + 60_000).toISOString(),
+          ttlMs: 60_000,
+          remoteAddress: "192.168.1.8",
+          metadata: { platform: "windows" },
+        },
+      },
+    }),
+  );
+
+  const registry = new HostRegistry(staticMachines, filePath);
+  try {
+    const machine = registry.machines()[1];
+    assert.equal(machine.id, "legacy-map");
+    assert.equal(machine.host, "192.168.1.8");
+    assert.equal(machine.agentToken, "legacy-map-agent-token");
+
+    const persisted = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+      schemaVersion: number;
+      hosts: Array<Record<string, unknown>>;
+    };
+    assert.equal(persisted.schemaVersion, CURRENT_HOST_REGISTRY_SCHEMA_VERSION);
+    assert.equal(Array.isArray(persisted.hosts), true);
+    assert.equal(persisted.hosts[0].observedAddress, "192.168.1.8");
+    assert.equal("remoteAddress" in persisted.hosts[0], false);
+  } finally {
+    registry.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("future registry versions fail closed without touching the file", () => {
   const { dir, filePath } = tempRegistry();
   const contents = `${JSON.stringify({
