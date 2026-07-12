@@ -233,6 +233,9 @@ token. wmux is not a hardened multi-user service.
 ## Workspaces and Interaction
 
 - Workspaces contain linked tabs and draggable split panes.
+- Agents using the bundled skill can create or reuse visible workspaces. These
+  persist like user-created workspaces, appear with an `AI` badge, and retain
+  direct links for monitoring or handoff.
 - `/workspaces/:workspaceId/tabs/:tabId` opens a specific session directly.
 - Workspace, tab, and pane selection are browser-local; terminal processes and
   notification read state remain server-owned.
@@ -440,6 +443,3 @@ the assets.
 Font files from Damien Guard's ZX Origins Micropack are used with permission
 from Damien Guard and remain outside the MIT license. This attribution applies
 to the font files, not the historical bitmap letterforms they represent.
-
-The retained Amiga Workbench historical screenshot is not covered by the MIT
-license; see the third-party notices for its provenance and status.

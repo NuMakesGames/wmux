@@ -11,6 +11,13 @@ Use wmux when a task should run on a specific private-network machine with a vis
 
 Prefer direct local tools or SSH only for quick invisible checks. Prefer wmux when the user asks to orchestrate remote work, wants to monitor the task in the browser, the task spans machines, or the command should remain attached to a wmux workspace.
 
+## Capabilities
+
+- Discover configured and dynamically registered machines, including reachability and backend health.
+- Create or reuse visible agent-generated workspaces and tabs on local, SSH, or Windows targets. These persist with `createdBy: "agent"`, appear with an `AI` badge, and can be handed to the user with a direct URL.
+- Send shell input, run short PowerShell scripts, inspect replay, and wait for output or completion sentinels.
+- Record command and agent lifecycle metadata, post browser notifications, and close successful one-shot workspaces when inspection is no longer needed.
+
 ## First Steps
 
 1. Read live machine state from `/api/bootstrap` before acting. Static machines come from the configured `wmux.config.json`; dynamic hosts come from the heartbeat registry. `WMUX_URL`, `~/.wmux/url`, and finally `http://127.0.0.1:3478` select the API.
