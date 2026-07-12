@@ -1,0 +1,28 @@
+.git
+.github
+node_modules
+dist
+coverage
+test-results
+npm-debug.log*
+
+# Runtime configuration and credentials must be mounted, never baked in.
+.env
+.env.*
+**/.env
+**/.env.*
+.wmux
+**/.wmux
+wmux.config.json
+**/wmux.config.json
+.ssh
+**/.ssh
+**/id_rsa*
+**/id_ed25519*
+**/*.pem
+**/*.key
+**/*secret*
+
+# Local deployment state is supplied through a volume.
+data
+**/data

@@ -84,6 +84,15 @@ export const createHttpServer = (
   let vite: ViteDevServer | undefined;
   const protocol = options.tls ? "https" : "http";
 
+  const resolveMachineId = (requested?: string, fallback?: string): string => {
+    const machineId = requested ?? fallback ?? machines[0]?.id;
+    if (!machineId) throw new HttpError(409, "no_machine_available");
+    if (!machines.some((machine) => machine.id === machineId)) {
+      throw new HttpError(400, "unknown_machine");
+    }
+    return machineId;
+  };
+
   const currentPayload = () => {
     const snapshot = state.snapshot();
     return {
@@ -326,7 +335,7 @@ export const createHttpServer = (
           sourcePaneId?: string;
           createdBy?: "user" | "agent";
         };
-        const machineId = body.machineId ?? "local";
+        const machineId = resolveMachineId(body.machineId);
         const sourcePane = body.sourcePaneId ? state.findPane(body.sourcePaneId) ?? undefined : undefined;
         const workspace = state.createWorkspace(
           machineId,
@@ -566,7 +575,7 @@ export const createHttpServer = (
         const sourcePane = body.sourcePaneId
           ? workspace?.tabs.flatMap((tab) => tab.panes).find((pane) => pane.id === body.sourcePaneId)
           : undefined;
-        const machineId = body.machineId ?? workspace?.machineId ?? "local";
+        const machineId = resolveMachineId(body.machineId, workspace?.machineId);
         const tab = state.createTab(tabs[1], machineId, cwdForSourcePane(state, machines, sourcePane, machineId));
         sendJson(response, 201, { tab, state: currentPayload() });
         return;
@@ -603,7 +612,7 @@ export const createHttpServer = (
           .flatMap((workspace) => workspace.tabs)
           .flatMap((tab) => tab.panes)
           .find((pane) => pane.id === body.paneId);
-        const machineId = body.machineId ?? sourcePane?.machineId ?? "local";
+        const machineId = resolveMachineId(body.machineId, sourcePane?.machineId);
         const tab = state.splitPane(
           split[1],
           body.paneId,

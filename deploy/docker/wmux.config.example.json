@@ -1,0 +1,13 @@
+{
+  "localMachine": false,
+  "machines": [
+    {
+      "id": "example-host",
+      "name": "Example Host",
+      "kind": "ssh",
+      "host": "example-host.example-tailnet.ts.net",
+      "user": "username",
+      "sessionBackend": "auto"
+    }
+  ]
+}

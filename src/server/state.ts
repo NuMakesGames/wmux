@@ -154,7 +154,7 @@ export class StateStore extends EventEmitter {
     }
   }
 
-  createWorkspace(machineId = "local", cwd?: string, createdBy: "user" | "agent" = "user"): Workspace {
+  createWorkspace(machineId: string, cwd?: string, createdBy: "user" | "agent" = "user"): Workspace {
     const pane = this.createPane(machineId, cwd);
     const tab: SurfaceTab = {
       id: createId("tab"),
@@ -654,7 +654,9 @@ export class StateStore extends EventEmitter {
       runs: [],
     };
     this.state = state;
-    const workspace = this.createWorkspace("local");
+    const initialMachineId = machines[0]?.id;
+    if (!initialMachineId) return state;
+    const workspace = this.createWorkspace(initialMachineId);
     return { ...state, activeWorkspaceId: workspace.id };
   }
 

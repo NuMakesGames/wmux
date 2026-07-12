@@ -52,6 +52,8 @@ export const machineSchema = z.object({
 
 export const configSchema = z.object({
   machines: z.array(machineSchema).optional(),
+  // Container deployments may not want to expose a shell inside the wmux container.
+  localMachine: z.boolean().optional(),
 });
 
 export interface AppConfig {
@@ -69,7 +71,8 @@ export const loadConfig = (): AppConfig => {
     const parsed = configSchema.parse(raw);
     const machines = parsed.machines ?? [];
     const hasLocal = machines.some((machine) => machine.id === "local");
-    return { machines: hasLocal ? machines : [localMachine(), ...machines] };
+    if (hasLocal || parsed.localMachine === false) return { machines };
+    return { machines: [localMachine(), ...machines] };
   }
   if (process.env.WMUX_CONFIG_PATH) {
     throw new Error(`WMUX_CONFIG_PATH does not exist: ${path.resolve(process.env.WMUX_CONFIG_PATH)}`);

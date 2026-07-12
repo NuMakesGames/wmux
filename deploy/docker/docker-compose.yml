@@ -1,0 +1,26 @@
+name: "${COMPOSE_PROJECT_NAME:-wmux}"
+
+services:
+  wmux:
+    image: "${WMUX_IMAGE:-wmux:local}"
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      WMUX_PUBLISH_HOST: "${WMUX_PUBLISH_HOST:-127.0.0.1}"
+      WMUX_HOST: "${WMUX_HOST:-}"
+      WMUX_PORT: "${WMUX_PORT:-3478}"
+      WMUX_PUBLIC_URL: "${WMUX_PUBLIC_URL:-}"
+      WMUX_ALLOWED_HOSTS: "${WMUX_ALLOWED_HOSTS:-}"
+      WMUX_TRUSTED_PROXIES: "${WMUX_TRUSTED_PROXIES:-}"
+      WMUX_TOKEN: "${WMUX_TOKEN:-}"
+      WMUX_DISABLE_AUTH: "${WMUX_DISABLE_AUTH:-}"
+    ports:
+      - "${WMUX_PUBLISH_HOST:-127.0.0.1}:${WMUX_PUBLISH_PORT:-3478}:${WMUX_PORT:-3478}"
+    volumes:
+      - wmux-data:/home/node/.wmux
+
+volumes:
+  wmux-data:
