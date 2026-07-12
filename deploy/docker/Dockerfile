@@ -41,8 +41,9 @@ COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node vendor/opentui-browser ./vendor/opentui-browser
 COPY --chown=node:node scripts ./scripts
 COPY deploy/docker/docker-bind-host.mjs deploy/docker/docker-healthcheck.mjs /usr/local/lib/wmux/
-COPY --chmod=755 deploy/docker/docker-entrypoint.sh /usr/local/bin/wmux-docker-entrypoint
-RUN find /app/scripts -maxdepth 1 -type f -exec sed -i 's/\r$//' {} + \
+COPY deploy/docker/docker-entrypoint.sh /usr/local/bin/wmux-docker-entrypoint
+RUN chmod 755 /usr/local/bin/wmux-docker-entrypoint \
+  && find /app/scripts -maxdepth 1 -type f -exec sed -i 's/\r$//' {} + \
   && find /app/scripts -maxdepth 1 -type f -exec chmod 755 {} +
 
 USER node

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
 const selector = path.resolve("deploy/docker/docker-bind-host.mjs");
+const dockerfile = fs.readFileSync(path.resolve("deploy/docker/Dockerfile"), "utf8");
 
 const runSelector = (environment: Record<string, string>, args: string[] = []) =>
   spawnSync(process.execPath, [selector, ...args], {
@@ -35,4 +37,8 @@ test("publish host validation accepts private addresses and rejects wildcard or 
     assert.notEqual(result.status, 0, `${host} should be rejected`);
     assert.match(result.stderr, /Refusing WMUX_PUBLISH_HOST/);
   }
+});
+
+test("Dockerfile does not require BuildKit-only COPY flags", () => {
+  assert.doesNotMatch(dockerfile, /^COPY\s+--chmod(?:=|\s)/m);
 });
