@@ -10,7 +10,6 @@ const ASSET_PROFILE_IDS = [
   "msx2",
   "sgi-irix",
   "nextcube",
-  "macintosh-system-6",
 ];
 
 const GRAPHICAL_SHELL_PROFILE_IDS = [
@@ -19,7 +18,6 @@ const GRAPHICAL_SHELL_PROFILE_IDS = [
   "apple-lisa",
   "sgi-irix",
   "nextcube",
-  "macintosh-system-6",
   "os2-warp",
 ];
 
@@ -35,7 +33,7 @@ test("every retro boot profile has an image placeholder", () => {
     assert.ok(artwork.framebuffer[0] > 0, `${profileId} framebuffer width`);
     assert.ok(artwork.framebuffer[1] > 0, `${profileId} framebuffer height`);
   }
-  assert.equal(Object.values(RETRO_BOOT_ARTWORK).filter((artwork) => artwork.asset).length, 6);
+  assert.equal(Object.values(RETRO_BOOT_ARTWORK).filter((artwork) => artwork.asset).length, 5);
   assert.equal(RETRO_BOOT_ARTWORK["commodore-64"].asset, undefined);
   assert.equal(RETRO_BOOT_ARTWORK["bbc-micro"].asset, undefined);
   assert.deepEqual(RETRO_BOOT_ARTWORK["commodore-64"].framebuffer, [320, 200]);
@@ -45,8 +43,6 @@ test("every retro boot profile has an image placeholder", () => {
   assert.deepEqual(RETRO_BOOT_ARTWORK["amiga-workbench"].framebuffer, [640, 400]);
   assert.equal(RETRO_BOOT_ARTWORK["amiga-workbench"].fullFrame, true);
   assert.deepEqual(RETRO_BOOT_ARTWORK["amiga-guru-meditation"].framebuffer, [640, 400]);
-  assert.deepEqual(RETRO_BOOT_ARTWORK["macintosh-system-6"].framebuffer, [512, 342]);
-  assert.equal(RETRO_BOOT_ARTWORK["macintosh-system-6"].fullFrame, true);
   assert.deepEqual(RETRO_BOOT_ARTWORK["commodore-vic-20"].framebuffer, [176, 184]);
   assert.equal(RETRO_BOOT_PROFILES.find((profile) => profile.id === "commodore-64")?.showBootArtwork, false);
 });
@@ -66,7 +62,6 @@ test("GUI systems stay graphical while native command consoles may use boot artw
 
 test("framebuffer styles use each profile's declared native aspect ratio", () => {
   assert.deepEqual(retroFramebufferStyle("commodore-64"), { "--retro-framebuffer-aspect": "320 / 200" });
-  assert.deepEqual(retroFramebufferStyle("macintosh-system-6"), { "--retro-framebuffer-aspect": "512 / 342" });
   assert.deepEqual(retroFramebufferStyle("acorn-archimedes"), { "--retro-framebuffer-aspect": "640 / 256" });
 });
 

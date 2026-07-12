@@ -38,7 +38,6 @@ export const RETRO_POST_SOUNDS: Readonly<Record<string, readonly RetroPostTone[]
   nextcube: [tone(196, 180, 0, "sine"), tone(294, 180, 45, "sine"), tone(392, 240, 90, "sine")],
   "pdp-11-rt11": [tone(1000, 120, 0, "sine")],
   "ibm-3270-mvs": [tone(660, 85, 0, "sine"), tone(880, 120, 105, "sine")],
-  "macintosh-system-6": [tone(523, 260, 0, "sine"), tone(659, 260, 35, "sine")],
   "ti-99-4a": [tone(440, 70), tone(660, 100, 80)],
   "trs-80-coco": [tone(784, 110)],
   "amstrad-pcw": [tone(880, 90, 0, "sine")],

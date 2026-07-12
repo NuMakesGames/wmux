@@ -24,7 +24,6 @@ test("retro boot profiles cover the requested computer families", () => {
       "enterprise-128",
       "ibm-pc-at",
       "ibm-3270-mvs",
-      "macintosh-system-6",
       "memotech-mtx",
       "msx2",
       "nec-pc-9801",

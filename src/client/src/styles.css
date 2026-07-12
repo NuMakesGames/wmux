@@ -2798,7 +2798,6 @@ button.active-tool {
 
 .retro-graphical-full-frame,
 .retro-graphical-blank,
-.retro-mac-desktop,
 .retro-atari-desktop,
 .retro-riscos-desktop,
 .retro-lisa-desktop,
@@ -3335,7 +3334,6 @@ button.active-tool {
   resize: none;
 }
 
-.retro-graphical-macintosh .retro-graphical-login,
 .retro-graphical-lisa .retro-graphical-login,
 .retro-graphical-nextstep .retro-graphical-login {
   font-family: "Retro Lisa Console", monospace;

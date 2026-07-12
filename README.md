@@ -436,6 +436,7 @@ Dependencies and historical assets retain their own terms; see
 the assets.
 
 > [!WARNING]
-> The current checkout still contains font and historical screenshot files
-> whose source-redistribution permission is unresolved. Do not publish or
-> redistribute the complete source tree until those notice entries are resolved.
+> The current checkout still contains DamienG font files and an Amiga Workbench
+> screenshot whose source-redistribution permission is unresolved. Do not
+> publish or redistribute the complete source tree until those notice entries
+> are resolved.

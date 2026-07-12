@@ -57,19 +57,6 @@ https://i0.wp.com/geekometry.com/wp-content/uploads/2013/11/workbench13_bootscre
 The image depicts the copyrighted Amiga user interface and is included as an
 application-internal historical screenshot, not as project branding.
 
-## Macintosh System 6 boot frame
-
-`system6-happy-mac.png` is a native 512x342 framebuffer capture of the Happy
-Mac phase from System 6.0.5 running in the open-source
-[Infinite Mac](https://infinitemac.org/) Mini vMac integration. It replaces the
-former locally reconstructed icon so the ROM-rendered bitmap, placement, and
-one-bit dither pattern remain intact. The captured Apple system artwork is used
-only for this historical startup simulation.
-
-`system6-desktop.png` is a second native 512x342 capture from that same System
-6.0.5 session and supplies the period Finder, disk, document, and Trash icons
-behind the fictional AppleShare authentication dialog.
-
 `tos-1.04-desktop.png` is the CC BY-SA 4.0
 [TOS 1.04 startup screenshot](https://commons.wikimedia.org/wiki/File:TOS_1.04_(Rainbow_TOS).png)
 by MJaap. It preserves the real Rainbow TOS startup mark and GEM disk/trash

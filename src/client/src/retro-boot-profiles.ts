@@ -20,7 +20,7 @@ export interface RetroBootProfile {
   };
   bootStatus: string;
   showBootArtwork?: boolean;
-  graphicalShell?: "risc-os" | "atari-st" | "lisa" | "irix" | "nextstep" | "macintosh" | "os2";
+  graphicalShell?: "risc-os" | "atari-st" | "lisa" | "irix" | "nextstep" | "os2";
   specialBoot?: "amiga-guru";
   boot: readonly RetroBootStep[];
   auth: {
@@ -651,34 +651,6 @@ export const RETRO_BOOT_PROFILES: readonly RetroBootProfile[] = [
       verifying: "\n",
       failed: "IKJ56420I USERID OR PASSWORD NOT AUTHORIZED\n",
       granted: "\nIKJ56470I LOGON IN PROGRESS\n",
-    },
-  },
-  {
-    id: "macintosh-system-6",
-    name: "Macintosh System 6",
-    ariaLabel: "Macintosh System 6 terminal authentication console",
-    columns: 80,
-    rows: 24,
-    fontFamily: '"Retro Lisa Console", monospace',
-    fontSize: { desktop: 15, mobile: 7 },
-    colors: { page: "#b9b9b9", border: "#dedede", background: "#ffffff", foreground: "#111111" },
-    bootStatus: "Starting Macintosh System 6",
-    graphicalShell: "macintosh",
-    boot: [
-      step("Welcome to Macintosh.\n", 150),
-      step("System 6.0.8\n\n", 90),
-      step("Finder ................ ready\n", 55),
-      step("MacTCP ................ ready\n", 55),
-      step("Opening WMUX Terminal...\n", 90),
-    ],
-    auth: {
-      ...standardAuth,
-      required: "\nRemote Access\n",
-      usernamePrompt: "User name: ",
-      passwordPrompt: "Password: ",
-      verifying: "Connecting...\n",
-      failed: "The name or password is incorrect.\n",
-      granted: "\nConnection accepted.\n",
     },
   },
   {

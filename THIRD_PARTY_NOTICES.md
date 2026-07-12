@@ -54,11 +54,11 @@ The Atari TOS 1.04 screenshot is by MJaap and remains available under
 [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) from its
 [Wikimedia Commons source](https://commons.wikimedia.org/wiki/File:TOS_1.04_(Rainbow_TOS).png).
 
-The Amiga Workbench and Macintosh System 6 raster references are documented in
+The Amiga Workbench raster reference is documented in
 [`src/client/src/assets/retro/UPSTREAM.md`](src/client/src/assets/retro/UPSTREAM.md).
-They are not covered by wmux's MIT license, and redistribution permission has
-not yet been established. They require resolution before this source checkout
-is redistributed publicly.
+It is not covered by wmux's MIT license, and redistribution permission has not
+yet been established. It requires resolution before this source checkout is
+redistributed publicly.
 
 All product names and trademarks belong to their respective owners. Historical
 references identify the systems being simulated and do not imply affiliation

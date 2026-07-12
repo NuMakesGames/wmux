@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 
-const system6HappyMac = new URL("./assets/retro/system6-happy-mac.png", import.meta.url).href;
 const msxLogo = new URL("./assets/retro/logos/msx.svg", import.meta.url).href;
 const nextLogo = new URL("./assets/retro/logos/next.svg", import.meta.url).href;
 const sgiLogo = new URL("./assets/retro/logos/sgi.svg", import.meta.url).href;
@@ -146,14 +145,6 @@ export const RETRO_BOOT_ARTWORK: Readonly<Record<string, RetroBootArtworkDefinit
     kind: "terminal",
     label: "3270",
     framebuffer: [720, 350],
-    hardEdges: true,
-  },
-  "macintosh-system-6": {
-    kind: "window",
-    label: "Mac",
-    asset: system6HappyMac,
-    framebuffer: [512, 342],
-    fullFrame: true,
     hardEdges: true,
   },
   "ti-99-4a": { kind: "cartridge", label: "TI", framebuffer: [256, 192], hardEdges: true },
