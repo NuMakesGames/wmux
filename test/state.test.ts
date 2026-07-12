@@ -45,6 +45,25 @@ test("legacy state is migrated and rewritten with an explicit schema version", (
   });
 });
 
+test("legacy terminal pane kinds are removed during migration", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const legacy = store.snapshot() as unknown as Record<string, unknown>;
+    delete legacy.schemaVersion;
+    const workspaces = legacy.workspaces as Array<{
+      tabs: Array<{ panes: Array<Record<string, unknown>> }>;
+    }>;
+    workspaces[0].tabs[0].panes[0].kind = "terminal";
+    fs.writeFileSync(filePath, JSON.stringify(legacy));
+
+    const migrated = new StateStore(machines, filePath);
+    assert.equal(migrated.snapshot().workspaces.length, 1);
+    const persisted = fs.readFileSync(filePath, "utf8");
+    assert.doesNotMatch(persisted, /"kind"\s*:\s*"terminal"/);
+    assert.equal(JSON.parse(persisted).schemaVersion, CURRENT_STATE_SCHEMA_VERSION);
+  });
+});
+
 test("state recovers from the last validated backup", () => {
   withTempState((filePath, dir) => {
     const store = new StateStore(machines, filePath);

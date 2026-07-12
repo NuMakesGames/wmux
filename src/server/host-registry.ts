@@ -138,11 +138,20 @@ const persistedRecordFields = {
 const legacyPersistedRecordSchema = z
   .object({
     ...persistedRecordFields,
+    observedAddress: persistedRecordFields.observedAddress.optional(),
+    remoteAddress: z.string().refine(isAllowedRegistrationAddress, "invalid remote address").optional(),
     machine: persistedMachineSchema,
     bootstrapToken: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/).optional(),
   })
   .passthrough()
-  .refine((record) => record.id === record.machine.id, { message: "record id does not match machine id" });
+  .superRefine((record, context) => {
+    if (record.id !== record.machine.id) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "record id does not match machine id" });
+    }
+    if (!record.observedAddress && !record.remoteAddress) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "record is missing its observed address" });
+    }
+  });
 
 const persistedRecordSchema = z
   .object({
@@ -153,7 +162,9 @@ const persistedRecordSchema = z
   .strict()
   .refine((record) => record.id === record.machine.id, { message: "record id does not match machine id" });
 
-const legacyPersistedSchema = z.object({ hosts: z.array(z.unknown()).optional() }).passthrough();
+const legacyPersistedSchema = z
+  .object({ hosts: z.union([z.array(z.unknown()), z.record(z.unknown())]).optional() })
+  .passthrough();
 const persistedSchema = z
   .object({
     schemaVersion: z.literal(CURRENT_HOST_REGISTRY_SCHEMA_VERSION),
@@ -373,7 +384,9 @@ export class HostRegistry extends EventEmitter {
       currentSchema = !migrated;
       const persisted = migrated ? legacyPersistedSchema.parse(input) : persistedSchema.parse(input);
       const loadedHosts = new Map<string, RegisteredHostRecord>();
-      for (const recordInput of persisted.hosts ?? []) {
+      const persistedHosts = persisted.hosts ?? [];
+      const recordInputs = Array.isArray(persistedHosts) ? persistedHosts : Object.values(persistedHosts);
+      for (const recordInput of recordInputs) {
         const parsed = (migrated ? legacyPersistedRecordSchema : persistedRecordSchema).safeParse(recordInput);
         if (!parsed.success) {
           if (!migrated) throw new InvalidHostRegistryError(`record failed validation: ${parsed.error.message}`);
@@ -381,6 +394,9 @@ export class HostRegistry extends EventEmitter {
           continue;
         }
         const record = parsed.data;
+        const legacyRemoteAddress = "remoteAddress" in record && typeof record.remoteAddress === "string"
+          ? record.remoteAddress
+          : undefined;
         if (!migrated && loadedHosts.has(record.id)) {
           throw new InvalidHostRegistryError(`duplicate machine id: ${record.id}`);
         }
@@ -391,7 +407,8 @@ export class HostRegistry extends EventEmitter {
           lastSeenAt: record.lastSeenAt,
           expiresAt: record.expiresAt,
           ttlMs: record.ttlMs,
-          observedAddress: normalizeIpAddress(record.observedAddress) ?? record.observedAddress,
+          observedAddress: normalizeIpAddress(record.observedAddress ?? legacyRemoteAddress ?? "") ??
+            record.observedAddress ?? legacyRemoteAddress ?? "",
           bootstrapToken: record.bootstrapToken ?? crypto.randomBytes(32).toString("base64url"),
           previousBootstrapToken: record.previousBootstrapToken,
           previousBootstrapTokenExpiresAt: record.previousBootstrapTokenExpiresAt,

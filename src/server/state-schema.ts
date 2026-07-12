@@ -148,6 +148,38 @@ export interface ParsedPersistedState {
   migrated: boolean;
 }
 
+const migrateLegacyState = (record: Record<string, unknown>): Record<string, unknown> => ({
+  ...record,
+  schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
+  workspaces: Array.isArray(record.workspaces)
+    ? record.workspaces.map((workspace) => {
+      if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) return workspace;
+      const workspaceRecord = workspace as Record<string, unknown>;
+      return {
+        ...workspaceRecord,
+        tabs: Array.isArray(workspaceRecord.tabs)
+          ? workspaceRecord.tabs.map((tab) => {
+            if (!tab || typeof tab !== "object" || Array.isArray(tab)) return tab;
+            const tabRecord = tab as Record<string, unknown>;
+            return {
+              ...tabRecord,
+              panes: Array.isArray(tabRecord.panes)
+                ? tabRecord.panes.map((pane) => {
+                  if (!pane || typeof pane !== "object" || Array.isArray(pane)) return pane;
+                  const paneRecord = pane as Record<string, unknown>;
+                  if (paneRecord.kind !== "terminal") return pane;
+                  const { kind: _legacyKind, ...migratedPane } = paneRecord;
+                  return migratedPane;
+                })
+                : tabRecord.panes,
+            };
+          })
+          : workspaceRecord.tabs,
+      };
+    })
+    : record.workspaces,
+});
+
 export const parsePersistedState = (input: unknown): ParsedPersistedState => {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("state must be a JSON object");
@@ -161,7 +193,7 @@ export const parsePersistedState = (input: unknown): ParsedPersistedState => {
     throw new Error("state schemaVersion must be a supported integer");
   }
   const migrated = rawVersion !== CURRENT_STATE_SCHEMA_VERSION;
-  const candidate = migrated ? { ...record, schemaVersion: CURRENT_STATE_SCHEMA_VERSION } : record;
+  const candidate = migrated ? migrateLegacyState(record) : record;
   return { state: persistedStateSchema.parse(candidate), migrated };
 };
 
