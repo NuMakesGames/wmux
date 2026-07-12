@@ -14,11 +14,11 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "0.6"
+VERSION = "0.7"
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
@@ -35,6 +35,11 @@ JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 PROCESS_TERMINATE = 0x0001
 PROCESS_SET_QUOTA = 0x0100
+AGENT_RESTART_EXIT_CODE = 75
+
+
+class AgentDrainingError(RuntimeError):
+    pass
 
 
 class WindowsJobApi:
@@ -598,7 +603,13 @@ class ConptyBackend:
 
 
 class Session:
-    def __init__(self, session_id: str, config: dict[str, Any], payload: dict[str, Any]):
+    def __init__(
+        self,
+        session_id: str,
+        config: dict[str, Any],
+        payload: dict[str, Any],
+        on_exit: Callable[[], None] | None = None,
+    ):
         self.id = session_id
         self.config = config
         self.cwd = str(payload.get("cwd") or config_string(config, "cwd") or os.path.expanduser("~"))
@@ -609,6 +620,7 @@ class Session:
         self.cwd_reporter = CwdReporter()
         self.exited = False
         self.exit_code: int | None = None
+        self.on_exit = on_exit
         self.backend = self._create_backend(payload)
         self.reader = threading.Thread(target=self._read_output, name=f"wmux-agent-reader-{session_id}", daemon=True)
         self.reader.start()
@@ -690,6 +702,8 @@ class Session:
             self._append(f"\r\n[wmux-agent] process exited with code {self.exit_code}\r\n".encode("utf-8"))
             with self.condition:
                 self.condition.notify_all()
+            if self.on_exit:
+                self.on_exit()
 
     def _append(self, data: bytes) -> None:
         reported_cwds = self.cwd_reporter.feed(data)
@@ -710,13 +724,20 @@ class AgentState:
         self.backend = configured_backend(config)
         self.sessions: dict[str, Session] = {}
         self.lock = threading.Lock()
+        self.draining = False
+        self.restart_when_idle = False
+        self.restart_requested = False
+        self.restart_scheduled = False
+        self.shutdown_callback: Callable[[], None] | None = None
 
     def get_or_create(self, session_id: str, payload: dict[str, Any]) -> Session:
         with self.lock:
             existing = self.sessions.get(session_id)
             if existing and not existing.exited:
                 return existing
-            session = Session(session_id, self.config, payload)
+            if self.draining:
+                raise AgentDrainingError("agent is draining; close existing panes or cancel the drain before creating a new pane")
+            session = Session(session_id, self.config, payload, self._session_exited)
             self.sessions[session_id] = session
             return session
 
@@ -730,11 +751,69 @@ class AgentState:
         if not session:
             return False
         session.terminate()
+        self._schedule_restart_if_idle()
         return True
 
     def list_sessions(self) -> list[dict[str, Any]]:
         with self.lock:
             return [session.snapshot() for session in self.sessions.values()]
+
+    def health(self) -> dict[str, Any]:
+        with self.lock:
+            active_sessions = sum(1 for session in self.sessions.values() if not session.exited)
+            return {
+                "sessions": len(self.sessions),
+                "activeSessions": active_sessions,
+                "draining": self.draining,
+                "restartWhenIdle": self.restart_when_idle,
+            }
+
+    def begin_drain(self, restart_when_idle: bool) -> dict[str, Any]:
+        with self.lock:
+            self.draining = True
+            self.restart_when_idle = restart_when_idle
+        self._schedule_restart_if_idle()
+        return self.health()
+
+    def cancel_drain(self) -> dict[str, Any]:
+        with self.lock:
+            if not self.restart_requested:
+                self.draining = False
+                self.restart_when_idle = False
+        return self.health()
+
+    def set_shutdown_callback(self, callback: Callable[[], None]) -> None:
+        self.shutdown_callback = callback
+
+    def _session_exited(self) -> None:
+        self._schedule_restart_if_idle()
+
+    def _schedule_restart_if_idle(self) -> None:
+        with self.lock:
+            active_sessions = any(not session.exited for session in self.sessions.values())
+            if (
+                active_sessions
+                or not self.draining
+                or not self.restart_when_idle
+                or self.restart_requested
+                or self.restart_scheduled
+            ):
+                return
+            self.restart_scheduled = True
+        timer = threading.Timer(0.25, self._restart_if_still_idle)
+        timer.daemon = True
+        timer.start()
+
+    def _restart_if_still_idle(self) -> None:
+        with self.lock:
+            self.restart_scheduled = False
+            active_sessions = any(not session.exited for session in self.sessions.values())
+            if active_sessions or not self.draining or not self.restart_when_idle or self.restart_requested:
+                return
+            self.restart_requested = True
+            callback = self.shutdown_callback
+        if callback:
+            callback()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -757,13 +836,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
         if parts == ["health"]:
+            lifecycle = self.state.health()
             self.send_json(
                 {
                     "ok": True,
                     "version": VERSION,
                     "machine": config_string(self.state.config, "machine", "windows"),
                     "pid": os.getpid(),
-                    "sessions": len(self.state.sessions),
+                    **lifecycle,
                     "backend": self.state.backend,
                     "processTree": "windows-job",
                     "helperBundleVersion": helper_bundle_version(self.state.config),
@@ -777,6 +857,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parts == ["sessions"]:
             self.send_json({"sessions": self.state.list_sessions()})
+            return
+        if parts == ["drain"]:
+            self.send_json(self.state.health())
             return
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "output":
             session = self.require_session(parts[1])
@@ -795,11 +878,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if parts == ["drain"]:
+            body = self.read_json()
+            self.send_json(self.state.begin_drain(body.get("restartWhenIdle") is not False))
+            return
         if len(parts) == 2 and parts[0] == "sessions":
             try:
                 payload = self.read_json()
                 stage_helper_bundle(self.state.config, payload)
                 session = self.state.get_or_create(parts[1], payload)
+            except AgentDrainingError as error:
+                self.send_json({"error": "agent_draining", "message": str(error)}, status=503)
+                return
             except Exception as error:
                 self.send_json({"error": "session_start_failed", "message": str(error)}, status=500)
                 return
@@ -830,6 +920,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if parts == ["drain"]:
+            self.send_json(self.state.cancel_drain())
+            return
         if len(parts) == 2 and parts[0] == "sessions":
             self.send_json({"removed": self.state.delete(parts[1])})
             return
@@ -873,12 +966,15 @@ def main() -> int:
         raise SystemExit(f"wmux-windows-agent: refusing to bind non-private host {host}")
     Handler.state = AgentState(config)
     server = ThreadingHTTPServer((host, port), Handler)
+    Handler.state.set_shutdown_callback(lambda: threading.Thread(target=server.shutdown, daemon=True).start())
     print(f"wmux-windows-agent: listening on http://{host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         return 0
-    return 0
+    finally:
+        server.server_close()
+    return AGENT_RESTART_EXIT_CODE if Handler.state.restart_requested else 0
 
 
 if __name__ == "__main__":

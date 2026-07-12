@@ -41,6 +41,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 
 - Server state lives in `~/.wmux/state.json` unless `WMUX_STATE_PATH` is set.
 - Server-backed UI settings live in `~/.wmux/settings.json` unless `WMUX_SETTINGS_PATH` is set.
+- State and settings use explicit schema versions, atomic owner-only writes, validated rolling backups, and downgrade refusal. Add a migration before changing a persisted shape.
 - Machine definitions are read from `./wmux.config.json` first, then `~/.wmux/config.json`.
 - Keep remote-machine behavior explicit in `MachineConfig`; do not hide durable/session behavior in UI-only state.
 - The `local` and SSH machines default to durable `tmux`/`screen` sessions via `sessionBackend: "auto"`.
@@ -113,9 +114,9 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 ## Current Gaps To Preserve In Docs
 
 - Remote per-platform wmux agents are partial. Windows has an experimental ConPTY session agent; Linux/macOS agents are not implemented.
-- Windows SSH PowerShell is validated on 9800x3d. The experimental Windows session agent now uses pywinpty-backed ConPTY by default and contains each pane in a kill-on-close Windows Job Object, but broad full-screen app validation and Windows-agent-restart durability are still pending.
+- Windows SSH PowerShell is validated on 9800x3d. The experimental Windows session agent uses pywinpty-backed ConPTY, contains each pane in a kill-on-close Windows Job Object, and supports staged-update draining. Broad full-screen app validation and process preservation across unexpected/forced Windows-agent restarts are still pending.
 - Machine management is file-based; there is no in-app editor.
-- There is no login/token gate beyond private-network assumptions and request validation.
+- Authentication exists for browser and helper access, but browser tokens remain in local storage/WebSocket query parameters and helpers still receive a broadly privileged shared token; scoped capabilities and cookie-backed browser sessions are not implemented.
 - Full cmux-style transcript auto-naming is heuristic. Claude and Codex hook paths exist; OpenCode installation is not implemented.
 - Kitty graphics support is partial. File/shared-memory transfer, animation frames, z-index layering, scrollback-persistent placement, Sixel, and iTerm2 image protocols are not complete.
 - Command run tracking is explicit through `wmux-run`; arbitrary shell command detection is not implemented.

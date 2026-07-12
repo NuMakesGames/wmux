@@ -18,6 +18,15 @@ npm run start -- --host 127.0.0.1 --port 3478
 
 For development, `npm run dev` serves the client through Vite with HMR. `npm run typecheck` covers the client and server TypeScript projects, and `npm test` runs the node:test suite in `test/`.
 
+Before pushing a change, run the complete local gate:
+
+```bash
+npm run check
+npm run test:e2e
+```
+
+`check` runs unit/integration tests, both TypeScript checks, script syntax checks, and the production build. Playwright starts an isolated loopback-only wmux instance with separate state, settings, attachments, and a local-only machine config, then exercises desktop Chromium plus phone-sized Chromium and WebKit flows. `npm run test:e2e:chromium` is the faster browser subset. Gitea Actions runs the full gate on pushes and pull requests.
+
 To expose on Tailscale, bind to this machine's Tailscale IP:
 
 ```bash
@@ -91,6 +100,8 @@ Put machine definitions in `wmux.config.json` or `~/.wmux/config.json`:
   ]
 }
 ```
+
+Set `WMUX_CONFIG_PATH` to use one explicit config file. When set, wmux will not fall back to the repository or home config, and startup fails if the requested file is missing. This keeps tests and alternate service instances isolated from the dogfood machine inventory.
 
 If the browser accesses wmux through a MagicDNS or reverse-proxy name that is not under `*.ts.net`, set `WMUX_ALLOWED_HOSTS` to a comma-separated allowlist.
 
@@ -398,6 +409,14 @@ The agent listens on the configured Tailscale/internal host and owns pane proces
 
 The Windows agent uses `pywinpty` with its native ConPTY backend by default, so pane input, resize, rich line editing, and full-screen terminal applications go through Windows' pseudo console API instead of redirected PowerShell stdio. Each pane process is assigned to an agent-held Windows Job Object with kill-on-close enabled, so explicitly closing a pane also terminates descendants that detached from their original shell. The job remains alive when the wmux server merely detaches, preserving sessions across service restarts. The agent also answers fixed device-attribute and operating-status queries beside ConPTY to avoid delayed browser round trips being echoed into PSReadLine; browser terminal replies are tagged so locally answered duplicates can be discarded, while cursor-position replies still come from the renderer that owns cursor state. A `backend: "stdio"` config value remains available as an explicit fallback for debugging older hosts.
 
+Agent 0.7 and later support safe staged upgrades. New helper files may be installed while panes are active; activate them with:
+
+```powershell
+wmux-windows-agent-service activate-update
+```
+
+The running agent enters drain mode: existing panes continue, new pane creation pauses, and the Scheduled Task restarts automatically after the last pane closes. `cancel-update` leaves the current agent running and accepts new panes again. A plain `restart` refuses to proceed while pane sessions are active; `restart --force` is the explicit destructive override.
+
 ## Workspace Titles
 
 wmux has cmux-inspired generated title support. Generated titles are tracked separately from user-owned titles, so an auto update cannot overwrite a workspace or tab you manually named.
@@ -471,7 +490,7 @@ The settings modal can quit local duplicate/orphan `tmux` or `screen` sessions a
 
 ## Restart Persistence
 
-wmux persists workspace/tab/pane metadata in `~/.wmux/state.json`. For local and SSH machines using the default durable backend, each pane also maps to a stable `tmux`/`screen` session named from the pane ID. After a wmux service restart, reopening the pane attaches to that durable session instead of starting a fresh shell.
+wmux persists workspace/tab/pane metadata in `~/.wmux/state.json`. State and settings files carry explicit schema versions, are written atomically with owner-only permissions, and retain one rolling `.bak` file. A malformed primary file is quarantined and restored from its validated backup when possible. A file from a newer schema refuses to open instead of being downgraded or overwritten. For local and SSH machines using the default durable backend, each pane also maps to a stable `tmux`/`screen` session named from the pane ID. After a wmux service restart, reopening the pane attaches to that durable session instead of starting a fresh shell.
 
 While the service is running, wmux maintains a headless `ghostty-web` VT checkpoint alongside each pane's bounded raw replay. Normal shells retain raw scrollback until that replay reaches its cap. Full-screen applications and panes with truncated replay instead late-attach from the authoritative current screen, cursor, colors, and input modes, avoiding corrupt redraws caused by starting from an arbitrary ANSI tail. These checkpoints are memory-only; durable `tmux`/`screen` clients still provide the redraw path after a service restart.
 

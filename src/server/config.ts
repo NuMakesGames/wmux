@@ -33,7 +33,7 @@ const userSchema = z
   .regex(/^[A-Za-z0-9._-]+$/, "user must be a plain account name")
   .optional();
 
-const machineSchema = z.object({
+export const machineSchema = z.object({
   id: machineIdSchema,
   name: machineNameSchema,
   kind: z.enum(["local", "ssh", "powershell", "powershell-ssh", "service"]),
@@ -58,10 +58,9 @@ export interface AppConfig {
   machines: MachineConfig[];
 }
 
-const candidates = (): string[] => [
-  path.resolve(process.cwd(), "wmux.config.json"),
-  path.join(os.homedir(), ".wmux", "config.json"),
-];
+const candidates = (): string[] => process.env.WMUX_CONFIG_PATH
+  ? [path.resolve(process.env.WMUX_CONFIG_PATH)]
+  : [path.resolve(process.cwd(), "wmux.config.json"), path.join(os.homedir(), ".wmux", "config.json")];
 
 export const loadConfig = (): AppConfig => {
   for (const candidate of candidates()) {
@@ -71,6 +70,9 @@ export const loadConfig = (): AppConfig => {
     const machines = parsed.machines ?? [];
     const hasLocal = machines.some((machine) => machine.id === "local");
     return { machines: hasLocal ? machines : [localMachine(), ...machines] };
+  }
+  if (process.env.WMUX_CONFIG_PATH) {
+    throw new Error(`WMUX_CONFIG_PATH does not exist: ${path.resolve(process.env.WMUX_CONFIG_PATH)}`);
   }
   return { machines: [localMachine()] };
 };

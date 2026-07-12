@@ -1,0 +1,11 @@
+{
+  "machines": [
+    {
+      "id": "local",
+      "name": "Local",
+      "kind": "local",
+      "sessionBackend": "pty",
+      "shell": "/bin/sh"
+    }
+  ]
+}

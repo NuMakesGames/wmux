@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { configSchema } from "../src/server/config.js";
+import { configSchema, loadConfig } from "../src/server/config.js";
 
 const machine = (overrides: Record<string, unknown>) => ({
   machines: [{ id: "box", name: "Box", kind: "ssh", host: "box.ts.net", user: "me", ...overrides }],
@@ -30,4 +33,21 @@ test("rejects hosts and users with shell-significant characters", () => {
   assert.equal(configSchema.safeParse(machine({ host: "host name" })).success, false);
   assert.equal(configSchema.safeParse(machine({ user: "me;id" })).success, false);
   assert.equal(configSchema.safeParse(machine({ user: "me me" })).success, false);
+});
+
+test("WMUX_CONFIG_PATH isolates explicit runtime and test configuration", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-config-"));
+  const configPath = path.join(dir, "config.json");
+  const previous = process.env.WMUX_CONFIG_PATH;
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(machine({ id: "isolated", name: "Isolated" })));
+    process.env.WMUX_CONFIG_PATH = configPath;
+    assert.deepEqual(loadConfig().machines.map((entry) => entry.id), ["local", "isolated"]);
+    process.env.WMUX_CONFIG_PATH = path.join(dir, "missing.json");
+    assert.throws(() => loadConfig(), /WMUX_CONFIG_PATH does not exist/);
+  } finally {
+    if (previous === undefined) delete process.env.WMUX_CONFIG_PATH;
+    else process.env.WMUX_CONFIG_PATH = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

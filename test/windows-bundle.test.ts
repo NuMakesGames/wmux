@@ -84,3 +84,15 @@ test("health probe reports the staged and expected bundle versions", () => {
 test("expected agent version reads the shipped script's VERSION constant", () => {
   assert.match(expectedWindowsAgentVersion(), /^\d+\.\d+$/);
 });
+
+test("Windows agent service drains staged updates and refuses unsafe restarts", () => {
+  const bundle = buildWindowsHelperBundle(machine);
+  const helper = bundle.files.find((file) => file.name === "wmux-windows-agent-service.ps1");
+  assert.ok(helper, "bundle includes wmux-windows-agent-service.ps1");
+  const content = Buffer.from(helper.dataBase64, "base64").toString("utf8");
+  assert.ok(content.includes("'activate-update'"));
+  assert.ok(content.includes("'/drain'"));
+  assert.ok(content.includes("restartWhenIdle"));
+  assert.ok(content.includes("Refusing to restart"));
+  assert.ok(content.includes("restart --force"));
+});

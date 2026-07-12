@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { StateStore } from "../src/server/state.js";
+import { CURRENT_STATE_SCHEMA_VERSION } from "../src/server/state-schema.js";
 import type { MachineConfig } from "../src/server/types.js";
 
 const machines: MachineConfig[] = [{ id: "local", name: "Local", kind: "local" }];
@@ -23,10 +24,48 @@ test("fresh store creates one workspace and persists atomically", () => {
     const snapshot = store.snapshot();
     assert.equal(snapshot.workspaces.length, 1);
     assert.ok(snapshot.revision >= 1);
+    assert.equal(snapshot.schemaVersion, CURRENT_STATE_SCHEMA_VERSION);
     assert.ok(fs.existsSync(filePath));
     // No temp file should be left behind after an atomic write.
     assert.equal(fs.readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
     JSON.parse(fs.readFileSync(filePath, "utf8")); // valid JSON
+  });
+});
+
+test("legacy state is migrated and rewritten with an explicit schema version", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const legacy = store.snapshot() as unknown as Record<string, unknown>;
+    delete legacy.schemaVersion;
+    fs.writeFileSync(filePath, JSON.stringify(legacy));
+
+    const migrated = new StateStore(machines, filePath);
+    assert.equal(migrated.snapshot().schemaVersion, CURRENT_STATE_SCHEMA_VERSION);
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).schemaVersion, CURRENT_STATE_SCHEMA_VERSION);
+  });
+});
+
+test("state recovers from the last validated backup", () => {
+  withTempState((filePath, dir) => {
+    const store = new StateStore(machines, filePath);
+    store.createWorkspace("local");
+    store.flush();
+    assert.ok(fs.existsSync(`${filePath}.bak`));
+    fs.writeFileSync(filePath, "{broken");
+
+    const recovered = new StateStore(machines, filePath);
+    assert.ok(recovered.snapshot().workspaces.length >= 1);
+    assert.ok(fs.readdirSync(dir).some((name) => name.startsWith("state.json.corrupt-")));
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).schemaVersion, CURRENT_STATE_SCHEMA_VERSION);
+  });
+});
+
+test("newer state schemas refuse downgrade without moving or overwriting the file", () => {
+  withTempState((filePath, dir) => {
+    fs.writeFileSync(filePath, JSON.stringify({ schemaVersion: CURRENT_STATE_SCHEMA_VERSION + 1 }));
+    assert.throws(() => new StateStore(machines, filePath), /newer than this wmux build supports/);
+    assert.ok(fs.existsSync(filePath));
+    assert.equal(fs.readdirSync(dir).some((name) => name.includes(".corrupt-")), false);
   });
 });
 

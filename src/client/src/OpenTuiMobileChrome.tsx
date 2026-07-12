@@ -116,7 +116,7 @@ export function OpenTuiMobileChrome(props: OpenTuiMobileChromeProps) {
   }, []);
 
   return (
-    <header className="open-tui-mobile-chrome" aria-label="Mobile session controls">
+    <header className="open-tui-mobile-chrome" role="banner" aria-label="Mobile session controls">
       <canvas ref={canvasRef} className="open-tui-mobile-chrome-canvas" aria-hidden="true" />
       <div className="open-tui-mobile-chrome-status visually-hidden" aria-live="polite">
         {props.workspaceName}, {props.statusLabel}, {props.subtitle}

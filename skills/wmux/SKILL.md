@@ -38,6 +38,7 @@ The helper reads `WMUX_URL`/`~/.wmux/url` and `WMUX_TOKEN`/`~/.wmux/token`; envi
 - Honor current repo and host instructions. In the homelab repo, shell commands are expected to be prefixed with `rtk`.
 - Do not weaken wmux bind, Host/Origin, token, CORS, or helper-staging protections.
 - For Windows machines from homelab, use `kind: "powershell-ssh"` behavior. Do not switch to legacy WSMan `powershell` unless explicitly debugging that path.
+- Prefer `wmux-windows-agent-service activate-update` for agent upgrades. It drains existing panes and restarts after the last pane closes; never use `restart --force` unless terminating every active agent-owned pane is explicitly intended.
 - Check `/api/bootstrap` for `reachable`, `reason`, and `backendDetail` before assuming a machine is ready. Windows status includes helper, stream, Python/FFmpeg, and agent health probes.
 - Use exact machine ids from the current config. Do not rely on stale docs if `wmux.config.json` or `/api/bootstrap` differs.
 - Always give automated work a descriptive `--title`; `wmuxctl open`, `run`, and `ps` reuse an existing workspace with that exact title by default. Use `--new` only when a genuinely separate workspace is wanted.

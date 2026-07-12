@@ -39,6 +39,9 @@ export interface WindowsAgentHealth {
   machine?: string;
   pid?: number;
   sessions?: number;
+  activeSessions?: number;
+  draining?: boolean;
+  restartWhenIdle?: boolean;
   backend?: string;
   processTree?: string;
   helperBundleVersion?: string;

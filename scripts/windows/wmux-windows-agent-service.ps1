@@ -10,6 +10,7 @@ $Agent = Join-Path $HelperDir 'wmux-windows-agent.py'
 $Wrapper = Join-Path $HelperDir 'wmux-windows-agent-task.ps1'
 $OutLog = Join-Path $LogDir 'windows-agent.out.log'
 $ErrLog = Join-Path $LogDir 'windows-agent.err.log'
+$Force = @($args) -contains '--force'
 
 function ConvertTo-PowerShellLiteral {
   param([string]$Value)
@@ -98,6 +99,50 @@ function Stop-AgentProcesses {
     }
 }
 
+function Get-AgentEndpoint {
+  $Document = if (Test-Path -LiteralPath $Config -PathType Leaf) {
+    Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+  } else {
+    [pscustomobject]@{}
+  }
+  $HostValue = if ($Document.host) { [string]$Document.host } else { '127.0.0.1' }
+  if ($HostValue -in @('0.0.0.0', '::')) { $HostValue = '127.0.0.1' }
+  $PortValue = if ($Document.port) { [int]$Document.port } else { 3481 }
+  [pscustomobject]@{
+    url = "http://${HostValue}:$PortValue"
+    token = if ($Document.token) { [string]$Document.token } elseif ($env:WMUX_AGENT_TOKEN) { $env:WMUX_AGENT_TOKEN } else { '' }
+  }
+}
+
+function Invoke-AgentRequest {
+  param(
+    [ValidateSet('GET', 'POST', 'DELETE')][string]$Method,
+    [string]$Path,
+    [hashtable]$Body
+  )
+  $Endpoint = Get-AgentEndpoint
+  $Headers = @{}
+  if ($Endpoint.token) { $Headers.Authorization = "Bearer $($Endpoint.token)" }
+  $Arguments = @{
+    Method = $Method
+    Uri = "$($Endpoint.url)$Path"
+    Headers = $Headers
+    TimeoutSec = 5
+  }
+  if ($Body) {
+    $Arguments.ContentType = 'application/json'
+    $Arguments.Body = $Body | ConvertTo-Json -Compress
+  }
+  Invoke-RestMethod @Arguments
+}
+
+function Get-ActiveSessionCount {
+  param($Health)
+  if ($null -ne $Health.activeSessions) { return [int]$Health.activeSessions }
+  if ($null -ne $Health.sessions) { return [int]$Health.sessions }
+  return 0
+}
+
 function New-WmuxTaskSettings {
   New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -123,7 +168,7 @@ function Get-AgentLogonType {
 }
 
 function Show-Usage {
-  Write-Error 'usage: wmux-windows-agent-service [install|restart|stop|uninstall|status|logs|diagnose]'
+  Write-Error 'usage: wmux-windows-agent-service [install|activate-update|cancel-update|restart [--force]|stop|uninstall|status|logs|diagnose]'
 }
 
 switch ($ActionName) {
@@ -147,6 +192,23 @@ switch ($ActionName) {
     Write-Output "Logs: $LogDir"
   }
   'restart' {
+    if (-not $Force) {
+      $DrainStarted = $false
+      try {
+        $Health = Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $false }
+        $DrainStarted = $true
+      } catch {
+        $Health = Invoke-AgentRequest -Method GET -Path '/health'
+      }
+      $ActiveSessions = Get-ActiveSessionCount $Health
+      if ($ActiveSessions -gt 0) {
+        if ($DrainStarted) {
+          try { Invoke-AgentRequest -Method DELETE -Path '/drain' | Out-Null } catch {}
+        }
+        Write-Error "Refusing to restart $TaskName with $ActiveSessions active pane session(s). Use activate-update to drain safely, or restart --force to terminate them."
+        exit 3
+      }
+    }
     # Run the stop/kill/start sequence in a detached process. When restart is
     # invoked from inside an agent-owned pane, Stop-AgentProcesses kills this
     # script's own console tree, and an inline Start-ScheduledTask would never
@@ -170,6 +232,25 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     )
     Write-Output "Restarting $TaskName (detached; survives this console)"
   }
+  'activate-update' {
+    try {
+      $Drain = Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true }
+    } catch {
+      Write-Error "The running agent does not support safe drain activation. Stage the current helper, then restart --force only when losing active panes is acceptable. $($_.Exception.Message)"
+      exit 4
+    }
+    $ActiveSessions = Get-ActiveSessionCount $Drain
+    if ($ActiveSessions -gt 0) {
+      Write-Output "Update staged; agent is draining $ActiveSessions active pane session(s)."
+      Write-Output 'New pane creation is paused. The agent will restart automatically after the final pane closes.'
+    } else {
+      Write-Output 'Update staged; no active panes remain. Agent restart has been scheduled.'
+    }
+  }
+  'cancel-update' {
+    $Drain = Invoke-AgentRequest -Method DELETE -Path '/drain'
+    Write-Output "Drain cancelled; active pane sessions: $(Get-ActiveSessionCount $Drain)"
+  }
   'stop' {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Stop-AgentProcesses
@@ -183,6 +264,11 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
   'status' {
     Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Format-List *
     Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue | Format-List *
+    try {
+      Invoke-AgentRequest -Method GET -Path '/health' | Select-Object version, backend, processTree, activeSessions, draining, restartWhenIdle | Format-List
+    } catch {
+      Write-Warning "Agent health unavailable: $($_.Exception.Message)"
+    }
   }
   'logs' {
     $Files = @()

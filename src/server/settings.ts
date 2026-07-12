@@ -2,9 +2,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { z } from "zod";
 import type { WmuxSettings } from "./types.js";
 
 const defaultPath = (): string => path.join(os.homedir(), ".wmux", "settings.json");
+export const CURRENT_SETTINGS_SCHEMA_VERSION = 1;
+
+const persistedSettingsSchema = z.object({
+  schemaVersion: z.literal(CURRENT_SETTINGS_SCHEMA_VERSION),
+  terminalFontSize: z.unknown().optional(),
+  terminalScrollbackRows: z.unknown().optional(),
+  machineAliases: z.unknown().optional(),
+}).strict();
 
 export const defaultSettings: WmuxSettings = {
   terminalFontSize: 14,
@@ -37,18 +46,88 @@ export class SettingsStore extends EventEmitter {
 
   save(emitChange = true): void {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(this.settings, null, 2));
+    const tempPath = `${this.filePath}.tmp`;
+    try {
+      const handle = fs.openSync(tempPath, "w", 0o600);
+      try {
+        fs.writeFileSync(handle, JSON.stringify({ schemaVersion: CURRENT_SETTINGS_SCHEMA_VERSION, ...this.settings }, null, 2));
+        fs.fsyncSync(handle);
+      } finally {
+        fs.closeSync(handle);
+      }
+      fs.chmodSync(tempPath, 0o600);
+      if (fs.existsSync(this.filePath)) {
+        fs.copyFileSync(this.filePath, this.backupPath());
+        fs.chmodSync(this.backupPath(), 0o600);
+      }
+      fs.renameSync(tempPath, this.filePath);
+    } catch (error) {
+      fs.rmSync(tempPath, { force: true });
+      throw error;
+    }
     if (emitChange) this.emit("change");
   }
 
   private load(): WmuxSettings {
-    if (!fs.existsSync(this.filePath)) return defaultSettings;
-    const raw = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as Partial<WmuxSettings>;
-    return normalizeSettings(raw);
+    if (fs.existsSync(this.filePath)) {
+      const settings = this.tryLoad(this.filePath);
+      if (settings) return settings;
+      this.quarantine(this.filePath);
+    }
+    if (fs.existsSync(this.backupPath())) {
+      const settings = this.tryLoad(this.backupPath());
+      if (settings) {
+        console.error(`wmux: recovered settings from ${this.backupPath()}`);
+        return settings;
+      }
+      this.quarantine(this.backupPath());
+    }
+    return defaultSettings;
+  }
+
+  private tryLoad(filePath: string): WmuxSettings | null {
+    try {
+      const input = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+      if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+      const record = input as Record<string, unknown>;
+      const version = record.schemaVersion;
+      if (typeof version === "number" && Number.isInteger(version) && version > CURRENT_SETTINGS_SCHEMA_VERSION) {
+        throw new Error(
+          `settings schema ${version} is newer than this wmux build supports (${CURRENT_SETTINGS_SCHEMA_VERSION})`,
+        );
+      }
+      const candidate = version === undefined
+        ? { ...record, schemaVersion: CURRENT_SETTINGS_SCHEMA_VERSION }
+        : record;
+      const parsed = persistedSettingsSchema.parse(candidate);
+      return normalizeSettings(parsed);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("newer than this wmux build supports")) throw error;
+      return null;
+    }
+  }
+
+  private backupPath(): string {
+    return `${this.filePath}.bak`;
+  }
+
+  private quarantine(filePath: string): void {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const quarantinePath = `${filePath}.corrupt-${stamp}`;
+      fs.renameSync(filePath, quarantinePath);
+      console.error(`wmux: unreadable settings file quarantined to ${quarantinePath}`);
+    } catch (error) {
+      console.error(`wmux: failed to quarantine unreadable settings file: ${error instanceof Error ? error.message : error}`);
+    }
   }
 }
 
-const normalizeSettings = (input: Partial<WmuxSettings>): WmuxSettings => ({
+const normalizeSettings = (input: {
+  terminalFontSize?: unknown;
+  terminalScrollbackRows?: unknown;
+  machineAliases?: unknown;
+}): WmuxSettings => ({
   terminalFontSize: clampFontSize(input.terminalFontSize),
   terminalScrollbackRows: clampScrollbackRows(input.terminalScrollbackRows),
   machineAliases: cleanAliases(input.machineAliases),

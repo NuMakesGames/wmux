@@ -211,3 +211,56 @@ print(json.dumps({"events": events, "closed": backend.closed}))
     closed: true,
   });
 });
+
+test("Windows agent drain preserves existing sessions and restarts only after the last pane closes", () => {
+  const source = String.raw`
+import json
+import runpy
+import time
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+callbacks = []
+
+class FakeSession:
+    def __init__(self, session_id, config, payload, on_exit):
+        self.id = session_id
+        self.exited = False
+        self.on_exit = on_exit
+    def snapshot(self):
+        return {"id": self.id, "status": "exited" if self.exited else "running"}
+    def terminate(self):
+        self.exited = True
+        self.on_exit()
+
+state = module["AgentState"]({})
+state.set_shutdown_callback(lambda: callbacks.append("restart"))
+module["AgentState"].get_or_create.__globals__["Session"] = FakeSession
+state.get_or_create("pane_one", {})
+drain = state.begin_drain(True)
+same = state.get_or_create("pane_one", {})
+try:
+    state.get_or_create("pane_two", {})
+except module["AgentDrainingError"] as error:
+    blocked = str(error)
+else:
+    blocked = ""
+state.delete("pane_one")
+time.sleep(0.4)
+print(json.dumps({
+    "drain": drain,
+    "sameSession": same.id,
+    "blocked": bool(blocked),
+    "callbacks": callbacks,
+    "restartRequested": state.restart_requested,
+}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    drain: { sessions: 1, activeSessions: 1, draining: true, restartWhenIdle: true },
+    sameSession: "pane_one",
+    blocked: true,
+    callbacks: ["restart"],
+    restartRequested: true,
+  });
+});

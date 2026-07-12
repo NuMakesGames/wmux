@@ -3,6 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { createId } from "./id.js";
+import {
+  CURRENT_STATE_SCHEMA_VERSION,
+  parsePersistedState,
+  type ParsedPersistedState,
+  UnsupportedStateVersionError,
+} from "./state-schema.js";
 import type {
   AgentActivity,
   LayoutNode,
@@ -128,8 +134,24 @@ export class StateStore extends EventEmitter {
     // Write to a temp file and rename so a crash or ENOSPC mid-write can never
     // truncate the live state file — rename is atomic on the same filesystem.
     const tempPath = `${this.filePath}.tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(this.state, null, 2));
-    fs.renameSync(tempPath, this.filePath);
+    try {
+      const handle = fs.openSync(tempPath, "w", 0o600);
+      try {
+        fs.writeFileSync(handle, JSON.stringify(this.state, null, 2));
+        fs.fsyncSync(handle);
+      } finally {
+        fs.closeSync(handle);
+      }
+      fs.chmodSync(tempPath, 0o600);
+      if (fs.existsSync(this.filePath)) {
+        fs.copyFileSync(this.filePath, this.backupPath());
+        fs.chmodSync(this.backupPath(), 0o600);
+      }
+      fs.renameSync(tempPath, this.filePath);
+    } catch (error) {
+      fs.rmSync(tempPath, { force: true });
+      throw error;
+    }
   }
 
   createWorkspace(machineId = "local", cwd?: string, createdBy: "user" | "agent" = "user"): Workspace {
@@ -602,12 +624,27 @@ export class StateStore extends EventEmitter {
   private load(machines: MachineConfig[]): PersistedState {
     if (fs.existsSync(this.filePath)) {
       const restored = this.tryLoadPersisted();
-      if (restored) return { ...this.normalizeRestoredState(restored), machines };
+      if (restored) {
+        const beforeNormalization = JSON.stringify(restored.state);
+        const normalized = { ...this.normalizeRestoredState(restored.state), machines };
+        this.dirty = restored.migrated || JSON.stringify(normalized) !== beforeNormalization;
+        return normalized;
+      }
       // Corrupt/unreadable state: quarantine the bad file rather than crashing
-      // startup, then fall through to a fresh workspace below.
+      // startup. Prefer the last validated rolling backup before starting fresh.
       this.quarantineStateFile();
     }
+    if (fs.existsSync(this.backupPath())) {
+      const backup = this.tryLoadPersisted(this.backupPath());
+      if (backup) {
+        console.error(`wmux: recovered state from ${this.backupPath()}`);
+        this.dirty = true;
+        return { ...this.normalizeRestoredState(backup.state), machines };
+      }
+      this.quarantineStateFile(this.backupPath());
+    }
     const state: PersistedState = {
+      schemaVersion: CURRENT_STATE_SCHEMA_VERSION,
       revision: 0,
       machines,
       workspaces: [],
@@ -621,27 +658,28 @@ export class StateStore extends EventEmitter {
     return { ...state, activeWorkspaceId: workspace.id };
   }
 
-  private tryLoadPersisted(): PersistedState | null {
+  private tryLoadPersisted(filePath = this.filePath): ParsedPersistedState | null {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as unknown;
-      if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as PersistedState).workspaces)) {
-        return null;
-      }
-      return parsed as PersistedState;
-    } catch {
+      return parsePersistedState(JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown);
+    } catch (error) {
+      if (error instanceof UnsupportedStateVersionError) throw error;
       return null;
     }
   }
 
-  private quarantineStateFile(): void {
+  private quarantineStateFile(filePath = this.filePath): void {
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const quarantinePath = `${this.filePath}.corrupt-${stamp}`;
-      fs.renameSync(this.filePath, quarantinePath);
-      console.error(`wmux: unreadable state file quarantined to ${quarantinePath}; starting fresh`);
+      const quarantinePath = `${filePath}.corrupt-${stamp}`;
+      fs.renameSync(filePath, quarantinePath);
+      console.error(`wmux: unreadable state file quarantined to ${quarantinePath}`);
     } catch (error) {
       console.error(`wmux: failed to quarantine unreadable state file: ${error instanceof Error ? error.message : error}`);
     }
+  }
+
+  private backupPath(): string {
+    return `${this.filePath}.bak`;
   }
 
   private createPane(machineId: string, cwd?: string): PaneState {

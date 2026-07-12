@@ -188,6 +188,14 @@ wmux-windows-setup install-agent
 wmux-windows-setup agent-status
 ```
 
+For agent 0.7 and later, stage new helpers normally and activate them without killing live panes:
+
+```powershell
+wmux-windows-agent-service activate-update
+```
+
+The agent rejects new pane creation while draining and restarts its Scheduled Task after the final existing pane closes. Use `cancel-update` to resume without restarting. Plain `restart` refuses to run with active panes; `restart --force` is destructive.
+
 If the helper is not on `PATH`, call it by path:
 
 ```powershell

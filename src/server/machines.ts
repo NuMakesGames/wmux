@@ -1307,15 +1307,18 @@ const windowsStatusDetail = (
   if (!agent) return detail;
   const backend = agent.health?.backend ? ` ${agent.health.backend}` : "";
   const processTree = agent.health?.processTree ? `, ${agent.health.processTree}` : "";
+  const drainState = agent.health?.draining
+    ? `, draining ${agent.health.activeSessions ?? agent.health.sessions ?? 0} pane(s)`
+    : "";
   const dependency =
     agent.health?.backend === "conpty" && agent.health.conptyAvailable === false ? "; pywinpty missing" : "";
   const expectedVersion = expectedWindowsAgentVersion();
   const versionNote =
     agent.reachable && expectedVersion && agent.health?.version && agent.health.version !== expectedVersion
-      ? ` (expected ${expectedVersion} — restart the agent task to update)`
+      ? ` (expected ${expectedVersion} — run wmux-windows-agent-service activate-update)`
       : "";
   const agentDetail = agent.reachable
-    ? `agent ${agent.health?.version ?? "ready"}${versionNote}${backend}${processTree} at ${agent.url}${dependency}`
+    ? `agent ${agent.health?.version ?? "ready"}${versionNote}${backend}${processTree}${drainState} at ${agent.url}${dependency}`
     : `agent unavailable at ${agent.url ?? "unknown URL"}`;
   return `${detail}; ${agentDetail}`;
 };

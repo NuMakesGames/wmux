@@ -1,0 +1,60 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { CURRENT_SETTINGS_SCHEMA_VERSION, SettingsStore } from "../src/server/settings.js";
+
+const withTempSettings = (run: (filePath: string, dir: string) => void): void => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-settings-"));
+  try {
+    run(path.join(dir, "settings.json"), dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test("settings persist atomically with a schema version and owner-only mode", () => {
+  withTempSettings((filePath, dir) => {
+    new SettingsStore(filePath);
+    const persisted = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    assert.equal(persisted.schemaVersion, CURRENT_SETTINGS_SCHEMA_VERSION);
+    assert.equal(fs.readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
+    if (process.platform !== "win32") assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  });
+});
+
+test("legacy settings migrate while preserving normalized values", () => {
+  withTempSettings((filePath) => {
+    fs.writeFileSync(filePath, JSON.stringify({ terminalFontSize: 19, terminalScrollbackRows: 5000, machineAliases: { local: "Home" } }));
+    const store = new SettingsStore(filePath);
+    assert.deepEqual(store.snapshot(), {
+      terminalFontSize: 19,
+      terminalScrollbackRows: 5000,
+      machineAliases: { local: "Home" },
+    });
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).schemaVersion, CURRENT_SETTINGS_SCHEMA_VERSION);
+  });
+});
+
+test("settings recover from a validated rolling backup", () => {
+  withTempSettings((filePath, dir) => {
+    const store = new SettingsStore(filePath);
+    store.update({ terminalFontSize: 18 });
+    assert.ok(fs.existsSync(`${filePath}.bak`));
+    fs.writeFileSync(filePath, "not-json");
+
+    const recovered = new SettingsStore(filePath);
+    assert.equal(recovered.snapshot().terminalFontSize, 14);
+    assert.ok(fs.readdirSync(dir).some((name) => name.startsWith("settings.json.corrupt-")));
+  });
+});
+
+test("newer settings schemas refuse downgrade without overwriting the file", () => {
+  withTempSettings((filePath, dir) => {
+    fs.writeFileSync(filePath, JSON.stringify({ schemaVersion: CURRENT_SETTINGS_SCHEMA_VERSION + 1 }));
+    assert.throws(() => new SettingsStore(filePath), /newer than this wmux build supports/);
+    assert.ok(fs.existsSync(filePath));
+    assert.equal(fs.readdirSync(dir).some((name) => name.includes(".corrupt-")), false);
+  });
+});

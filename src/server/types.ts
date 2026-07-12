@@ -170,6 +170,7 @@ export interface StreamStatus {
 }
 
 export interface PersistedState {
+  schemaVersion: number;
   revision: number;
   machines: MachineConfig[];
   workspaces: Workspace[];

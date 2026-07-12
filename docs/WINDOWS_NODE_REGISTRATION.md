@@ -354,6 +354,7 @@ The agent task uses `Interactive` logon when a desktop user is logged in and fal
 - `wmux-windows-setup validate` reports the `wmux-windows-agent` helper and agent config present.
 - `curl http://100.68.206.111:3481/health` reports the Windows session agent as healthy.
 - A direct `/sessions/:id` create/input/output/delete smoke test returns command output.
+- `wmux-windows-agent-service activate-update` drains existing sessions and automatically restarts only after the last pane closes; `cancel-update` cancels the drain.
 - `wmux-windows-setup install-hooks` reports Claude and Codex hooks installed; `/hooks` in a new Codex session shows the direct PowerShell command ready for review/trust.
 - Changing directories in PowerShell updates the pane cwd, and a same-host split starts in that directory.
 
@@ -362,4 +363,4 @@ The agent task uses `Interactive` logon when a desktop user is logged in and fal
 - Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent`; wmux service shutdown detaches its client while explicit pane closure deletes the owned ConPTY and its Windows Job Object, terminating detached descendants.
 - Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
 - Windows screen streaming is validated on 9800x3d through FFmpeg/gdigrab and the supervised per-user Scheduled Task. Locked/logged-out behavior and a fuller Windows wmux agent are still not implemented.
-- The Windows session agent uses pywinpty-backed ConPTY by default. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running, but Windows-agent restarts still kill the owned ConPTY processes and broad full-screen app validation is still pending.
+- The Windows session agent uses pywinpty-backed ConPTY by default. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running. Agent 0.7 adds non-destructive staged-update draining, but a forced Windows-agent restart still kills owned ConPTY processes; process preservation across an unexpected agent crash and broad full-screen app validation remain pending.
