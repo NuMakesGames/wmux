@@ -9,10 +9,15 @@ test("remote-only machine lists replace a stale local creation target", () => {
 
 test("implicit target reconciliation prefers an online registered machine", () => {
   const machines = [
-    { id: "stale", online: false },
-    { id: "live", online: true },
+    { id: "stale", source: "registered" as const, online: false },
+    { id: "live", source: "registered" as const, online: true },
   ];
-  assert.equal(resolveMachineTargetId("local", machines), "live");
+  assert.equal(resolveMachineTargetId("stale", machines), "live");
+});
+
+test("implicit target reconciliation rejects an all-offline registered catalog", () => {
+  const machines = [{ id: "stale", source: "registered" as const, online: false }];
+  assert.equal(resolveMachineTargetId("stale", machines), "");
 });
 
 test("an available explicit creation target remains selected", () => {
