@@ -95,4 +95,7 @@ test("Windows agent service drains staged updates and refuses unsafe restarts", 
   assert.ok(content.includes("restartWhenIdle"));
   assert.ok(content.includes("Refusing to restart"));
   assert.ok(content.includes("restart --force"));
+  assert.ok(content.includes("$RestartTaskName"));
+  assert.ok(content.includes("Register-ScheduledTask -TaskName $RestartTaskName"));
+  assert.ok(!content.includes("Start-Process -FilePath $PowerShell"));
 });

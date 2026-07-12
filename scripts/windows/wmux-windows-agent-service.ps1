@@ -8,6 +8,7 @@ $Config = if ($env:WMUX_WINDOWS_AGENT_CONFIG) { $env:WMUX_WINDOWS_AGENT_CONFIG }
 $HelperDir = if ($env:WMUX_HELPER_DIR) { $env:WMUX_HELPER_DIR } else { Join-Path $env:LOCALAPPDATA 'wmux\bin' }
 $Agent = Join-Path $HelperDir 'wmux-windows-agent.py'
 $Wrapper = Join-Path $HelperDir 'wmux-windows-agent-task.ps1'
+$RestartTaskName = "$TaskName-update"
 $OutLog = Join-Path $LogDir 'windows-agent.out.log'
 $ErrLog = Join-Path $LogDir 'windows-agent.err.log'
 $Force = @($args) -contains '--force'
@@ -81,14 +82,15 @@ exit `$LASTEXITCODE
 }
 
 function New-HiddenPowerShellAction {
+  param([string]$ScriptPath = $Wrapper)
   $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
     $PowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
   }
-  $QuotedWrapper = '"' + ($Wrapper -replace '"', '\"') + '"'
+  $QuotedScript = '"' + ($ScriptPath -replace '"', '\"') + '"'
   New-ScheduledTaskAction `
     -Execute $PowerShell `
-    -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $QuotedWrapper"
+    -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $QuotedScript"
 }
 
 function Stop-AgentProcesses {
@@ -209,10 +211,9 @@ switch ($ActionName) {
         exit 3
       }
     }
-    # Run the stop/kill/start sequence in a detached process. When restart is
-    # invoked from inside an agent-owned pane, Stop-AgentProcesses kills this
-    # script's own console tree, and an inline Start-ScheduledTask would never
-    # run — leaving the agent down (task stopped, port dark).
+    # Task Scheduler owns this launcher outside the agent's process tree. A
+    # plain Start-Process child is still terminated with an agent-owned pane or
+    # an OpenSSH session, which can leave the main task stopped and port dark.
     $RestartScript = Join-Path $HelperDir 'wmux-windows-agent-restart.ps1'
     $Sequence = @"
 Stop-ScheduledTask -TaskName '$($TaskName -replace "'", "''")' -ErrorAction SilentlyContinue
@@ -223,14 +224,17 @@ Start-Sleep -Seconds 1
 Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
 "@
     [System.IO.File]::WriteAllText($RestartScript, $Sequence, [System.Text.UTF8Encoding]::new($false))
-    $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
-      $PowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
-    }
-    Start-Process -FilePath $PowerShell -WindowStyle Hidden -ArgumentList @(
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $RestartScript
-    )
-    Write-Output "Restarting $TaskName (detached; survives this console)"
+    $MainTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    $RestartAction = New-HiddenPowerShellAction -ScriptPath $RestartScript
+    $RestartSettings = New-ScheduledTaskSettingsSet `
+      -AllowStartIfOnBatteries `
+      -DontStopIfGoingOnBatteries `
+      -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+      -MultipleInstances IgnoreNew
+    $RestartTask = New-ScheduledTask -Action $RestartAction -Principal $MainTask.Principal -Settings $RestartSettings
+    Register-ScheduledTask -TaskName $RestartTaskName -InputObject $RestartTask -Force | Out-Null
+    Start-ScheduledTask -TaskName $RestartTaskName
+    Write-Output "Restarting $TaskName through the independent $RestartTaskName task"
   }
   'activate-update' {
     try {
@@ -252,10 +256,14 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Write-Output "Drain cancelled; active pane sessions: $(Get-ActiveSessionCount $Drain)"
   }
   'stop' {
+    Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Stop-AgentProcesses
   }
   'uninstall' {
+    Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Stop-AgentProcesses
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
