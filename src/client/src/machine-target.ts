@@ -1,7 +1,10 @@
 export const resolveMachineTargetId = (
   currentMachineId: string,
-  machines: ReadonlyArray<{ id: string }>,
+  machines: ReadonlyArray<{ id: string; source?: "config" | "registered"; online?: boolean }>,
 ): string => {
-  if (machines.some((machine) => machine.id === currentMachineId)) return currentMachineId;
-  return machines[0]?.id ?? "";
+  const current = machines.find((machine) => machine.id === currentMachineId);
+  if (current && !(current.source === "registered" && current.online === false)) return currentMachineId;
+  return machines.find((machine) => machine.source !== "registered")?.id
+    ?? machines.find((machine) => machine.online !== false)?.id
+    ?? "";
 };
