@@ -51,3 +51,28 @@ test("WMUX_CONFIG_PATH isolates explicit runtime and test configuration", () => 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("validates the localMachine flag", () => {
+  assert.ok(configSchema.safeParse({ machines: [], localMachine: false }).success);
+  assert.ok(configSchema.safeParse({ localMachine: true }).success);
+  assert.equal(configSchema.safeParse({ localMachine: "no" }).success, false);
+});
+
+test("localMachine false suppresses the implicit local machine", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-config-"));
+  const configPath = path.join(directory, "config.json");
+  const previousConfigPath = process.env.WMUX_CONFIG_PATH;
+
+  try {
+    process.env.WMUX_CONFIG_PATH = configPath;
+    fs.writeFileSync(configPath, JSON.stringify({ machines: [], localMachine: false }));
+    assert.deepEqual(loadConfig().machines, []);
+
+    fs.writeFileSync(configPath, JSON.stringify({ machines: [] }));
+    assert.deepEqual(loadConfig().machines.map((configuredMachine) => configuredMachine.id), ["local"]);
+  } finally {
+    if (previousConfigPath === undefined) delete process.env.WMUX_CONFIG_PATH;
+    else process.env.WMUX_CONFIG_PATH = previousConfigPath;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

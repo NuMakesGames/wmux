@@ -69,6 +69,30 @@ test("newer state schemas refuse downgrade without moving or overwriting the fil
   });
 });
 
+test("fresh store creates its initial workspace on the first remote machine", () => {
+  withTempState((filePath) => {
+    const remoteMachines: MachineConfig[] = [
+      { id: "remote", name: "Remote", kind: "ssh", host: "remote.ts.net", user: "user" },
+    ];
+    const snapshot = new StateStore(remoteMachines, filePath).snapshot();
+
+    assert.equal(snapshot.workspaces.length, 1);
+    assert.equal(snapshot.workspaces[0].machineId, "remote");
+    assert.equal(snapshot.workspaces[0].tabs[0].panes[0].machineId, "remote");
+    assert.equal(snapshot.activeWorkspaceId, snapshot.workspaces[0].id);
+  });
+});
+
+test("fresh store remains idle when no machines are configured", () => {
+  withTempState((filePath) => {
+    const snapshot = new StateStore([], filePath).snapshot();
+
+    assert.deepEqual(snapshot.workspaces, []);
+    assert.equal(snapshot.activeWorkspaceId, "");
+    assert.deepEqual(snapshot.machines, []);
+  });
+});
+
 test("mutations round-trip through flush and reload", () => {
   withTempState((filePath) => {
     const store = new StateStore(machines, filePath);

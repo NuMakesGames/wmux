@@ -35,6 +35,11 @@ npm run start -- --host 100.x.y.z --port 3478
 
 The server refuses public bind hosts. Use loopback, Tailscale `100.64.0.0/10`, or an RFC1918/internal address.
 
+For a non-root container deployment with loopback-only port publishing by
+default, see [deploy/docker/README.md](deploy/docker/README.md). The Compose
+stack builds directly from a checkout and keeps machine configuration, SSH
+keys, environment files, and persisted state outside the image.
+
 To serve wmux over HTTPS with a Tailscale certificate, point wmux at the certificate and key and set the public URL to the certificate name:
 
 ```bash
@@ -102,6 +107,10 @@ Put machine definitions in `wmux.config.json` or `~/.wmux/config.json`:
 ```
 
 Set `WMUX_CONFIG_PATH` to use one explicit config file. When set, wmux will not fall back to the repository or home config, and startup fails if the requested file is missing. This keeps tests and alternate service instances isolated from the dogfood machine inventory.
+
+wmux adds a local machine when no configured machine has the `local` ID. Set
+`"localMachine": false` at the top level to suppress that implicit shell, for
+example when wmux runs in a container used only as a gateway to remote hosts.
 
 If the browser accesses wmux through a MagicDNS or reverse-proxy name that is not under `*.ts.net`, set `WMUX_ALLOWED_HOSTS` to a comma-separated allowlist.
 

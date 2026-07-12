@@ -34,6 +34,7 @@ import {
   mobileViewportShapeChanged,
   type MobileViewportBaseline,
 } from "./mobile-viewport";
+import { resolveMachineTargetId } from "./machine-target";
 import type {
   AgentActivity,
   BootstrapPayload,
@@ -105,7 +106,7 @@ export function App() {
   const mobileViewport = useMobileViewportState();
   const store = useMemo(createAppStore, []);
   const state = useAppState(store);
-  const [newMachineId, setNewMachineId] = useState("local");
+  const [newMachineId, setNewMachineId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
   const [bootComplete, setBootComplete] = useState(false);
@@ -481,8 +482,12 @@ export function App() {
     window.location.assign(`${window.location.pathname}${query ? `?${query}` : ""}`);
   };
 
-  const selectedMachine = displayMachines.find((machine) => machine.id === newMachineId) ?? displayMachines[0];
-  const activeStreamMachineId = activeWorkspace?.machineId ?? selectedMachine?.id ?? newMachineId;
+  const targetMachineId = resolveMachineTargetId(newMachineId, displayMachines);
+  const selectedMachine = displayMachines.find((machine) => machine.id === targetMachineId);
+  useEffect(() => {
+    if (targetMachineId !== newMachineId) setNewMachineId(targetMachineId);
+  }, [newMachineId, targetMachineId]);
+  const activeStreamMachineId = activeWorkspace?.machineId ?? selectedMachine?.id ?? targetMachineId;
   const activeStreamMachine = machineFor(displayMachines, activeStreamMachineId);
   const activeStream = streams.find((stream) => stream.machineId === activeStreamMachineId);
   const canOpenStream = !mobileViewport.isMobile && Boolean(activeStream);
@@ -569,6 +574,7 @@ export function App() {
   );
 
   const createWorkspace = guard((machineId: string) => `machine:${machineId}:create-workspace`, "Creating workspace...", async (machineId: string) => {
+    if (!machineId) return;
     const response = await api.createWorkspace(machineId, activePane?.id);
     await refresh(response.state);
     activateWorkspaceTab(response.workspace.id, response.workspace.activeTabId, { replaceHistory: false });
@@ -606,7 +612,7 @@ export function App() {
   };
 
   const createTab = guard((machineId: string) => `machine:${machineId}:create-tab`, "Creating tab...", async (machineId: string) => {
-    if (!activeWorkspace) return;
+    if (!activeWorkspace || !machineId) return;
     const response = await api.createTab(activeWorkspace.id, machineId, activePane?.id);
     await refresh(response.state);
     activateWorkspaceTab(activeWorkspace.id, response.tab.id, { replaceHistory: false });
@@ -708,8 +714,8 @@ export function App() {
     modalOpen: settingsOpen || commandPaletteOpen || diagnosticsOpen,
     openCommandPalette,
     toggleSidebar,
-    createWorkspace: () => createWorkspace(newMachineId),
-    createTab: () => createTab(newMachineId),
+    createWorkspace: () => createWorkspace(targetMachineId),
+    createTab: () => createTab(targetMachineId),
     closeActiveTab,
     closeActiveWorkspace,
     splitActivePane: activePaneForSplit
@@ -869,22 +875,22 @@ export function App() {
       },
       {
         id: "new-workspace-selected",
-        title: `New workspace on ${selectedMachine?.name ?? newMachineId}`,
+        title: `New workspace on ${selectedMachine?.name ?? targetMachineId}`,
         subtitle: "Create a new workspace on the target host",
         section: "Create",
         shortcut: "Cmd+N",
         disabled: !selectedMachine?.reachable,
-        run: () => createWorkspace(newMachineId),
+        run: () => createWorkspace(targetMachineId),
         keywords: ["session"],
       },
       {
         id: "new-tab-selected",
-        title: `New tab on ${selectedMachine?.name ?? newMachineId}`,
+        title: `New tab on ${selectedMachine?.name ?? targetMachineId}`,
         subtitle: activeWorkspace?.name,
         section: "Create",
         shortcut: "Cmd+T",
         disabled: !selectedMachine?.reachable || !activeWorkspace,
-        run: () => createTab(newMachineId),
+        run: () => createTab(targetMachineId),
         keywords: ["session"],
       },
       {
@@ -1028,7 +1034,7 @@ export function App() {
     activeWorkspace,
     displayMachines,
     machines,
-    newMachineId,
+    targetMachineId,
     openTuiMode,
     openSettings,
     openDiagnostics,
@@ -1077,13 +1083,13 @@ export function App() {
       ) : null}
       {openTuiMode && !mobileViewport.isMobile ? (
         <OpenTuiSidebar
-          targetMachineId={newMachineId}
-          targetMachineName={selectedMachine ? versionedMachineName(selectedMachine) : newMachineId}
+          targetMachineId={targetMachineId}
+          targetMachineName={selectedMachine ? versionedMachineName(selectedMachine) : targetMachineId}
           targetMachineReachable={Boolean(selectedMachine?.reachable)}
           workspaces={openTuiWorkspaces}
           machines={openTuiMachines}
           onTargetMachineChange={setNewMachineId}
-          onCreateWorkspace={() => createWorkspace(newMachineId)}
+          onCreateWorkspace={() => createWorkspace(targetMachineId)}
           onActivateWorkspace={activateWorkspaceFromChrome}
         />
       ) : (
@@ -1104,7 +1110,7 @@ export function App() {
             <span className={`reach-dot ${selectedMachine?.reachable ? "on" : ""}`} />
           </div>
           <div className="new-session">
-            <select title="Target host for new workspaces and tabs" value={newMachineId} onChange={(event) => setNewMachineId(event.target.value)}>
+            <select title="Target host for new workspaces and tabs" value={targetMachineId} onChange={(event) => setNewMachineId(event.target.value)}>
             {displayMachines.map((machine) => (
               <option key={machine.id} value={machine.id} disabled={!machine.reachable}>
                 {versionedMachineName(machine)}
@@ -1112,9 +1118,9 @@ export function App() {
               ))}
             </select>
             <button
-              title={`New workspace on ${selectedMachine?.name ?? newMachineId}`}
+              title={`New workspace on ${selectedMachine?.name ?? targetMachineId}`}
               disabled={!selectedMachine?.reachable}
-              onClick={() => createWorkspace(newMachineId)}
+              onClick={() => createWorkspace(targetMachineId)}
             >
               <CirclePlus size={17} />
             </button>
@@ -1231,10 +1237,10 @@ export function App() {
                   <span>Tabs</span>
                   <button
                     type="button"
-                    title={`New tab on ${selectedMachine?.name ?? newMachineId}`}
-                    aria-label={`New tab on ${selectedMachine?.name ?? newMachineId}`}
+                    title={`New tab on ${selectedMachine?.name ?? targetMachineId}`}
+                    aria-label={`New tab on ${selectedMachine?.name ?? targetMachineId}`}
                     disabled={!selectedMachine?.reachable}
-                    onClick={() => createTab(newMachineId)}
+                    onClick={() => createTab(targetMachineId)}
                   >
                     <Plus size={16} />
                   </button>
@@ -1459,7 +1465,7 @@ export function App() {
               })) ?? []
             }
             serviceConnection={serviceConnection}
-            targetLabel={selectedMachine?.name ?? newMachineId}
+            targetLabel={selectedMachine?.name ?? targetMachineId}
             canCreate={Boolean(selectedMachine?.reachable)}
             canCopyLink={Boolean(activeWorkspace && activeTab)}
             canOpenStream={canOpenStream}
@@ -1470,7 +1476,7 @@ export function App() {
             canEnableNotifications={"Notification" in window && Notification.permission === "default"}
             activityOpen={activityOpen}
             onActivateTab={activateTabFromChrome}
-            onCreate={() => (activeWorkspace ? createTab(newMachineId) : createWorkspace(newMachineId))}
+            onCreate={() => (activeWorkspace ? createTab(targetMachineId) : createWorkspace(targetMachineId))}
             onOpenCommandPalette={openCommandPalette}
             onOpenSettings={openSettings}
             onToggleActivity={() => setActivityOpen((value) => !value)}
@@ -1498,9 +1504,9 @@ export function App() {
               : null}
             <button
               className="icon-button"
-              title={`${activeWorkspace ? "New tab" : "New workspace"} on ${selectedMachine?.name ?? newMachineId}`}
+              title={`${activeWorkspace ? "New tab" : "New workspace"} on ${selectedMachine?.name ?? targetMachineId}`}
               disabled={!selectedMachine?.reachable}
-              onClick={() => (activeWorkspace ? createTab(newMachineId) : createWorkspace(newMachineId))}
+              onClick={() => (activeWorkspace ? createTab(targetMachineId) : createWorkspace(targetMachineId))}
             >
               <Plus size={16} />
             </button>
