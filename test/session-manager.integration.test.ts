@@ -316,7 +316,12 @@ test("late attach receives an authoritative checkpoint for a full-screen PTY", a
       type: "input",
       data: "printf '\\033[?1049h\\033[2J\\033[Hcheckpoint-marker\\033[3;4Hcursor'\r",
     });
-    await waitForMessage(first, (message) => message.type === "output" && message.data.includes("checkpoint-marker"));
+    await waitForMessage(
+      first,
+      (message) => message.type === "output"
+        && message.data.includes("\x1b[?1049h")
+        && message.data.includes("checkpoint-marker"),
+    );
     fake(first).close();
 
     const reconnected = socket();
@@ -339,25 +344,36 @@ test(
       const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
       const sessionName = durableSessionName(pane.id);
       const firstManager = new SessionManager(state, [machine]);
+      let secondManager: SessionManager | undefined;
       const first = socket();
-      firstManager.attach(pane.id, first, 80, 24);
-      await waitForMessage(first, (message) => message.type === "ready");
-      fake(first).message({ type: "input", data: "export WMUX_RESTORE_MARKER=survived\r" });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      firstManager.disposeAll();
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      assert.equal(spawnSync("tmux", ["has-session", "-t", sessionName]).status, 0);
+      try {
+        firstManager.attach(pane.id, first, 80, 24);
+        await waitForMessage(first, (message) => message.type === "ready");
+        fake(first).message({
+          type: "input",
+          data: "export WMUX_RESTORE_MARKER=survived; printf '\\n\\155\\141\\162\\153\\145\\162\\055\\163\\145\\164\\n'\r",
+        });
+        await waitForMessage(
+          first,
+          (message) => message.type === "output" && message.data.includes("marker-set"),
+        );
+        firstManager.disposeAll();
+        assert.equal(spawnSync("tmux", ["has-session", "-t", sessionName]).status, 0);
 
-      const secondManager = new SessionManager(state, [machine]);
-      const second = socket();
-      secondManager.attach(pane.id, second, 88, 26);
-      await waitForMessage(second, (message) => message.type === "ready");
-      fake(second).message({ type: "input", data: "printf 'restore:%s\\n' \"$WMUX_RESTORE_MARKER\"\r" });
-      await waitForMessage(second, (message) => message.type === "output" && message.data.includes("restore:survived"), 5_000);
+        secondManager = new SessionManager(state, [machine]);
+        const second = socket();
+        secondManager.attach(pane.id, second, 88, 26);
+        await waitForMessage(second, (message) => message.type === "ready");
+        fake(second).message({ type: "input", data: "printf 'restore:%s\\n' \"$WMUX_RESTORE_MARKER\"\r" });
+        await waitForMessage(second, (message) => message.type === "output" && message.data.includes("restore:survived"), 5_000);
 
-      assert.equal(secondManager.closeWorkspace(state.snapshot().workspaces[0].id), true);
-      assert.notEqual(spawnSync("tmux", ["has-session", "-t", sessionName]).status, 0);
-      secondManager.disposeAll();
+        assert.equal(secondManager.closeWorkspace(state.snapshot().workspaces[0].id), true);
+        assert.notEqual(spawnSync("tmux", ["has-session", "-t", sessionName]).status, 0);
+      } finally {
+        firstManager.disposeAll();
+        secondManager?.disposeAll();
+        spawnSync("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" });
+      }
     });
   },
 );
