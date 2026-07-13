@@ -33,6 +33,11 @@ const extraEnv = {
   KITTY_WINDOW_ID: "wmux-pane_fixed001",
 };
 
+const stableBackendDetail = (machine: MachineConfig) =>
+  backendDetail(machine)
+    .replace(/tmux (?:available|missing)/, "tmux available")
+    .replace(/screen (?:available|missing)/, "screen missing");
+
 const machines: Array<{ label: string; machine: MachineConfig }> = [
   { label: "local-auto", machine: { id: "local", name: "Local Server", kind: "local", sessionBackend: "auto", cwd: "/home/fixed" } },
   { label: "local-pty", machine: { id: "local", name: "Local Server", kind: "local", sessionBackend: "pty", cwd: "/home/fixed" } },
@@ -61,7 +66,7 @@ const sampleSpecs = () => {
           args: rest.args.map((arg) => arg.replaceAll(runtimeDir, snapshotRuntimeDir)),
         },
         canRefresh: canRefreshDurableSessionClient(machine),
-        backendDetail: backendDetail(machine),
+        backendDetail: stableBackendDetail(machine),
       };
     });
   } finally {
@@ -94,4 +99,13 @@ test("local durable credentials are staged outside observable process arguments"
   assert.equal(spec.args.join(" ").includes(extraEnv.WMUX_TOKEN), false);
   assert.match(spec.args[0], /wmux\/runtimes\/v1-wmux_pane_fixed001\.sh$/);
   assert.equal(fs.statSync(spec.args[0]).mode & 0o777, 0o700);
+});
+
+test("POSIX SSH staging includes the hook installer beside its event helper", () => {
+  const spec = buildSpawnSpec(machines[5].machine, 120, 40, extraEnv);
+  const command = spec.args.join(" ");
+  assert.match(command, /wmux-hooks/);
+  assert.match(command, /wmux-agent-event/);
+  assert.match(command, /chmod \+x .*wmux-hooks/);
+  assert.match(command, /ln -sf .*wmux-hooks/);
 });
