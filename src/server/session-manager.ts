@@ -160,18 +160,23 @@ export class SessionManager {
       this.reassignResizeOwner(paneId, socket, session);
     });
 
-    const attachReplay = this.replayOutputFor(pane, session);
-    this.send(socket, {
-      type: "ready",
-      paneId,
-      pid: session.pid,
-      title: pane.title,
-      status: pane.status,
-      resizeOwner,
-      replay: attachReplay.data,
-      replayKind: attachReplay.kind,
-    });
-    this.scheduleDurableClientRefresh(pane, socket);
+    const sendReady = () => {
+      if (socket.readyState !== socket.OPEN || !this.socketState.has(socket)) return;
+      const attachReplay = this.replayOutputFor(pane, session);
+      this.send(socket, {
+        type: "ready",
+        paneId,
+        pid: session.pid,
+        title: pane.title,
+        status: pane.status,
+        resizeOwner,
+        replay: attachReplay.data,
+        replayKind: attachReplay.kind,
+      });
+      this.scheduleDurableClientRefresh(pane, socket);
+    };
+    if (session.attachReady) void session.attachReady.then(sendReady);
+    else sendReady();
   }
 
   watchOutput(paneId: string, socket: WebSocket, cols = 96, rows = 32): void {
@@ -191,15 +196,22 @@ export class SessionManager {
     if (!this.outputWatchers.has(paneId)) this.outputWatchers.set(paneId, new Set());
     this.outputWatchers.get(paneId)?.add(socket);
 
-    this.send(socket, {
-      type: "ready",
-      paneId,
-      pid: session.pid,
-      title: pane.title,
-      status: pane.status,
-      replay: session.replayOutput,
-      outputOnly: true,
-    });
+    const sendReady = () => {
+      if (socket.readyState !== socket.OPEN || !this.outputWatchers.get(paneId)?.has(socket)) return;
+      const replay = this.replayOutputFor(pane, session);
+      this.send(socket, {
+        type: "ready",
+        paneId,
+        pid: session.pid,
+        title: pane.title,
+        status: pane.status,
+        replay: replay.data,
+        replayKind: replay.kind,
+        outputOnly: true,
+      });
+    };
+    if (session.attachReady) void session.attachReady.then(sendReady);
+    else sendReady();
 
     socket.on("close", () => {
       this.outputWatchers.get(paneId)?.delete(socket);
@@ -400,7 +412,7 @@ export class SessionManager {
 
   private replayOutputFor(pane: PaneState, session: ManagedSession): AttachReplay {
     if (this.shouldUseDurableClientRefresh(pane)) return { data: "", kind: "raw" };
-    return (session as ManagedSession & { readonly attachReplay?: AttachReplay }).attachReplay ?? {
+    return session.attachReplay ?? {
       data: session.replayOutput,
       kind: "raw",
     };

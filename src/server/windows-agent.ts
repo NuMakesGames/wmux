@@ -23,11 +23,23 @@ interface AgentSessionResponse {
   cwd?: string;
   base?: number;
   cursor?: number;
+  cols?: number;
+  rows?: number;
+}
+
+interface AgentResizeEvent {
+  cursor: number;
+  cols: number;
+  rows: number;
 }
 
 interface AgentOutputResponse {
   base?: number;
+  startCursor?: number;
   cursor?: number;
+  cols?: number;
+  rows?: number;
+  resizes?: AgentResizeEvent[];
   dataBase64?: string;
   exited?: boolean;
   exitCode?: number | null;
@@ -90,7 +102,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private replay: string[] = [];
   private replayBytes = 0;
   private replayTruncated = false;
-  private readonly checkpoint: TerminalCheckpoint;
+  private checkpoint: TerminalCheckpoint;
   private exited = false;
   private exitCode: number | null = null;
   private cursor = 0;
@@ -104,6 +116,8 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private stopped = false;
   private paused = false;
   private lastTransportWarningAt = 0;
+  readonly attachReady: Promise<void>;
+  private resolveAttachReady!: () => void;
 
   constructor(
     readonly pane: PaneState,
@@ -114,6 +128,9 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   ) {
     super();
     this.checkpoint = new TerminalCheckpoint(cols, rows);
+    this.attachReady = new Promise((resolve) => {
+      this.resolveAttachReady = resolve;
+    });
     this.cwd = pane.cwd ?? "";
     void this.start();
   }
@@ -131,7 +148,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   }
 
   get attachReplay(): AttachReplay {
-    return selectAttachReplay(this.replayOutput, this.replayTruncated, this.checkpoint);
+    return selectAttachReplay(this.replayOutput, this.replayTruncated, this.checkpoint, true);
   }
 
   write(data: string): void {
@@ -156,13 +173,16 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
 
   resize(cols: number, rows: number): void {
     if (this.exited || this.stopped || cols < 2 || rows < 1) return;
-    this.checkpoint.resize(cols, rows);
     if (!this.ready) {
       this.pendingResize = { cols, rows };
       return;
     }
+    if (sameSize(this.checkpoint.dimensions, cols, rows)) return;
+    this.checkpoint.reframe(cols, rows);
     void this.post(`/sessions/${encodeURIComponent(this.pane.id)}/resize`, { cols, rows })
       .catch((error) => this.reportTransportFailure("resize", error));
+    const snapshot = this.checkpoint.snapshot();
+    if (snapshot) this.emit("output", snapshot);
   }
 
   kill(): void {
@@ -205,17 +225,26 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       });
       this.pidValue = response.pid ?? 0;
       this.cursor = typeof response.base === "number" ? response.base : 0;
-      this.ready = true;
       if (response.cwd) {
         this.cwd = response.cwd;
         this.emit("cwd", response.cwd);
       }
+      const historyBytes = Math.max(0, (response.cursor ?? this.cursor) - this.cursor);
+      const replayCols = response.cols ?? (historyBytes > 0 ? 80 : this.cols);
+      const replayRows = response.rows ?? (historyBytes > 0 ? 24 : this.rows);
+      this.checkpoint.reframe(replayCols, replayRows);
+      await this.hydrateReplay(response.cursor ?? this.cursor);
+      this.ready = true;
       const pendingResize = this.pendingResize;
       this.pendingResize = undefined;
-      if (pendingResize) this.resize(pendingResize.cols, pendingResize.rows);
+      if (pendingResize && !sameSize(this.checkpoint.dimensions, pendingResize.cols, pendingResize.rows)) {
+        this.checkpoint.reframe(pendingResize.cols, pendingResize.rows);
+        await this.post(`/sessions/${encodeURIComponent(this.pane.id)}/resize`, pendingResize);
+      }
       const pendingInput = this.pendingInput;
       this.pendingInput = [];
       for (const input of pendingInput) this.postInput(input.data, input.terminalResponse);
+      this.resolveAttachReady();
       this.emit("title", this.machine.name);
       void this.poll();
     } catch (error) {
@@ -223,7 +252,20 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       this.pendingInput = [];
       this.appendAndEmit(`\r\n[wmux] Windows agent attach failed: ${formatError(error)}\r\n`);
       this.exited = true;
+      this.resolveAttachReady();
       this.emit("exit", 1);
+    }
+  }
+
+  private async hydrateReplay(targetCursor: number): Promise<void> {
+    while (!this.stopped && !this.exited && this.cursor < targetCursor) {
+      const before = this.cursor;
+      const response = await this.get<AgentOutputResponse>(
+        `/sessions/${encodeURIComponent(this.pane.id)}/output?cursor=${this.cursor}&timeoutMs=0`,
+        5000,
+      );
+      this.applyOutputResponse(response, false);
+      if (this.cursor <= before) break;
     }
   }
 
@@ -238,17 +280,13 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
           `/sessions/${encodeURIComponent(this.pane.id)}/output?cursor=${this.cursor}&timeoutMs=15000`,
           20_000,
         );
-        if (typeof response.cursor === "number") this.cursor = response.cursor;
+        this.applyOutputResponse(response, true);
         // Agent versions before 0.5 report the session's startup cwd forever.
         // Accept that value only until the shell has emitted an OSC 7 update;
         // otherwise every output poll immediately reverts the live cwd.
         if (!this.observedCwdFromOutput && response.cwd && response.cwd !== this.cwd) {
           this.cwd = response.cwd;
           this.emit("cwd", response.cwd);
-        }
-        if (response.dataBase64) {
-          const data = Buffer.from(response.dataBase64, "base64").toString("utf8");
-          this.appendAndEmit(data);
         }
         if (response.exited) {
           this.exited = true;
@@ -262,6 +300,32 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
         await delay(1000);
       }
     }
+  }
+
+  private applyOutputResponse(response: AgentOutputResponse, emit: boolean): void {
+    const requestedCursor = this.cursor;
+    const base = typeof response.base === "number" ? response.base : requestedCursor;
+    const startCursor = typeof response.startCursor === "number" ? response.startCursor : Math.max(requestedCursor, base);
+    const endCursor = typeof response.cursor === "number" ? response.cursor : startCursor;
+    if (base > requestedCursor) this.replayTruncated = true;
+
+    if (response.cols && response.rows && !sameSize(this.checkpoint.dimensions, response.cols, response.rows)) {
+      this.checkpoint.reframe(response.cols, response.rows);
+    }
+
+    const data = response.dataBase64 ? Buffer.from(response.dataBase64, "base64") : Buffer.alloc(0);
+    let offset = 0;
+    const resizes = (response.resizes ?? [])
+      .filter((event) => event.cursor > startCursor && event.cursor <= endCursor)
+      .sort((left, right) => left.cursor - right.cursor);
+    for (const event of resizes) {
+      const nextOffset = Math.min(data.length, Math.max(offset, event.cursor - startCursor));
+      this.appendAndEmit(data.subarray(offset, nextOffset).toString("utf8"), emit);
+      this.checkpoint.reframe(event.cols, event.rows);
+      offset = nextOffset;
+    }
+    this.appendAndEmit(data.subarray(offset).toString("utf8"), emit);
+    this.cursor = endCursor;
   }
 
   private async get<T>(path: string, timeoutMs = 5000): Promise<T> {
@@ -282,11 +346,12 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     return requestJson<T>("DELETE", `${url}${path}`, undefined, 5000, authHeaders(this.machine));
   }
 
-  private appendAndEmit(data: string): void {
+  private appendAndEmit(data: string, emit = true): void {
+    if (!data) return;
     this.checkpoint.write(data);
     this.appendReplay(data);
     this.captureCwd(data);
-    this.emit("output", data);
+    if (emit) this.emit("output", data);
   }
 
   private appendReplay(data: string): void {
@@ -315,6 +380,12 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     this.appendAndEmit(`\r\n[wmux] Windows agent ${operation} failed: ${detail}\r\n`);
   }
 }
+
+const sameSize = (
+  dimensions: { cols: number; rows: number } | undefined,
+  cols: number,
+  rows: number,
+): boolean => dimensions?.cols === cols && dimensions.rows === rows;
 
 const requestJson = <T>(
   method: string,

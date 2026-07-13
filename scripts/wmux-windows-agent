@@ -18,7 +18,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "0.8"
+VERSION = "0.9"
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
@@ -640,6 +640,9 @@ class Session:
         self.buffer = bytearray()
         self.base = 0
         self.condition = threading.Condition()
+        self.cols = max(2, int(payload.get("cols") or 80))
+        self.rows = max(1, int(payload.get("rows") or 24))
+        self.resize_events: list[dict[str, int]] = [{"cursor": 0, "cols": self.cols, "rows": self.rows}]
         self.cwd_reporter = CwdReporter()
         self.exited = False
         self.exit_code: int | None = None
@@ -666,6 +669,8 @@ class Session:
             "cwd": self.cwd,
             "base": self.base,
             "cursor": self.cursor,
+            "cols": self.cols,
+            "rows": self.rows,
         }
 
     def write(self, data: bytes, terminal_response: bool = False) -> None:
@@ -679,7 +684,22 @@ class Session:
     def resize(self, cols: int, rows: int) -> None:
         if self.exited:
             return
-        self.backend.resize(cols, rows)
+        cols = max(2, int(cols))
+        rows = max(1, int(rows))
+        with self.condition:
+            if cols == self.cols and rows == self.rows:
+                return
+            # Keep output appends behind this boundary so replay can apply the
+            # exact geometry that was active for every byte in the buffer.
+            self.backend.resize(cols, rows)
+            self.cols = cols
+            self.rows = rows
+            event = {"cursor": self.cursor, "cols": cols, "rows": rows}
+            if self.resize_events and self.resize_events[-1]["cursor"] == event["cursor"]:
+                self.resize_events[-1] = event
+            else:
+                self.resize_events.append(event)
+            self.condition.notify_all()
 
     def terminate(self) -> None:
         if self.exited:
@@ -697,9 +717,19 @@ class Session:
             cursor = max(cursor, self.base)
             offset = cursor - self.base
             data = bytes(self.buffer[offset:])
+            end_cursor = self.cursor
+            geometry = self.resize_events[0]
+            for event in self.resize_events:
+                if event["cursor"] > cursor:
+                    break
+                geometry = event
             return {
                 "base": self.base,
-                "cursor": self.cursor,
+                "startCursor": cursor,
+                "cursor": end_cursor,
+                "cols": geometry["cols"],
+                "rows": geometry["rows"],
+                "resizes": [event for event in self.resize_events if cursor < event["cursor"] <= end_cursor],
                 "dataBase64": base64.b64encode(data).decode("ascii") if data else "",
                 "exited": self.exited,
                 "exitCode": self.exit_code,
@@ -710,9 +740,7 @@ class Session:
         backend = configured_backend(self.config)
         if backend == BACKEND_STDIO:
             return StdioBackend(self.config, payload, self.cwd)
-        cols = int(payload.get("cols") or 80)
-        rows = int(payload.get("rows") or 24)
-        return ConptyBackend(self.config, payload, self.cwd, cols, rows)
+        return ConptyBackend(self.config, payload, self.cwd, self.cols, self.rows)
 
     def _read_output(self) -> None:
         try:
@@ -738,6 +766,9 @@ class Session:
                 overflow = len(self.buffer) - self.max_replay
                 del self.buffer[:overflow]
                 self.base += overflow
+                prior = [event for event in self.resize_events if event["cursor"] <= self.base]
+                later = [event for event in self.resize_events if event["cursor"] > self.base]
+                self.resize_events = ([prior[-1]] if prior else []) + later
             self.condition.notify_all()
 
 

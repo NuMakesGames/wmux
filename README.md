@@ -191,6 +191,17 @@ provisioned authorization.
 
 ## Authentication and Network Safety
 
+> [!WARNING]
+> Private binding, Host/Origin checks, and token authentication control access;
+> they do not encrypt transport. Plain `http://` or `ws://` over an ordinary
+> LAN can expose login passwords, bearer/session/registration/agent tokens,
+> terminal input and output, clipboard contents, and media to an on-path
+> observer, who may also be able to modify that traffic. Use HTTPS/WSS for
+> browser-facing and cross-host traffic, or ensure every non-TLS leg is
+> loopback or inside an encrypted tunnel. Direct traffic between Tailscale
+> nodes is WireGuard-encrypted even when the application URL uses HTTP, but a
+> subnet-routed leg may be plaintext after it leaves the Tailscale endpoint.
+
 Every API and WebSocket endpoint is token-gated in addition to private bind,
 Host, and Origin checks.
 
@@ -347,8 +358,10 @@ owner-only writes with a rolling validated backup.
 | Windows session agent | Yes | Yes, while the agent remains running |
 
 Each live pane also has bounded raw replay and an in-memory terminal checkpoint
-for alternate-screen or truncated-history reconnects. Checkpoints do not
-survive a wmux restart; durable multiplexers or the Windows agent redraw then.
+for alternate-screen or truncated-history reconnects. Windows agent 0.9 records
+resize boundaries with its replay, allowing wmux to rebuild a correctly sized
+checkpoint after a service restart. Other checkpoints remain in-memory only;
+durable multiplexers redraw when wmux reattaches.
 
 Explicitly closing a pane, tab, or workspace kills its backing session. Audit
 local wmux-owned multiplexer sessions with:
@@ -415,7 +428,8 @@ known implementation gaps.
 - wmux is single-user and private-network only.
 - Machine management remains file-based; dynamic registrations have no UI.
 - Linux and macOS session agents are not implemented. The Windows agent is
-  experimental and does not preserve processes across its own restart.
+  experimental and does not preserve processes across its own restart. Agents
+  older than 0.9 also lack size-aware replay for panes resized before reattach.
 - Dynamic registered panes need separately provisioned auth for helpers that
   post back to wmux.
 - Kitty graphics support is partial; Sixel and iTerm2 image protocols are not

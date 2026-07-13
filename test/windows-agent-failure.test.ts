@@ -3,6 +3,7 @@ import { once } from "node:events";
 import http from "node:http";
 import test from "node:test";
 import { probeWindowsAgent, WindowsAgentSession } from "../src/server/windows-agent.js";
+import { TerminalCheckpoint } from "../src/server/terminal-checkpoint.js";
 import type { MachineConfig, PaneState } from "../src/server/types.js";
 
 const waitUntil = async (predicate: () => boolean, timeoutMs = 1000) => {
@@ -249,4 +250,99 @@ test("Windows agent queues initial resize and input until session creation compl
   session.detach();
   server.close();
   await once(server, "close");
+});
+
+test("Windows agent hydrates a 24-row replay before attaching it to a taller split", async () => {
+  const historical = "\x1b[2J\x1b[Hhistory\x1b[24;1HPS> ";
+  const historyBytes = Buffer.byteLength(historical);
+  const resizes: Array<{ cols: number; rows: number }> = [];
+  const server = http.createServer((request, response) => {
+    const path = request.url ?? "";
+    response.writeHead(200, { "content-type": "application/json" });
+    if (request.method === "POST" && path === "/sessions/pane_replay_geometry") {
+      response.end(JSON.stringify({
+        id: "pane_replay_geometry",
+        pid: 123,
+        base: 0,
+        cursor: historyBytes,
+        cols: 80,
+        rows: 24,
+      }));
+      return;
+    }
+    if (request.method === "POST" && path.endsWith("/resize")) {
+      let body = "";
+      request.on("data", (chunk) => { body += chunk.toString(); });
+      request.on("end", () => {
+        resizes.push(JSON.parse(body));
+        response.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+    if (request.method === "GET" && path.includes("/output")) {
+      const cursor = Number(new URL(path, "http://agent").searchParams.get("cursor") ?? 0);
+      response.end(JSON.stringify(cursor === 0 ? {
+        base: 0,
+        startCursor: 0,
+        cursor: historyBytes,
+        cols: 80,
+        rows: 24,
+        resizes: [],
+        dataBase64: Buffer.from(historical).toString("base64"),
+        exited: false,
+      } : {
+        base: 0,
+        startCursor: historyBytes,
+        cursor: historyBytes,
+        cols: 80,
+        rows: 33,
+        resizes: [],
+        dataBase64: "",
+        exited: false,
+      }));
+      return;
+    }
+    response.end(JSON.stringify({ removed: true }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const session = new WindowsAgentSession(
+    {
+      id: "pane_replay_geometry",
+      machineId: "windows",
+      title: "PowerShell",
+      status: "idle",
+      createdAt: new Date(0).toISOString(),
+    },
+    {
+      id: "windows",
+      name: "Windows",
+      kind: "powershell-ssh",
+      host: "127.0.0.1",
+      sessionBackend: "agent",
+      agentUrl: `http://127.0.0.1:${address.port}`,
+    },
+    80,
+    33,
+  );
+  session.resize(80, 33);
+  await session.attachReady;
+
+  const attach = session.attachReplay;
+  const restored = new TerminalCheckpoint(80, 33);
+  try {
+    restored.write(attach.data);
+    assert.equal(attach.kind, "checkpoint");
+    assert.deepEqual(restored.cursor(), { x: 4, y: 23, visible: true });
+    assert.match(restored.screenLines()[23], /^PS> /);
+    assert.equal(restored.screenLines()[32].trim(), "");
+    assert.deepEqual(resizes, [{ cols: 80, rows: 33 }]);
+  } finally {
+    restored.dispose();
+    session.detach();
+    server.close();
+    await once(server, "close");
+  }
 });

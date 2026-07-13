@@ -70,3 +70,19 @@ test("checkpoint snapshots retain split private input-mode sequences", () => {
     checkpoint.dispose();
   }
 });
+
+test("Windows-style reframing keeps the viewport and cursor anchored from the top", () => {
+  const checkpoint = new TerminalCheckpoint(12, 3);
+  try {
+    checkpoint.write("one\r\ntwo\r\nPS> ");
+    assert.deepEqual(checkpoint.cursor(), { x: 4, y: 2, visible: true });
+
+    checkpoint.reframe(12, 6);
+
+    assert.deepEqual(checkpoint.cursor(), { x: 4, y: 2, visible: true });
+    assert.match(checkpoint.screenLines()[2], /^PS> /);
+    assert.equal(checkpoint.screenLines()[5].trim(), "");
+  } finally {
+    checkpoint.dispose();
+  }
+});

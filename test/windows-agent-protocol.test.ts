@@ -79,6 +79,60 @@ print(json.dumps(values))
   assert.deepEqual(JSON.parse(result.stdout), ["C:/Users/operator/work tree"]);
 });
 
+test("Windows agent reports replay geometry at exact byte boundaries", () => {
+  const source = String.raw`
+import json
+import runpy
+import threading
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+
+class FakeBackend:
+    name = "conpty"
+    pid = 123
+    def __init__(self):
+        self.resizes = []
+    def resize(self, cols, rows):
+        self.resizes.append([cols, rows])
+
+session = object.__new__(module["Session"])
+session.id = "pane_geometry"
+session.backend = FakeBackend()
+session.buffer = bytearray(b"abc")
+session.base = 0
+session.condition = threading.Condition()
+session.cols = 80
+session.rows = 24
+session.resize_events = [{"cursor": 0, "cols": 80, "rows": 24}]
+session.exited = False
+session.exit_code = None
+session.cwd = "C:/work"
+session.cwd_reporter = module["CwdReporter"]()
+session.max_replay = 65536
+
+session.resize(100, 40)
+session._append(b"def")
+print(json.dumps({
+    "snapshot": session.snapshot(),
+    "full": session.read_from(0, 0),
+    "tail": session.read_from(3, 0),
+    "backendResizes": session.backend.resizes,
+}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.snapshot.cols, 100);
+  assert.equal(payload.snapshot.rows, 40);
+  assert.deepEqual(payload.backendResizes, [[100, 40]]);
+  assert.deepEqual(payload.full.resizes, [{ cursor: 3, cols: 100, rows: 40 }]);
+  assert.equal(payload.full.cols, 80);
+  assert.equal(payload.full.rows, 24);
+  assert.equal(payload.tail.cols, 100);
+  assert.equal(payload.tail.rows, 40);
+  assert.deepEqual(payload.tail.resizes, []);
+});
+
 test("Windows agent reports the staged helper bundle version", () => {
   const source = String.raw`
 import json

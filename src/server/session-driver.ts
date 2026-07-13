@@ -7,12 +7,15 @@ import {
   refreshDurableSessionClient,
 } from "./machines.js";
 import { deleteWindowsAgentSession, shouldUseWindowsAgent, WindowsAgentSession } from "./windows-agent.js";
+import type { AttachReplay } from "./terminal-checkpoint.js";
 
 export interface ManagedSession {
   readonly pane: PaneState;
   readonly pid: number;
   readonly isExited: boolean;
   readonly replayOutput: string;
+  readonly attachReady?: Promise<void>;
+  readonly attachReplay?: AttachReplay;
   write(data: string): void;
   writeTerminalResponse?(data: string): void;
   resize(cols: number, rows: number): void;

@@ -65,6 +65,11 @@ export class TerminalCheckpoint {
     return this.terminal?.isAlternateScreen() ?? false;
   }
 
+  get dimensions(): { cols: number; rows: number } | undefined {
+    const terminal = this.terminal;
+    return terminal ? { cols: terminal.cols, rows: terminal.rows } : undefined;
+  }
+
   write(data: string): void {
     if (!this.terminal || !data) return;
     this.capturePrivateModes(data);
@@ -79,6 +84,27 @@ export class TerminalCheckpoint {
     if (!this.terminal) return;
     try {
       this.terminal.resize(normalizeCols(cols), normalizeRows(rows));
+    } catch (error) {
+      this.disable(error);
+    }
+  }
+
+  /**
+   * Resize a Windows-style screen without Ghostty's bottom-anchored reflow.
+   * ConPTY keeps the existing viewport rows and cursor anchored from the top,
+   * so repaint the old absolute screen into a fresh grid of the target size.
+   */
+  reframe(cols: number, rows: number): void {
+    if (!this.terminal) return;
+    const snapshot = this.snapshot();
+    if (!snapshot || !this.terminal) return;
+    try {
+      const next = loadGhostty()?.createTerminal(normalizeCols(cols), normalizeRows(rows));
+      if (!next) return;
+      this.terminal.free();
+      this.terminal = next;
+      this.modeCarry = "";
+      this.terminal.write(snapshot);
     } catch (error) {
       this.disable(error);
     }
@@ -185,8 +211,9 @@ export const selectAttachReplay = (
   rawReplay: string,
   rawReplayTruncated: boolean,
   checkpoint: TerminalCheckpoint,
+  preferCheckpoint = false,
 ): AttachReplay => {
-  if (rawReplayTruncated || checkpoint.isAlternateScreen) {
+  if (preferCheckpoint || rawReplayTruncated || checkpoint.isAlternateScreen) {
     const snapshot = checkpoint.snapshot();
     if (snapshot) return { data: snapshot, kind: "checkpoint" };
   }
