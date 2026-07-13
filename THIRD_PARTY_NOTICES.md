@@ -8,8 +8,11 @@ license, and trademark terms.
 
 JavaScript dependencies are distributed under the licenses declared by their
 packages. In particular, `ghostty-web` and Fira Code are MIT- and
-SIL-OFL-licensed respectively. Their package metadata and installed license
-files are authoritative.
+SIL-OFL-licensed respectively. wmux currently pins a locally built artifact of
+[`ghostty-web` pull request 169](https://github.com/coder/ghostty-web/pull/169)
+under [`vendor/ghostty-web-pr169`](vendor/ghostty-web-pr169); its exact source,
+build details, and checksum are recorded in that directory's `UPSTREAM.md`.
+Package metadata and installed license files are authoritative.
 
 ## Retro fonts
 
