@@ -18,7 +18,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "0.9"
+VERSION = "1.0"
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
@@ -358,6 +358,10 @@ def powershell_bootstrap(cwd: str) -> str:
         "\n$ErrorActionPreference = 'Continue'\n"
         + CWD_PROMPT_PS1
         + f"""
+$AgentProfileHelper = if ($env:WMUX_HELPER_DIR) {{ Join-Path $env:WMUX_HELPER_DIR 'wmux-agent-profile.cmd' }} else {{ $null }}
+if ($AgentProfileHelper -and (Test-Path -LiteralPath $AgentProfileHelper -PathType Leaf)) {{
+  & $AgentProfileHelper apply --quiet
+}}
 if ('{escaped_cwd}') {{
   Set-Location -LiteralPath '{escaped_cwd}' -ErrorAction SilentlyContinue
 }}

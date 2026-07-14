@@ -34,6 +34,15 @@ test("bundle stages heartbeat helpers and reports them as required", () => {
   assert.match(healthProbe, /wmux-heartbeat-service\.ps1/);
 });
 
+test("bundle stages and runs the agent profile helper", () => {
+  const bundle = buildWindowsHelperBundle(machine);
+  assert.ok(bundle.files.some((file) => file.name === "wmux-agent-profile.py"));
+  assert.ok(bundle.files.some((file) => file.name === "wmux-agent-profile.cmd"));
+  const bootstrap = buildWindowsPowerShellBootstrap(machine, undefined, {});
+  assert.match(bootstrap, /wmux-agent-profile\.cmd/);
+  assert.match(bootstrap, /apply --quiet/);
+});
+
 test("Windows agent config prefers ConPTY with stdio fallback", () => {
   assert.equal(buildWindowsHelperBundle(machine).agentConfig.backend, "auto");
 });

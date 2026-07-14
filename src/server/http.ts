@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import { WebSocketServer } from "ws";
+import { readAgentProfileBundle } from "./agent-profile.js";
 import {
   type AuthConfig,
   isAuthorized,
@@ -386,6 +387,12 @@ export const createHttpServer = (
       if (url.pathname === "/api/doctor" && request.method === "GET") {
         await refreshMachineStatuses(false);
         sendJson(response, 200, buildDoctorReport(state.snapshot(), machines, machineStatuses, await auditDurableSessions()));
+        return;
+      }
+
+      if (url.pathname === "/api/agent-profile" && request.method === "GET") {
+        response.setHeader("cache-control", "no-store");
+        sendJson(response, 200, readAgentProfileBundle());
         return;
       }
 

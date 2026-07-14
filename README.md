@@ -282,6 +282,7 @@ Windows panes stage matching helpers when a new pane starts.
 | `wmux-media` | Render images, audio, or video through the browser |
 | `wmux-copy` / `wclip` | Hand text to the browser clipboard |
 | `wmux-hooks` | Install Claude, Codex, or OpenCode lifecycle hooks |
+| `wmux-agent-profile` | Plan/apply agent profiles, add skills, and bootstrap pinned tools |
 | `wmux-doctor` | Report host, pane, and durability health |
 
 Examples:
@@ -293,6 +294,8 @@ wmux-run -- npm test
 wmux-media ./image.png
 git diff | wmux-copy
 wmux-hooks install opencode
+wmux-agent-profile plan
+wmux-agent-profile status
 ```
 
 `wmux-hooks install opencode` writes an auto-loaded global TypeScript plugin to
@@ -311,6 +314,11 @@ The bundled Codex skill lives in `skills/wmux`:
 mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
 ln -sfnT "$(pwd)/skills/wmux" "${CODEX_HOME:-$HOME/.codex}/skills/wmux"
 ```
+
+Personal agent instructions and skills can live in a private
+`../wmux-agent-profile` peer directory and be applied conservatively when a new
+pane starts. See [Agent profiles](docs/AGENT_PROFILES.md) and the sanitized
+[`examples/wmux-agent-profile`](examples/wmux-agent-profile).
 
 Remote helpers are installed when a new pane starts; existing shells are not
 retrofitted automatically.

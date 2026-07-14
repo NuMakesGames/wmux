@@ -2,7 +2,7 @@ import type { MachineConfig } from "./types.js";
 import { runCommand } from "./child-process.js";
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
-const remotePathBootstrap = (): string => `export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"`;
+const remotePathBootstrap = (): string => `export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"`;
 
 export const durableSessionName = (paneId?: string): string =>
   `wmux_${(paneId || "unknown").replace(/[^A-Za-z0-9_-]/g, "_")}`;

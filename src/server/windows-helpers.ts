@@ -242,6 +242,10 @@ function global:__wmuxNormalizeStartCwd([string]$PathValue) {
 }
 
 ${windowsCwdPromptSnippet()}
+$AgentProfileHelper = Join-Path $HelperDir 'wmux-agent-profile.cmd'
+if (Test-Path -LiteralPath $AgentProfileHelper -PathType Leaf) {
+  & $AgentProfileHelper apply --quiet
+}
 $StartCwd = __wmuxNormalizeStartCwd $env:WMUX_START_CWD
 if ($StartCwd) {
   Set-Location -LiteralPath $StartCwd -ErrorAction SilentlyContinue
@@ -374,6 +378,14 @@ const windowsHelperFiles = (): Array<{ name: string; content: string }> => [
   {
     name: "wmux-windows-agent.cmd",
     content: pythonCmdShim("wmux-windows-agent.py"),
+  },
+  {
+    name: "wmux-agent-profile.py",
+    content: localScript("wmux-agent-profile"),
+  },
+  {
+    name: "wmux-agent-profile.cmd",
+    content: pythonCmdShim("wmux-agent-profile.py"),
   },
 ];
 

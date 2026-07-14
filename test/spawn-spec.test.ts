@@ -101,6 +101,14 @@ test("local durable credentials are staged outside observable process arguments"
   assert.equal(fs.statSync(spec.args[0]).mode & 0o777, 0o700);
 });
 
+test("raw local panes apply an available agent profile before the shell", () => {
+  const spec = buildSpawnSpec(machines[1].machine, 120, 40, extraEnv);
+  assert.equal(spec.file, "/bin/sh");
+  assert.ok((spec.env.PATH ?? "").split(path.delimiter).includes(path.join(os.homedir(), ".local", "bin")));
+  assert.match(spec.args.join(" "), /wmux-agent-profile apply --quiet/);
+  assert.match(spec.args.join(" "), /exec/);
+});
+
 test("POSIX SSH staging includes the hook installer beside its event helper", () => {
   const spec = buildSpawnSpec(machines[5].machine, 120, 40, extraEnv);
   const command = spec.args.join(" ");
@@ -108,4 +116,7 @@ test("POSIX SSH staging includes the hook installer beside its event helper", ()
   assert.match(command, /wmux-agent-event/);
   assert.match(command, /chmod \+x .*wmux-hooks/);
   assert.match(command, /ln -sf .*wmux-hooks/);
+  assert.match(command, /wmux-agent-profile/);
+  assert.match(command, /wmux-agent-profile apply --quiet/);
+  assert.match(command, /\$HOME\/\.local\/bin/);
 });
