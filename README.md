@@ -429,8 +429,10 @@ npm run test:e2e
   WebKit against an isolated loopback-only service.
 - `npm run test:e2e:chromium` is the faster browser subset.
 
-See [AGENTS.md](AGENTS.md) for engineering constraints and the complete list of
-known implementation gaps.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and
+[AGENTS.md](AGENTS.md) for engineering constraints and the complete list of
+known implementation gaps. Report vulnerabilities privately according to the
+[security policy](SECURITY.md).
 
 ## Current Limitations
 
