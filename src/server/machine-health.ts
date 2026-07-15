@@ -3,24 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { MachineConfig, MachinePlatform, MachineStatus } from "./types.js";
-import { POSIX_RUNTIME_VERSION } from "./spawn-backends.js";
 import {
   buildWindowsHealthProbeScript,
-  expectedWindowsAgentVersion,
+  expectedWindowsAgentProtocolVersion,
+  expectedWindowsAgentReleaseVersion,
   windowsHelperBundleVersion,
 } from "./windows-helpers.js";
 import { probeWindowsAgent, shouldUseWindowsAgent } from "./windows-agent.js";
+import { wmuxReleaseVersion } from "./version.js";
 
 const WINDOWS_HEALTH_CACHE_MS = 15_000;
-const WMUX_SERVER_VERSION = (() => {
-  try {
-    const packageJson = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version?: unknown };
-    return typeof packageJson.version === "string" && packageJson.version ? packageJson.version : "dev";
-  } catch {
-    return "dev";
-  }
-})();
-
 const nodeMachinePlatform = (nodePlatform: NodeJS.Platform): MachinePlatform => {
   if (nodePlatform === "darwin") return "mac";
   if (nodePlatform === "win32") return "win";
@@ -40,23 +32,28 @@ export const resolveMachinePlatform = (
 export const machineReleaseVersion = (
   machine: MachineConfig,
   nodePlatform: NodeJS.Platform = process.platform,
-): string => `v${WMUX_SERVER_VERSION.replace(/^v/i, "")}-${resolveMachinePlatform(machine, nodePlatform)}`;
+): string => wmuxReleaseVersion(resolveMachinePlatform(machine, nodePlatform));
 
 export const resolveMachineVersionStatus = ({
   reachable,
   runtimeVersion,
   expectedRuntimeVersion,
+  runtimeProtocolVersion,
+  expectedRuntimeProtocolVersion,
   helperBundleVersion,
   expectedHelperBundleVersion,
 }: {
   reachable: boolean;
   runtimeVersion?: string;
   expectedRuntimeVersion?: string;
+  runtimeProtocolVersion?: number;
+  expectedRuntimeProtocolVersion?: number;
   helperBundleVersion?: string;
   expectedHelperBundleVersion?: string;
 }): MachineStatus["versionStatus"] => {
   if (!reachable || !runtimeVersion || !expectedRuntimeVersion) return "unknown";
   if (runtimeVersion !== expectedRuntimeVersion) return "outdated";
+  if (expectedRuntimeProtocolVersion && runtimeProtocolVersion !== expectedRuntimeProtocolVersion) return "outdated";
   if (helperBundleVersion && expectedHelperBundleVersion && helperBundleVersion !== expectedHelperBundleVersion) {
     return "outdated";
   }
@@ -254,13 +251,14 @@ export const resolveMachineStatuses = async (
         };
       }
       if (machine.kind === "local") {
+        const runtimeVersion = machineReleaseVersion(machine);
         return {
           ...publicMachine,
           reachable: true,
           checkedAt,
           endpoint: localEndpoint === "localhost" ? "127.0.0.1" : localEndpoint,
-          runtimeVersion: WMUX_SERVER_VERSION,
-          expectedRuntimeVersion: WMUX_SERVER_VERSION,
+          runtimeVersion,
+          expectedRuntimeVersion: runtimeVersion,
           versionStatus: "current" as const,
           backendDetail: localBackendDetail(machine),
         };
@@ -294,9 +292,11 @@ export const resolveMachineStatuses = async (
         if (shouldUseWindowsAgent(machine)) {
           const sshReachable = hasSsh ? await probeTcp(machine.host, port, 900) : false;
           const agentReachable = agent?.reachable === true;
-          const runtimeVersion = agent?.health?.version;
+          const runtimeVersion = agent?.health?.releaseVersion ?? agent?.health?.version;
           const helperBundleVersion = agent?.health?.helperBundleVersion;
-          const expectedRuntimeVersion = expectedWindowsAgentVersion();
+          const expectedRuntimeVersion = expectedWindowsAgentReleaseVersion();
+          const runtimeProtocolVersion = agent?.health?.protocolVersion;
+          const expectedRuntimeProtocolVersion = expectedWindowsAgentProtocolVersion();
           const expectedHelperBundleVersion = windowsHelperBundleVersion();
           return {
             ...publicMachine,
@@ -306,12 +306,16 @@ export const resolveMachineStatuses = async (
             backendDetail: windowsStatusDetail(backendDetail(machine), agent),
             runtimeVersion,
             expectedRuntimeVersion,
+            runtimeProtocolVersion,
+            expectedRuntimeProtocolVersion,
             helperBundleVersion,
             expectedHelperBundleVersion,
             versionStatus: resolveMachineVersionStatus({
               reachable: agentReachable,
               runtimeVersion,
               expectedRuntimeVersion,
+              runtimeProtocolVersion,
+              expectedRuntimeProtocolVersion,
               helperBundleVersion,
               expectedHelperBundleVersion,
             }),
@@ -362,7 +366,7 @@ export const resolveMachineStatuses = async (
       }
       const port = machine.port ?? (machine.kind === "ssh" ? 22 : machine.kind === "powershell" ? 5985 : 3478);
       const reachable = await probeTcp(machine.host, port, 900);
-      const runtimeVersion = machine.kind === "ssh" ? POSIX_RUNTIME_VERSION : undefined;
+      const runtimeVersion = machine.kind === "ssh" ? machineReleaseVersion(machine) : undefined;
       return {
         ...publicMachine,
         reachable,
@@ -436,14 +440,14 @@ const windowsStatusDetail = (
     : "";
   const dependency =
     agent.health?.backend === "conpty" && agent.health.conptyAvailable === false ? "; pywinpty missing" : "";
-  const expectedVersion = expectedWindowsAgentVersion();
+  const expectedVersion = expectedWindowsAgentReleaseVersion();
+  const actualVersion = agent.health?.releaseVersion ?? agent.health?.version;
   const versionNote =
-    agent.reachable && expectedVersion && agent.health?.version && agent.health.version !== expectedVersion
-      ? ` (expected ${expectedVersion} — run wmux-windows-agent-service activate-update)`
+    agent.reachable && expectedVersion && actualVersion && actualVersion !== expectedVersion
+      ? ` (expected ${expectedVersion}; update stages on new pane creation)`
       : "";
   const agentDetail = agent.reachable
-    ? `agent ${agent.health?.version ?? "ready"}${versionNote}${backend}${processTree}${drainState} at ${agent.url}${dependency}`
+    ? `agent ${actualVersion ?? "ready"}${versionNote}${backend}${processTree}${drainState} at ${agent.url}${dependency}`
     : `agent unavailable at ${agent.url ?? "unknown URL"}`;
   return `${detail}; ${agentDetail}`;
 };
-

@@ -5,7 +5,8 @@ import {
   buildWindowsHelperBundle,
   buildWindowsPowerShellBootstrap,
   buildWindowsHealthProbeScript,
-  expectedWindowsAgentVersion,
+  expectedWindowsAgentProtocolVersion,
+  expectedWindowsAgentReleaseVersion,
   windowsHelperBundleVersion,
 } from "../src/server/windows-helpers.js";
 import type { MachineConfig } from "../src/server/types.js";
@@ -104,8 +105,15 @@ test("health probe reports the staged and expected bundle versions", () => {
   assert.ok(script.includes("helpersCurrent"));
 });
 
-test("expected agent version reads the shipped script's VERSION constant", () => {
-  assert.match(expectedWindowsAgentVersion(), /^\d+\.\d+$/);
+test("agent bundle uses the platform release and exposes protocol compatibility separately", () => {
+  assert.match(expectedWindowsAgentReleaseVersion(), /^v\d+\.\d+\.\d+-win$/);
+  assert.ok(expectedWindowsAgentProtocolVersion() >= 1);
+  const agent = buildWindowsHelperBundle(machine).files.find((file) => file.name === "wmux-windows-agent.py");
+  assert.ok(agent);
+  const content = Buffer.from(agent.dataBase64, "base64").toString("utf8");
+  assert.ok(content.includes(`RELEASE_VERSION = "${expectedWindowsAgentReleaseVersion()}"`));
+  assert.ok(content.includes(`PROTOCOL_VERSION = ${expectedWindowsAgentProtocolVersion()}`));
+  assert.ok(!content.includes("__WMUX_WINDOWS_AGENT_RELEASE_VERSION__"));
 });
 
 test("Windows agent service drains staged updates and refuses unsafe restarts", () => {
@@ -116,6 +124,8 @@ test("Windows agent service drains staged updates and refuses unsafe restarts", 
   assert.ok(content.includes("'activate-update'"));
   assert.ok(content.includes("'/drain'"));
   assert.ok(content.includes("restartWhenIdle"));
+  assert.ok(content.includes("Start-UpdateRestartWatcher"));
+  assert.ok(content.includes("[string]`$Main.State -ne 'Running'"));
   assert.ok(content.includes("Refusing to restart"));
   assert.ok(content.includes("restart --force"));
   assert.ok(content.includes("$RestartTaskName"));

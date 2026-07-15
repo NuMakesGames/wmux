@@ -12,6 +12,7 @@ import {
 const DEFAULT_TERM = "xterm-256color";
 const remotePathBootstrap = (): string => `export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"`;
 export const POSIX_RUNTIME_VERSION = "v1";
+export const POSIX_SSH_RUNTIME_VERSION = "v1";
 
 export const localMachine = (): MachineConfig => ({
   id: "local",
@@ -62,9 +63,6 @@ const sshBackend: Backend = {
   spawnSpec: (machine, { cols, rows, extraEnv, env, startCwd }) => {
     const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
     if (!target) throw new Error(`Machine ${machine.id} is missing host`);
-    const args = ["-t"];
-    if (machine.port) args.push("-p", String(machine.port));
-    args.push(target);
     const remoteEnv = {
       ...extraEnv,
       WMUX_MACHINE_ID: machine.id,
@@ -87,8 +85,8 @@ const sshBackend: Backend = {
         helperPathExport: `export PATH="$wmux_helper_dir:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH";`,
         useSystemdScope: false,
       });
-    args.push(`/bin/sh -lc ${shellQuote(remoteCommand)}`);
-    return { file: "ssh", args, cwd: os.homedir(), env, title: machine.name, trackProcessTitle: false };
+    const runtimePath = stageSshRuntime(machine, target, sessionName, remoteCommand);
+    return { file: "/bin/sh", args: [runtimePath], cwd: os.homedir(), env, title: machine.name, trackProcessTitle: false };
   },
 };
 
@@ -598,6 +596,67 @@ ${innerScript}
   fs.renameSync(temporaryPath, runtimePath);
   fs.chmodSync(runtimePath, 0o700);
   return runtimePath;
+};
+
+const stageSshRuntime = (
+  machine: MachineConfig,
+  target: string,
+  sessionName: string,
+  innerScript: string,
+): string => {
+  const base = process.env.XDG_RUNTIME_DIR?.startsWith("/")
+    ? process.env.XDG_RUNTIME_DIR
+    : path.join(os.homedir(), ".wmux", "run");
+  const runtimeDir = path.join(base, "wmux", "ssh-runtimes");
+  fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(runtimeDir, 0o700);
+
+  const stem = `${POSIX_SSH_RUNTIME_VERSION}-${sessionName}`;
+  const payloadPath = path.join(runtimeDir, `${stem}.payload.sh`);
+  const wrapperPath = path.join(runtimeDir, `${stem}.sh`);
+  const remoteName = `${stem}.sh`;
+  const temporaryPayloadPath = `${payloadPath}.${process.pid}.tmp`;
+  const temporaryWrapperPath = `${wrapperPath}.${process.pid}.tmp`;
+  const sshOptions = machine.port ? `-p ${shellQuote(String(machine.port))} ` : "";
+  const remoteRuntimeExpression = `\${XDG_CACHE_HOME:-\$HOME/.cache}/wmux/runtimes/${remoteName}`;
+  const stageCommand = `
+set -eu
+wmux_runtime_dir="\${XDG_CACHE_HOME:-$HOME/.cache}/wmux/runtimes"
+mkdir -p "$wmux_runtime_dir"
+chmod 700 "$wmux_runtime_dir" 2>/dev/null || true
+wmux_runtime="$wmux_runtime_dir/${remoteName}"
+wmux_runtime_tmp="$wmux_runtime.tmp.$$"
+trap 'rm -f "$wmux_runtime_tmp"' EXIT HUP INT TERM
+cat > "$wmux_runtime_tmp"
+chmod 700 "$wmux_runtime_tmp"
+mv -f "$wmux_runtime_tmp" "$wmux_runtime"
+trap - EXIT HUP INT TERM
+`;
+  const launchCommand = `exec /bin/sh "${remoteRuntimeExpression}"`;
+  const payload = `#!/bin/sh
+rm -f "$0" 2>/dev/null || true
+${innerScript}
+`;
+  const wrapper = `#!/bin/sh
+set -eu
+wmux_payload=${shellQuote(payloadPath)}
+wmux_wrapper=$0
+wmux_cleanup() { rm -f "$wmux_payload" "$wmux_wrapper"; }
+trap wmux_cleanup EXIT HUP INT TERM
+ssh -T ${sshOptions}${shellQuote(target)} ${shellQuote(stageCommand)} < "$wmux_payload"
+rm -f "$wmux_payload"
+trap - EXIT HUP INT TERM
+rm -f "$wmux_wrapper"
+exec ssh -t ${sshOptions}${shellQuote(target)} ${shellQuote(launchCommand)}
+`;
+
+  fs.writeFileSync(temporaryPayloadPath, payload, { mode: 0o600 });
+  fs.renameSync(temporaryPayloadPath, payloadPath);
+  fs.chmodSync(payloadPath, 0o600);
+  fs.writeFileSync(temporaryWrapperPath, wrapper, { mode: 0o700 });
+  fs.renameSync(temporaryWrapperPath, wrapperPath);
+  fs.chmodSync(wrapperPath, 0o700);
+  return wrapperPath;
 };
 
 const remoteHelperDir = (): string => "${XDG_CACHE_HOME:-$HOME/.cache}/wmux/bin";

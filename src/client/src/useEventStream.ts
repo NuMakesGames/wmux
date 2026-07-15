@@ -16,7 +16,6 @@ interface UseEventStreamCallbacks {
   // Receives either a revisioned socket snapshot or a recovery bootstrap.
   onResync: (payload: BootstrapPayload) => void;
   onAuthRequired: () => void;
-  onError: (message: string) => void;
 }
 
   // Owns the /ws/events socket: connection lifecycle with reconnect, recovery
@@ -33,22 +32,35 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
     let closed = false;
     let reconnectTimer: number | undefined;
     let resyncTimer: number | undefined;
+    let resyncAttempts = 0;
     let socket: WebSocket | null = null;
     // Coalesce recovery bootstraps when a socket connects or a legacy server
     // emits state-only events. Current servers send complete typed snapshots.
-    const scheduleResync = () => {
-      if (resyncTimer) return;
+    const scheduleResync = (delayMs = 60) => {
+      if (resyncTimer) {
+        if (delayMs > 0) return;
+        window.clearTimeout(resyncTimer);
+      }
       resyncTimer = window.setTimeout(() => {
         resyncTimer = undefined;
         if (closed) return;
         api
           .bootstrap()
-          .then((payload) => callbacksRef.current.onResync(payload))
+          .then((payload) => {
+            resyncAttempts = 0;
+            setServiceConnection("online");
+            callbacksRef.current.onResync(payload);
+          })
           .catch((nextError) => {
             if (nextError instanceof UnauthorizedError) callbacksRef.current.onAuthRequired();
-            else callbacksRef.current.onError(String(nextError));
+            else {
+              resyncAttempts += 1;
+              setServiceConnection("offline");
+              console.warn(`wmux: event resync failed; retrying: ${String(nextError)}`);
+              scheduleResync(Math.min(15_000, 500 * (2 ** Math.min(resyncAttempts, 5))));
+            }
           });
-      }, 60);
+      }, delayMs);
     };
     const connect = () => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -61,7 +73,7 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
         // Re-bootstrap on every (re)connect so state that changed while the
         // socket was down — including a full server restart — is picked up
         // instead of leaving the UI stale until the next incidental event.
-        scheduleResync();
+        scheduleResync(0);
       };
       ws.onmessage = (event) => {
         let message: EventServerMessage;
@@ -84,7 +96,7 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
           callbacksRef.current.onResync(message.state);
         }
         if (message.type === "state") {
-          scheduleResync();
+          scheduleResync(0);
         }
       };
       ws.onclose = () => {
@@ -96,11 +108,26 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
       };
       ws.onerror = () => setServiceConnection("offline");
     };
+    const resume = () => {
+      if (document.visibilityState === "hidden") return;
+      if (socket?.readyState === WebSocket.OPEN) {
+        scheduleResync(0);
+        return;
+      }
+      if (socket?.readyState === WebSocket.CONNECTING) return;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+      connect();
+    };
+    window.addEventListener("online", resume);
+    document.addEventListener("visibilitychange", resume);
     connect();
     return () => {
       closed = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (resyncTimer) window.clearTimeout(resyncTimer);
+      window.removeEventListener("online", resume);
+      document.removeEventListener("visibilitychange", resume);
       if (socketRef.current === socket) socketRef.current = null;
       socket?.close();
     };

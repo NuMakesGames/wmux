@@ -1,9 +1,15 @@
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import type { MachineConfig, PaneState } from "./types.js";
-import { buildWindowsHelperBundle } from "./windows-helpers.js";
+import {
+  buildWindowsHelperBundle,
+  expectedWindowsAgentProtocolVersion,
+  expectedWindowsAgentReleaseVersion,
+  type WindowsHelperBundle,
+} from "./windows-helpers.js";
 import { appendBoundedReplay } from "./replay-buffer.js";
 import { captureOsc7 } from "./osc7.js";
 import { selectAttachReplay, TerminalCheckpoint, type AttachReplay } from "./terminal-checkpoint.js";
@@ -27,6 +33,10 @@ interface AgentSessionResponse {
   rows?: number;
 }
 
+interface AgentSessionListResponse {
+  sessions?: AgentSessionResponse[];
+}
+
 interface AgentResizeEvent {
   cursor: number;
   cols: number;
@@ -48,6 +58,9 @@ interface AgentOutputResponse {
 
 export interface WindowsAgentHealth {
   ok?: boolean;
+  releaseVersion?: string;
+  protocolVersion?: number;
+  /** Transition alias returned by agents released before structured version fields. */
   version?: string;
   machine?: string;
   pid?: number;
@@ -61,6 +74,8 @@ export interface WindowsAgentHealth {
   conptyAvailable?: boolean;
   pywinptyAvailable?: boolean;
 }
+
+export type WindowsAgentUpdateActivator = (machine: MachineConfig) => Promise<void>;
 
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
 
@@ -125,6 +140,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     private readonly cols: number,
     private readonly rows: number,
     private readonly extraEnv: Record<string, string> = {},
+    private readonly activateUpdate: WindowsAgentUpdateActivator = activateWindowsAgentUpdate,
   ) {
     super();
     this.checkpoint = new TerminalCheckpoint(cols, rows);
@@ -196,6 +212,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     if (this.stopped) return;
     this.stopped = true;
     this.checkpoint.dispose();
+    this.resolveAttachReady();
   }
 
   pause(): void {
@@ -211,6 +228,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private async start(): Promise<void> {
     try {
       const helperBundle = buildWindowsHelperBundle(this.machine);
+      if (!await this.ensureCurrentAgent(helperBundle)) return;
       const response = await this.post<AgentSessionResponse>(`/sessions/${encodeURIComponent(this.pane.id)}`, {
         cols: this.cols,
         rows: this.rows,
@@ -250,11 +268,92 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     } catch (error) {
       this.pendingResize = undefined;
       this.pendingInput = [];
+      if (this.stopped) {
+        this.resolveAttachReady();
+        return;
+      }
       this.appendAndEmit(`\r\n[wmux] Windows agent attach failed: ${formatError(error)}\r\n`);
       this.exited = true;
       this.resolveAttachReady();
       this.emit("exit", 1);
     }
+  }
+
+  private async ensureCurrentAgent(helperBundle: WindowsHelperBundle): Promise<boolean> {
+    let health: WindowsAgentHealth;
+    let sessions: AgentSessionResponse[];
+    try {
+      health = await this.get<WindowsAgentHealth>("/health", 1500);
+      const listed = await this.get<AgentSessionListResponse>("/sessions", 3000);
+      sessions = listed.sessions ?? [];
+    } catch {
+      // Health/listing are update-control capabilities, not prerequisites for
+      // attaching. Older agents and protocol test doubles can still serve a
+      // session through the established create endpoint.
+      return !this.stopped;
+    }
+
+    const actualRelease = health.releaseVersion ?? health.version;
+    const expectedRelease = expectedWindowsAgentReleaseVersion();
+    if (!actualRelease || actualRelease === expectedRelease) return !this.stopped;
+
+    const existing = sessions.some((session) => session.id === this.pane.id && session.status !== "exited");
+    if (existing) return !this.stopped;
+
+    const supportsDrain =
+      (health.protocolVersion ?? 0) >= expectedWindowsAgentProtocolVersion()
+      || legacyAgentSupportsDrain(actualRelease);
+    if (!supportsDrain) return !this.stopped;
+
+    if (!health.draining) {
+      if (health.helperBundleVersion !== helperBundle.bundleVersion) {
+        const stagingId = `__wmux_update_${this.pane.id}_${Date.now().toString(36)}`;
+        try {
+          await this.post(`/sessions/${encodeURIComponent(stagingId)}`, {
+            cols: 80,
+            rows: 24,
+            shell: this.machine.shell || "",
+            helperBundle: { bundleVersion: helperBundle.bundleVersion, files: helperBundle.files },
+            env: { WMUX_MACHINE_ID: this.machine.id, WMUX_MACHINE_NAME: this.machine.name },
+          });
+        } finally {
+          await this.delete(`/sessions/${encodeURIComponent(stagingId)}`).catch(() => undefined);
+        }
+      }
+    }
+    // The agent cannot reliably restart its own Scheduled Task after exiting:
+    // Task Scheduler's restart-on-failure setting does not cover this on every
+    // supported host. The staged service helper creates an independent watcher
+    // task over SSH before it asks the agent to drain.
+    await this.activateUpdate(this.machine);
+    this.reportPendingUpdate(actualRelease, expectedRelease, health.activeSessions ?? 0);
+
+    while (!this.stopped) {
+      await delay(500);
+      try {
+        const current = await this.get<WindowsAgentHealth>("/health", 1500);
+        const currentRelease = current.releaseVersion ?? current.version;
+        if (current.ok === true && currentRelease === expectedRelease) {
+          this.appendAndEmit(`\r\n[wmux] Windows agent updated to ${expectedRelease}; opening pane.\r\n`);
+          return true;
+        }
+      } catch {
+        // The Scheduled Task briefly drops the listener while replacing the
+        // drained process. Keep waiting; no remote pane is owned by this
+        // pending session yet.
+      }
+    }
+    return false;
+  }
+
+  private reportPendingUpdate(actual: string, expected: string, activeSessions: number): void {
+    if (activeSessions > 0) {
+      this.appendAndEmit(
+        `\r\n[wmux] Windows agent update staged (${actual} → ${expected}). Waiting for ${activeSessions} existing pane(s) to close; they will not be interrupted.\r\n`,
+      );
+      return;
+    }
+    this.appendAndEmit(`\r\n[wmux] Updating Windows agent ${actual} → ${expected}; waiting for its service to restart.\r\n`);
   }
 
   private async hydrateReplay(targetCursor: number): Promise<void> {
@@ -386,6 +485,57 @@ const sameSize = (
   cols: number,
   rows: number,
 ): boolean => dimensions?.cols === cols && dimensions.rows === rows;
+
+const legacyAgentSupportsDrain = (release: string): boolean => {
+  const match = /^(\d+)\.(\d+)(?:\.|$)/.exec(release);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 0 || minor >= 7;
+};
+
+export const activateWindowsAgentUpdate: WindowsAgentUpdateActivator = async (machine) => {
+  if (!machine.host) throw new Error(`machine ${machine.id} is missing an SSH host`);
+  const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
+  const args = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"];
+  if (machine.port) args.push("-p", String(machine.port));
+  args.push(target, machine.shell ?? "pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-");
+  const script = `
+$Service = Join-Path $env:LOCALAPPDATA 'wmux\\bin\\wmux-windows-agent-service.ps1'
+if (-not (Test-Path -LiteralPath $Service -PathType Leaf)) {
+  Write-Error "wmux Windows agent service helper is not staged at $Service"
+  exit 127
+}
+& pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Service activate-update
+exit $LASTEXITCODE
+`;
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("ssh", args, { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = "";
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(new Error(`timed out activating the Windows agent update on ${machine.id}`));
+    }, 15_000);
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      if (stderr.length < 4096) stderr += chunk;
+    });
+    child.once("error", (error) => finish(error));
+    child.once("close", (status) => {
+      if (status === 0) finish();
+      else finish(new Error(`remote update activation failed with exit ${status ?? "unknown"}${stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""}`));
+    });
+    child.stdin.end(script);
+  });
+};
 
 const requestJson = <T>(
   method: string,

@@ -27,7 +27,9 @@ const machineVersionDetail = (machine: MachineStatus): string => {
   const expected = compactVersion(machine.expectedRuntimeVersion);
   const runtime = machine.expectedRuntimeVersion && machine.runtimeVersion !== machine.expectedRuntimeVersion
     ? `runtime ${actual}, expected ${expected}`
-    : `runtime ${actual}`;
+    : machine.runtimeVersion === machine.releaseVersion
+      ? ""
+      : `runtime ${actual}`;
   const helpers = machine.expectedHelperBundleVersion
     ? machine.helperBundleVersion
       ? machine.helperBundleVersion === machine.expectedHelperBundleVersion
@@ -35,7 +37,10 @@ const machineVersionDetail = (machine: MachineStatus): string => {
         : `helpers ${compactVersion(machine.helperBundleVersion)}, expected ${compactVersion(machine.expectedHelperBundleVersion)}`
       : "helpers not reported"
     : "";
-  return `${machine.name}: ${[`release ${machine.releaseVersion}`, runtime, helpers].filter(Boolean).join("; ")}`;
+  const protocol = machine.expectedRuntimeProtocolVersion && machine.runtimeProtocolVersion !== machine.expectedRuntimeProtocolVersion
+    ? `protocol ${machine.runtimeProtocolVersion ?? "?"}, expected ${machine.expectedRuntimeProtocolVersion}`
+    : "";
+  return `${machine.name}: ${[`release ${machine.releaseVersion}`, runtime, protocol, helpers].filter(Boolean).join("; ")}`;
 };
 
 export const summarizeWorkspaceVersion = (

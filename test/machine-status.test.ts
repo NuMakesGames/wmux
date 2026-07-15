@@ -29,7 +29,7 @@ test("browser-facing machine status excludes server-only configuration", async (
   assert.equal(status.id, "local");
   assert.equal(status.platform, resolveMachinePlatform({ id: "local", name: "Local", kind: "local" }));
   assert.match(status.releaseVersion, /^v\d+\.\d+\.\d+-(linux|mac|win)$/);
-  assert.match(status.runtimeVersion ?? "", /^\d+\.\d+\.\d+$/);
+  assert.match(status.runtimeVersion ?? "", /^v\d+\.\d+\.\d+-(linux|mac|win)$/);
   assert.equal(status.expectedRuntimeVersion, status.runtimeVersion);
   assert.equal(status.versionStatus, "current");
   assert.equal(status.stream?.gatewayUrl, "https://gateway.example");

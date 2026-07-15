@@ -76,7 +76,7 @@ export function App() {
   const store = useMemo(createAppStore, []);
   const state = useAppState(store);
   const [newMachineId, setNewMachineId] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
   const [bootComplete, setBootComplete] = useState(false);
   const { toasts, pushToast, dismissToast } = useToasts();
@@ -107,6 +107,10 @@ export function App() {
   const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
   const pendingActionKeys = useRef(new Set<string>());
   const terminalFocusToken = useRef(0);
+  const bootstrapRetryTimer = useRef<number | undefined>(undefined);
+  const bootstrapRetryAttempt = useRef(0);
+  const bootstrapRequestId = useRef(0);
+  const loadBootstrapRef = useRef<() => Promise<void>>(async () => undefined);
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const mobileSidebarCloseRef = useRef<HTMLButtonElement | null>(null);
   const previousMobileSidebarCollapsed = useRef(sidebarCollapsed);
@@ -180,26 +184,53 @@ export function App() {
   }, [refreshDiagnostics]);
 
   const loadBootstrap = useCallback(async () => {
+    const requestId = ++bootstrapRequestId.current;
+    if (bootstrapRetryTimer.current) window.clearTimeout(bootstrapRetryTimer.current);
+    bootstrapRetryTimer.current = undefined;
     try {
       const payload = await api.bootstrap();
       const routed = await activateRouteTarget(payload);
+      if (requestId !== bootstrapRequestId.current) return;
+      bootstrapRetryAttempt.current = 0;
+      setLoadError(null);
       setAuthRequired(false);
       store.set(routed);
     } catch (nextError) {
+      if (requestId !== bootstrapRequestId.current) return;
       // An auth failure routes to the login screen instead of the fatal overlay.
-      if (nextError instanceof UnauthorizedError) setAuthRequired(true);
-      else setError(String(nextError));
+      if (nextError instanceof UnauthorizedError) {
+        bootstrapRetryAttempt.current = 0;
+        setLoadError(null);
+        setAuthRequired(true);
+        return;
+      }
+      bootstrapRetryAttempt.current += 1;
+      if (!store.get()) setLoadError(describeActionError(nextError));
+      const delay = Math.min(15_000, 500 * (2 ** Math.min(bootstrapRetryAttempt.current, 5)));
+      bootstrapRetryTimer.current = window.setTimeout(() => void loadBootstrapRef.current(), delay);
     }
   }, [store]);
+  loadBootstrapRef.current = loadBootstrap;
 
   useEffect(() => {
     void loadBootstrap();
-  }, [loadBootstrap]);
+    const resume = () => {
+      if (document.visibilityState === "hidden" || store.get()) return;
+      void loadBootstrapRef.current();
+    };
+    window.addEventListener("online", resume);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      bootstrapRequestId.current += 1;
+      if (bootstrapRetryTimer.current) window.clearTimeout(bootstrapRetryTimer.current);
+      window.removeEventListener("online", resume);
+      document.removeEventListener("visibilitychange", resume);
+    };
+  }, [loadBootstrap, store]);
 
   const { serviceConnection, mediaItems, dismissMedia, sendEventSocketMessage } = useEventStream({
     onResync: (payload) => void refresh(payload),
     onAuthRequired: () => setAuthRequired(true),
-    onError: (message) => setError(message),
   });
 
   const activeWorkspace = useMemo(
@@ -411,7 +442,7 @@ export function App() {
     openTuiMode,
     activeWorkspace,
     activeTab,
-    onError: (message) => setError(message),
+    onError: (message) => pushToast(`Sync failed: ${message}`),
     onMobileNavigate: () => {
       collapseSidebar();
       settleMobileViewportAfterNavigation();
@@ -1012,7 +1043,18 @@ export function App() {
     unreadNotifications.length,
   ]);
 
-  if (error) return <div className="load-state">wmux failed to load: {error}</div>;
+  if (!state && loadError && !authRequired) {
+    return (
+      <div className="load-state" role="status" aria-live="polite">
+        <div className="load-state-card">
+          <strong>Reconnecting to wmux</strong>
+          <span>The network may still be waking up. Retrying automatically.</span>
+          <small>{loadError}</small>
+          <button type="button" onClick={() => void loadBootstrap()}>Retry now</button>
+        </div>
+      </div>
+    );
+  }
   if (!state || !bootComplete || authRequired) {
     return (
       <RetroBootScreen

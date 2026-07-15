@@ -3,6 +3,10 @@ import { once } from "node:events";
 import http from "node:http";
 import test from "node:test";
 import { probeWindowsAgent, WindowsAgentSession } from "../src/server/windows-agent.js";
+import {
+  expectedWindowsAgentProtocolVersion,
+  expectedWindowsAgentReleaseVersion,
+} from "../src/server/windows-helpers.js";
 import { TerminalCheckpoint } from "../src/server/terminal-checkpoint.js";
 import type { MachineConfig, PaneState } from "../src/server/types.js";
 
@@ -126,6 +130,112 @@ test("Windows agent detach preserves the remote session while kill deletes it", 
   killed.kill();
   await waitUntil(() => deleted.includes("/sessions/pane_kill"));
 
+  server.close();
+  await once(server, "close");
+});
+
+test("a new Windows pane stages and safely activates an outdated agent", async () => {
+  const expectedRelease = expectedWindowsAgentReleaseVersion();
+  let release = "0.7";
+  let helperBundleVersion = "stale";
+  let staged = false;
+  let drained = false;
+  let created = false;
+  const server = http.createServer((request, response) => {
+    const path = request.url ?? "";
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET" && path === "/health") {
+      response.end(JSON.stringify({
+        ok: true,
+        version: release,
+        releaseVersion: release,
+        protocolVersion: release === expectedRelease ? expectedWindowsAgentProtocolVersion() : undefined,
+        helperBundleVersion,
+        activeSessions: 0,
+        draining: drained,
+      }));
+      return;
+    }
+    if (request.method === "GET" && path === "/sessions") {
+      response.end(JSON.stringify({ sessions: [] }));
+      return;
+    }
+    if (request.method === "POST" && path.startsWith("/sessions/__wmux_update_")) {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          helperBundle?: { bundleVersion?: string };
+        };
+        helperBundleVersion = body.helperBundle?.bundleVersion ?? helperBundleVersion;
+        staged = true;
+        response.end(JSON.stringify({ id: path.split("/")[2], status: "running" }));
+      });
+      return;
+    }
+    if (request.method === "DELETE" && path.startsWith("/sessions/__wmux_update_")) {
+      response.end(JSON.stringify({ removed: true }));
+      return;
+    }
+    if (request.method === "POST" && path === "/drain") {
+      drained = true;
+      setTimeout(() => {
+        release = expectedRelease;
+        drained = false;
+      }, 20);
+      response.end(JSON.stringify({ activeSessions: 0, draining: true, restartWhenIdle: true }));
+      return;
+    }
+    if (request.method === "POST" && path === "/sessions/pane_update") {
+      created = true;
+      response.end(JSON.stringify({ id: "pane_update", pid: 123, base: 0, cursor: 0 }));
+      return;
+    }
+    if (request.method === "GET" && path.startsWith("/sessions/pane_update/output")) {
+      response.end(JSON.stringify({ base: 0, cursor: 0, dataBase64: "", exited: false }));
+      return;
+    }
+    response.writeHead(404).end(JSON.stringify({ error: "not_found" }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const session = new WindowsAgentSession(
+    {
+      id: "pane_update",
+      machineId: "windows",
+      title: "PowerShell",
+      status: "idle",
+      createdAt: new Date(0).toISOString(),
+    },
+    {
+      id: "windows",
+      name: "Windows",
+      kind: "powershell-ssh",
+      host: "127.0.0.1",
+      sessionBackend: "agent",
+      agentUrl: `http://127.0.0.1:${address.port}`,
+    },
+    80,
+    24,
+    {},
+    async () => {
+      const response = await fetch(`http://127.0.0.1:${address.port}/drain`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ restartWhenIdle: true }),
+      });
+      assert.equal(response.ok, true);
+    },
+  );
+  await session.attachReady;
+  assert.equal(staged, true);
+  assert.equal(drained, false);
+  assert.equal(created, true);
+  assert.match(session.replayOutput, new RegExp(`Updating Windows agent 0\\.7 → ${expectedRelease}`));
+  assert.match(session.replayOutput, new RegExp(`updated to ${expectedRelease}`));
+  session.detach();
   server.close();
   await once(server, "close");
 });

@@ -111,7 +111,15 @@ test("raw local panes apply an available agent profile before the shell", () => 
 
 test("POSIX SSH staging includes the hook installer beside its event helper", () => {
   const spec = buildSpawnSpec(machines[5].machine, 120, 40, extraEnv);
-  const command = spec.args.join(" ");
+  assert.equal(spec.file, "/bin/sh");
+  assert.equal(spec.args.length, 1);
+  assert.match(spec.args[0], /wmux\/ssh-runtimes\/v1-wmux_pane_fixed001\.sh$/);
+  assert.ok(Buffer.byteLength(spec.args[0]) < 1024, "spawn argv remains bounded");
+
+  const wrapper = fs.readFileSync(spec.args[0], "utf8");
+  const payloadMatch = wrapper.match(/wmux_payload='([^']+)'/);
+  assert.ok(payloadMatch, "wrapper identifies its staged payload");
+  const command = fs.readFileSync(payloadMatch[1], "utf8");
   assert.match(command, /wmux-hooks/);
   assert.match(command, /wmux-agent-event/);
   assert.match(command, /chmod \+x .*wmux-hooks/);
@@ -119,4 +127,5 @@ test("POSIX SSH staging includes the hook installer beside its event helper", ()
   assert.match(command, /wmux-agent-profile/);
   assert.match(command, /wmux-agent-profile apply --quiet/);
   assert.match(command, /\$HOME\/\.local\/bin/);
+  assert.equal(wrapper.includes(extraEnv.WMUX_TOKEN), false, "credentials stay in the staged payload");
 });

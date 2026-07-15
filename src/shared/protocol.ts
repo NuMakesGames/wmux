@@ -32,6 +32,8 @@ export interface MachineStatus {
   releaseVersion: string;
   runtimeVersion?: string;
   expectedRuntimeVersion?: string;
+  runtimeProtocolVersion?: number;
+  expectedRuntimeProtocolVersion?: number;
   helperBundleVersion?: string;
   expectedHelperBundleVersion?: string;
   versionStatus?: MachineVersionStatus;

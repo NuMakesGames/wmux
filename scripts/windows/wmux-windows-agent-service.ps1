@@ -173,6 +173,38 @@ function Show-Usage {
   Write-Error 'usage: wmux-windows-agent-service [install|activate-update|cancel-update|restart [--force]|stop|uninstall|status|logs|diagnose]'
 }
 
+function Start-UpdateRestartWatcher {
+  # This task is deliberately outside the agent process. It waits without
+  # stopping anything, then starts the main task only after a drained agent has
+  # exited. Task Scheduler does not consistently apply RestartCount to an
+  # on-demand task that exits with the agent's restart code.
+  $ExistingWatcher = Get-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
+  if ($ExistingWatcher -and [string]$ExistingWatcher.State -eq 'Running') { return }
+  $RestartScript = Join-Path $HelperDir 'wmux-windows-agent-update.ps1'
+  $Sequence = @"
+while (`$true) {
+  `$Main = Get-ScheduledTask -TaskName '$($TaskName -replace "'", "''")' -ErrorAction SilentlyContinue
+  if (-not `$Main) { exit 2 }
+  if ([string]`$Main.State -ne 'Running') {
+    Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
+    exit 0
+  }
+  Start-Sleep -Seconds 1
+}
+"@
+  [System.IO.File]::WriteAllText($RestartScript, $Sequence, [System.Text.UTF8Encoding]::new($false))
+  $MainTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+  $RestartAction = New-HiddenPowerShellAction -ScriptPath $RestartScript
+  $RestartSettings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -MultipleInstances IgnoreNew
+  $RestartTask = New-ScheduledTask -Action $RestartAction -Principal $MainTask.Principal -Settings $RestartSettings
+  Register-ScheduledTask -TaskName $RestartTaskName -InputObject $RestartTask -Force | Out-Null
+  Start-ScheduledTask -TaskName $RestartTaskName
+}
+
 switch ($ActionName) {
   'install' {
     if (-not (Test-Path -LiteralPath $Agent -PathType Leaf)) {
@@ -237,9 +269,12 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Write-Output "Restarting $TaskName through the independent $RestartTaskName task"
   }
   'activate-update' {
+    Start-UpdateRestartWatcher
     try {
       $Drain = Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true }
     } catch {
+      Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
+      Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
       Write-Error "The running agent does not support safe drain activation. Stage the current helper, then restart --force only when losing active panes is acceptable. $($_.Exception.Message)"
       exit 4
     }
@@ -253,6 +288,8 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
   }
   'cancel-update' {
     $Drain = Invoke-AgentRequest -Method DELETE -Path '/drain'
+    Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Output "Drain cancelled; active pane sessions: $(Get-ActiveSessionCount $Drain)"
   }
   'stop' {

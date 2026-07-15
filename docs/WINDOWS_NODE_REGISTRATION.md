@@ -373,7 +373,8 @@ Expected:
 ```json
 {
   "ok": true,
-  "version": "0.8",
+  "releaseVersion": "v0.1.2-win",
+  "protocolVersion": 1,
   "machine": "windows-box",
   "backend": "conpty",
   "conptyAvailable": true,
@@ -436,13 +437,14 @@ The agent task uses `Interactive` logon when a desktop user is logged in and fal
 - `wmux-windows-setup validate` reports the `wmux-windows-agent` helper and agent config present.
 - `curl http://100.64.0.30:3481/health` reports the Windows session agent as healthy.
 - A direct `/sessions/:id` create/input/output/delete smoke test returns command output.
-- `wmux-windows-agent-service activate-update` drains existing sessions and automatically restarts only after the last pane closes; `cancel-update` cancels the drain.
+- Creating a new pane against an outdated agent stages the current release, starts an independent restart watcher through the SSH helper, drains existing sessions, and automatically restarts only after the last existing pane closes. The pending pane displays that state instead of interrupting work.
+- `wmux-windows-agent-service activate-update` requests that same drain manually; `cancel-update` cancels it.
 - `wmux-windows-setup install-hooks` reports Claude and Codex hooks installed; `/hooks` in a new Codex session shows the direct PowerShell command ready for review/trust.
 - Changing directories in PowerShell updates the pane cwd, and a same-host split starts in that directory.
 
 ## Known Limits
 
 - Legacy Windows SSH PowerShell panes are not durable. Agent-backed Windows panes are owned by `wmux-windows-agent`; wmux service shutdown detaches its client while explicit pane closure deletes the owned pane process and its Windows Job Object, terminating detached descendants.
-- Windows helper staging and cwd reporting require a new pane after the wmux service has been updated.
+- Windows helper staging and cwd reporting require a new pane after the wmux service has been updated. For agent-backed hosts, that pane also activates a staged agent update when it is safe.
 - Windows screen streaming is validated on a dogfood Windows host through FFmpeg/gdigrab and the supervised per-user Scheduled Task. Locked/logged-out behavior and a fuller Windows wmux agent are still not implemented.
-- The managed Windows session agent uses `backend: "auto"`, preferring pywinpty-backed ConPTY and falling back to terminal-normalized stdio when pywinpty is unavailable. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running. Agent 0.7 added non-destructive staged-update draining, agent 0.8 added terminal-safe stdio newline handling, agent 0.9 records byte-exact resize boundaries, and agent 1.0 applies an available `wmux-agent-profile` before launching a new PowerShell session. Older agents use a best-effort 80x24 replay fallback. A forced Windows-agent restart still kills owned pane processes, so process preservation across an unexpected agent crash and broad full-screen app validation remain pending.
+- The managed Windows session agent uses `backend: "auto"`, preferring pywinpty-backed ConPTY and falling back to terminal-normalized stdio when pywinpty is unavailable. It is restart-durable across `wmux.service` restarts while the Windows agent keeps running. Agent releases use the same platform-suffixed wmux version shown by the UI (for example, `v0.1.2-win`); the HTTP protocol version is reported separately. The current protocol supports non-destructive staged-update draining, terminal-safe stdio newlines, byte-exact resize boundaries, and applying an available `wmux-agent-profile` before a new PowerShell session. Legacy agents use a best-effort 80x24 replay fallback. A forced Windows-agent restart still kills owned pane processes, so process preservation across an unexpected agent crash and broad full-screen app validation remain pending.

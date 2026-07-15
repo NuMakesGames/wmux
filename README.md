@@ -350,8 +350,11 @@ Opt in from the machine's untracked config:
 
 Managed configs use `backend: "auto"`: ConPTY is preferred and terminal-safe
 stdio is the fallback when `pywinpty` is unavailable. Existing explicit
-`"conpty"` or `"stdio"` values remain pinned. To safely activate a staged
-agent update while panes are open:
+`"conpty"` or `"stdio"` values remain pinned. New pane creation stages an
+outdated agent and requests a non-destructive update automatically. If Windows
+panes are active, the new pane visibly waits while the old panes keep running;
+the agent restarts after the last one closes. You can request the same process
+manually with:
 
 ```powershell
 wmux-windows-agent-service activate-update
@@ -375,10 +378,10 @@ owner-only writes with a rolling validated backup.
 | Windows session agent | Yes | Yes, while the agent remains running |
 
 Each live pane also has bounded raw replay and an in-memory terminal checkpoint
-for alternate-screen or truncated-history reconnects. Windows agent 0.9 records
-resize boundaries with its replay, allowing wmux to rebuild a correctly sized
-checkpoint after a service restart. Other checkpoints remain in-memory only;
-durable multiplexers redraw when wmux reattaches.
+for alternate-screen or truncated-history reconnects. The current Windows
+agent records resize boundaries with its replay, allowing wmux to rebuild a
+correctly sized checkpoint after a service restart. Other checkpoints remain
+in-memory only; durable multiplexers redraw when wmux reattaches.
 
 Explicitly closing a pane, tab, or workspace kills its backing session. Audit
 local wmux-owned multiplexer sessions with:
@@ -447,8 +450,8 @@ known implementation gaps. Report vulnerabilities privately according to the
 - wmux is single-user and private-network only.
 - Machine management remains file-based; dynamic registrations have no UI.
 - Linux and macOS session agents are not implemented. The Windows agent is
-  experimental and does not preserve processes across its own restart. Agents
-  older than 0.9 also lack size-aware replay for panes resized before reattach.
+  experimental and does not preserve processes across its own unexpected or
+  forced restart. Automatic staged updates wait for active panes to close.
 - Dynamic registered panes need separately provisioned auth for helpers that
   post back to wmux.
 - Kitty graphics support is partial; Sixel and iTerm2 image protocols are not

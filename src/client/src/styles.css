@@ -2632,6 +2632,33 @@ button.active-tool {
   text-transform: uppercase;
 }
 
+.load-state-card {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 24px;
+  text-align: center;
+}
+
+.load-state-card span,
+.load-state-card small {
+  color: var(--muted);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.load-state-card button {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--gold);
+  background: transparent;
+  color: var(--gold);
+  font: inherit;
+  cursor: pointer;
+}
+
 .retro-boot-screen {
   display: grid;
   place-items: center;

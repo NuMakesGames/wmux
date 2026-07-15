@@ -39,6 +39,26 @@ test("creates a workspace through the command palette and preserves its direct l
   await expect(page).toHaveURL(new RegExp(`${directPath.replaceAll("/", "\\/")}$`));
 });
 
+test("keeps the loaded UI and recovers when a wake-up bootstrap briefly fails", async ({ page }) => {
+  let failures = 0;
+  let requests = 0;
+  await page.route("**/api/bootstrap", async (route) => {
+    requests += 1;
+    if (failures < 2) {
+      failures += 1;
+      await route.abort("internetdisconnected");
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect(page.locator("main.app-shell")).toBeVisible();
+  await expect(page.getByText(/wmux failed to load/i)).toHaveCount(0);
+  await expect.poll(() => failures).toBe(2);
+  await expect.poll(() => requests, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+});
+
 test("completes a Ctrl+Alt-drag rectangle on outside mouseup and clears it on keyboard input", async ({
   page,
   request,

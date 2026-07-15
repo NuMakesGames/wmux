@@ -18,7 +18,8 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-VERSION = "1.0"
+RELEASE_VERSION = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__"
+PROTOCOL_VERSION = 1
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
@@ -898,7 +899,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(
                 {
                     "ok": True,
-                    "version": VERSION,
+                    # `version` remains as a transition alias for wmux servers
+                    # that predate the structured release/protocol fields.
+                    "version": RELEASE_VERSION,
+                    "releaseVersion": RELEASE_VERSION,
+                    "protocolVersion": PROTOCOL_VERSION,
                     "machine": config_string(self.state.config, "machine", "windows"),
                     "pid": os.getpid(),
                     **lifecycle,

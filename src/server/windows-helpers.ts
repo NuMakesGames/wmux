@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { streamPathForMachine } from "./streams.js";
 import type { MachineConfig } from "./types.js";
+import { wmuxReleaseVersion } from "./version.js";
 
 const psSingleQuote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 const windowsBootstrapEnvKeys = new Set([
@@ -28,6 +29,7 @@ const windowsRequiredHelperNames = [
   "wmux-windows-setup",
 ];
 const windowsClipboardAliasNames = ["wmux-clip", "wclip", "wmclip"];
+const WINDOWS_AGENT_RELEASE_PLACEHOLDER = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__";
 
 export const encodePowerShellCommand = (script: string): string =>
   Buffer.from(script, "utf16le").toString("base64");
@@ -373,7 +375,7 @@ const windowsHelperFiles = (): Array<{ name: string; content: string }> => [
   },
   {
     name: "wmux-windows-agent.py",
-    content: localScript("wmux-windows-agent"),
+    content: windowsAgentSource(),
   },
   {
     name: "wmux-windows-agent.cmd",
@@ -427,13 +429,18 @@ const windowsAgentConfig = (machine: MachineConfig): Record<string, unknown> => 
 // test/osc7.test.ts asserts the two never drift.
 export const windowsCwdPromptSnippet = (): string => localWindowsHelperScript("wmux-cwd-prompt.ps1");
 
-// The agent version wmux expects: the VERSION constant of the agent script
-// this server ships in its helper bundle. A running agent reporting an older
-// version predates the last bundle restage.
-export const expectedWindowsAgentVersion = (): string => {
-  const match = localScript("wmux-windows-agent").match(/^VERSION = "([^"]+)"/m);
-  return match?.[1] ?? "";
+export const expectedWindowsAgentReleaseVersion = (): string => wmuxReleaseVersion("win");
+
+export const expectedWindowsAgentProtocolVersion = (): number => {
+  const match = localScript("wmux-windows-agent").match(/^PROTOCOL_VERSION = (\d+)/m);
+  return Number(match?.[1] ?? 0);
 };
+
+const windowsAgentSource = (): string =>
+  localScript("wmux-windows-agent").replaceAll(
+    WINDOWS_AGENT_RELEASE_PLACEHOLDER,
+    expectedWindowsAgentReleaseVersion(),
+  );
 
 const localWindowsHelperScript = (name: string): string => {
   try {
