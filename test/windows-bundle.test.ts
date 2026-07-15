@@ -151,5 +151,10 @@ test("Windows agent service drains staged updates and refuses unsafe restarts", 
   assert.ok(content.includes("restart --force"));
   assert.ok(content.includes("$RestartTaskName"));
   assert.ok(content.includes("Register-ScheduledTask -TaskName $RestartTaskName"));
+  assert.ok(content.includes("New-WmuxTaskTriggers"));
+  assert.ok(content.includes("RepetitionInterval (New-TimeSpan -Minutes 1)"));
+  assert.ok(content.includes("-MultipleInstances IgnoreNew"));
+  assert.ok(content.includes("Disable-ScheduledTask -TaskName $TaskName"));
+  assert.ok(content.includes("Get-AgentGenerationTasks"));
   assert.ok(!content.includes("Start-Process -FilePath $PowerShell"));
 });

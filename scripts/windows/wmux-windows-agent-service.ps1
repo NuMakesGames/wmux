@@ -164,6 +164,22 @@ function New-WmuxTaskSettings {
     -MultipleInstances IgnoreNew
 }
 
+function New-WmuxTaskTriggers {
+  @(
+    New-ScheduledTaskTrigger -AtLogOn
+    New-ScheduledTaskTrigger `
+      -Once `
+      -At (Get-Date).AddMinutes(1) `
+      -RepetitionInterval (New-TimeSpan -Minutes 1)
+  )
+}
+
+function Get-AgentGenerationTasks {
+  $GenerationPattern = '^' + [regex]::Escape($TaskName) + '-\d+$'
+  @(Get-ScheduledTask -TaskName "$TaskName-*" -ErrorAction SilentlyContinue |
+    Where-Object { $_.TaskName -match $GenerationPattern })
+}
+
 function Get-AgentLogonType {
   if ($env:WMUX_WINDOWS_AGENT_LOGON_TYPE) {
     if ($env:WMUX_WINDOWS_AGENT_LOGON_TYPE -notin @('Interactive', 'S4U')) {
@@ -212,7 +228,7 @@ function Start-AgentGeneration {
 
   $MainTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
   $GenerationAction = New-HiddenPowerShellAction -ScriptPath $GenerationWrapper
-  $GenerationTrigger = New-ScheduledTaskTrigger -AtLogOn
+  $GenerationTrigger = New-WmuxTaskTriggers
   $GenerationSettings = New-WmuxTaskSettings
   $GenerationTask = New-ScheduledTask -Action $GenerationAction -Trigger $GenerationTrigger -Principal $MainTask.Principal -Settings $GenerationSettings
   Register-ScheduledTask -TaskName $GenerationTaskName -InputObject $GenerationTask -Force | Out-Null
@@ -331,7 +347,7 @@ switch ($ActionName) {
     }
     Write-Wrapper
     $TaskAction = New-HiddenPowerShellAction
-    $TaskTrigger = New-ScheduledTaskTrigger -AtLogOn
+    $TaskTrigger = New-WmuxTaskTriggers
     $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     $LogonType = Get-AgentLogonType
     $TaskPrincipal = New-ScheduledTaskPrincipal -UserId $Identity -LogonType $LogonType
@@ -344,6 +360,7 @@ switch ($ActionName) {
     Write-Output "Logs: $LogDir"
   }
   'restart' {
+    Enable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
     if (-not $Force) {
       $DrainStarted = $false
       try {
@@ -429,6 +446,11 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
   'stop' {
     Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
+    foreach ($GenerationTask in Get-AgentGenerationTasks) {
+      Disable-ScheduledTask -TaskName $GenerationTask.TaskName -ErrorAction SilentlyContinue | Out-Null
+      Stop-ScheduledTask -TaskName $GenerationTask.TaskName -ErrorAction SilentlyContinue
+    }
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Stop-AgentProcesses
   }
@@ -437,6 +459,9 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Stop-AgentProcesses
+    foreach ($GenerationTask in Get-AgentGenerationTasks) {
+      Unregister-ScheduledTask -TaskName $GenerationTask.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Output "Uninstalled $TaskName"
   }

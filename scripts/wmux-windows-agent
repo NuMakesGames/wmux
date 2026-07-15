@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 RELEASE_VERSION = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__"
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"

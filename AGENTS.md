@@ -25,6 +25,8 @@ This is intentionally not a multi-tenant SaaS app. Bearer authentication is defe
 - `npm run audit:sessions` audits local wmux-managed durable `tmux`/`screen` sessions.
 - `npm run audit:sessions -- --json` emits the same audit as JSON.
 - `scripts/install-user-service.sh` installs or updates the systemd user service. It picks a Tailscale IPv4 address when available; override with `WMUX_HOST` and `WMUX_PORT`.
+
+Operational incident work should default to the durable repair: restore service, identify why supervision or recovery failed, and remove that recurrence path. Do not stop at a manual restart unless the user explicitly asks for diagnosis or temporary recovery only.
 - `scripts/install-heartbeat-service.sh` installs the dynamic-host heartbeat systemd user timer after its URL, token, and machine descriptor are provisioned.
 
 Useful service commands:
@@ -129,7 +131,7 @@ Keep websocket, media, clipboard, hook, and run endpoints behind the same networ
 - Windows helper scripts live under `scripts/windows` and are served as a Base64 helper bundle instead of being embedded in the SSH command line. Keep the launch command small; Windows OpenSSH rejects large encoded commands.
 - `wmux-heartbeat` refreshes a dynamic host registration. POSIX hosts can use the shipped systemd user timer; Windows hosts can install the staged `wmux-heartbeat-service` Scheduled Task with `wmux-windows-setup install-heartbeat`. Registration token distribution remains an explicit manual step.
 - `wmux-windows-setup` is the Windows self-check/setup entry point. It validates helper state, can persist the helper directory to the user PATH, can install FFmpeg/Python with `winget`, installs `pywinpty` for ConPTY, and can install/status the per-user stream and session-agent Scheduled Tasks. It must work both inside a bootstrapped wmux pane and from plain SSH where `%LOCALAPPDATA%\wmux\bin` is not yet on `PATH`.
-- `wmux-windows-agent` is served as `wmux-windows-agent.py` plus a CMD shim. Its HTTP API owns sessions keyed by wmux pane id: create/attach, input, pywinpty-backed ConPTY resize, output long-poll, list, health, and delete. It must bind only loopback, Tailscale, or RFC1918/internal hosts.
+- `wmux-windows-agent` is served as `wmux-windows-agent.py` plus a CMD shim. Its HTTP API owns sessions keyed by wmux pane id: create/attach, input, pywinpty-backed ConPTY resize, output long-poll, list, health, and delete. It must bind only loopback, Tailscale, or RFC1918/internal hosts. Its Scheduled Task uses both logon and once-per-minute triggers with `MultipleInstances: IgnoreNew`; this is intentional supervision for unexpected termination. Explicit `stop` must disable the base and generation tasks so they remain stopped.
 - Windows PowerShell bootstraps disable PSReadLine predictions to avoid inline history suggestions painting ghost text into browser terminal output.
 - Terminal-native image rendering is intentionally implemented around the terminal viewport as Kitty placeholder overlays. Keep product styling out of the terminal canvas/content area.
 - `wmux-hooks install claude` mutates `~/.claude/settings.json` outside the repo. Merge hooks idempotently and preserve user settings.

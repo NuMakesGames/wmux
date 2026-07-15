@@ -33,7 +33,7 @@ import { maxSidebarWidth, useSidebar } from "./useSidebar";
 import { writeBrowserClipboard } from "./clipboard";
 import { summarizeWorkspaceVersion } from "./workspace-version";
 import { useMobileViewportState } from "./mobile-viewport";
-import { resolveMachineTargetId } from "./machine-target";
+import { loadMachineTargetId, persistMachineTargetId, resolveMachineTargetId } from "./machine-target";
 import { workspacePresentationDescriptor, workspacePresentationMachineId } from "./workspace-presentation";
 import type {
   AgentActivity,
@@ -75,7 +75,7 @@ export function App() {
   const mobileViewport = useMobileViewportState();
   const store = useMemo(createAppStore, []);
   const state = useAppState(store);
-  const [newMachineId, setNewMachineId] = useState("");
+  const [newMachineId, setNewMachineId] = useState(() => loadMachineTargetId(window.localStorage));
   const [loadError, setLoadError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState(false);
   const [bootComplete, setBootComplete] = useState(false);
@@ -493,8 +493,13 @@ export function App() {
   const targetMachineId = resolveMachineTargetId(newMachineId, displayMachines);
   const selectedMachine = displayMachines.find((machine) => machine.id === targetMachineId);
   useEffect(() => {
-    if (targetMachineId !== newMachineId) setNewMachineId(targetMachineId);
-  }, [newMachineId, targetMachineId]);
+    if (!state) return;
+    if (targetMachineId !== newMachineId) {
+      setNewMachineId(targetMachineId);
+      return;
+    }
+    persistMachineTargetId(window.localStorage, targetMachineId);
+  }, [newMachineId, state, targetMachineId]);
   const activeStreamMachineId = activePane?.machineId
     ?? (activeWorkspace ? workspacePresentationMachineId(activeWorkspace) : undefined)
     ?? selectedMachine?.id
