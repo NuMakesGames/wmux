@@ -12,6 +12,10 @@ $RestartTaskName = "$TaskName-update"
 $OutLog = Join-Path $LogDir 'windows-agent.out.log'
 $ErrLog = Join-Path $LogDir 'windows-agent.err.log'
 $Force = @($args) -contains '--force'
+$GenerationPort = 0
+for ($Index = 0; $Index -lt $args.Count - 1; $Index += 1) {
+  if ([string]$args[$Index] -eq '--port') { $GenerationPort = [int]$args[$Index + 1] }
+}
 
 function ConvertTo-PowerShellLiteral {
   param([string]$Value)
@@ -42,6 +46,10 @@ function Get-PythonLaunch {
 }
 
 function Write-Wrapper {
+  param(
+    [string]$TargetConfig = $Config,
+    [string]$TargetWrapper = $Wrapper
+  )
   New-Item -ItemType Directory -Force -Path $StateDir, $LogDir, $HelperDir | Out-Null
   $Python = Get-PythonLaunch
   if (-not $Python) {
@@ -60,7 +68,7 @@ function Write-Wrapper {
   $CommandParts += @(
     (ConvertTo-CmdArgument $Agent)
     '--config'
-    (ConvertTo-CmdArgument $Config)
+    (ConvertTo-CmdArgument $TargetConfig)
     '>>'
     '"%WMUX_AGENT_OUT%"'
     '2>>'
@@ -78,7 +86,7 @@ function Write-Wrapper {
 & `$env:ComSpec /d /s /c `$Command
 exit `$LASTEXITCODE
 "@
-  [System.IO.File]::WriteAllText($Wrapper, $Content, [System.Text.UTF8Encoding]::new($false))
+  [System.IO.File]::WriteAllText($TargetWrapper, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
 function New-HiddenPowerShellAction {
@@ -170,28 +178,138 @@ function Get-AgentLogonType {
 }
 
 function Show-Usage {
-  Write-Error 'usage: wmux-windows-agent-service [install|activate-update|cancel-update|restart [--force]|stop|uninstall|status|logs|diagnose]'
+  Write-Error 'usage: wmux-windows-agent-service [install|rollout-update --port PORT|activate-update|cancel-update|restart [--force]|stop|uninstall|status|logs|diagnose]'
+}
+
+function Start-AgentGeneration {
+  param([int]$Port)
+  if ($Port -lt 1 -or $Port -gt 65535) { throw 'rollout-update requires a valid --port' }
+  $GenerationTaskName = "$TaskName-$Port"
+  $GenerationConfig = Join-Path $StateDir "windows-agent-$Port.json"
+  $GenerationWrapper = Join-Path $HelperDir "wmux-windows-agent-task-$Port.ps1"
+  $Document = if (Test-Path -LiteralPath $Config -PathType Leaf) {
+    Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+  } else {
+    [pscustomobject]@{}
+  }
+  $Document | Add-Member -NotePropertyName port -NotePropertyValue $Port -Force
+  $Document | Add-Member -NotePropertyName helperDir -NotePropertyValue $HelperDir -Force
+  [System.IO.File]::WriteAllText(
+    $GenerationConfig,
+    ($Document | ConvertTo-Json -Depth 20),
+    [System.Text.UTF8Encoding]::new($false)
+  )
+  Write-Wrapper -TargetConfig $GenerationConfig -TargetWrapper $GenerationWrapper
+
+  $ExistingTask = Get-ScheduledTask -TaskName $GenerationTaskName -ErrorAction SilentlyContinue
+  if ($ExistingTask) {
+    Stop-ScheduledTask -TaskName $GenerationTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $GenerationTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Get-CimInstance Win32_Process |
+      Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like "*$GenerationConfig*" } |
+      ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  }
+
+  $MainTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+  $GenerationAction = New-HiddenPowerShellAction -ScriptPath $GenerationWrapper
+  $GenerationTrigger = New-ScheduledTaskTrigger -AtLogOn
+  $GenerationSettings = New-WmuxTaskSettings
+  $GenerationTask = New-ScheduledTask -Action $GenerationAction -Trigger $GenerationTrigger -Principal $MainTask.Principal -Settings $GenerationSettings
+  Register-ScheduledTask -TaskName $GenerationTaskName -InputObject $GenerationTask -Force | Out-Null
+  Start-ScheduledTask -TaskName $GenerationTaskName
+
+  $HostValue = if ($Document.host) { [string]$Document.host } else { '127.0.0.1' }
+  if ($HostValue -in @('0.0.0.0', '::')) { $HostValue = '127.0.0.1' }
+  $Headers = @{}
+  if ($Document.token) { $Headers.Authorization = "Bearer $($Document.token)" }
+  $HealthUrl = "http://${HostValue}:$Port/health"
+  $Deadline = [DateTime]::UtcNow.AddSeconds(15)
+  do {
+    try {
+      $Health = Invoke-RestMethod -Method GET -Uri $HealthUrl -Headers $Headers -TimeoutSec 2
+      if ($Health.ok) {
+        [pscustomobject]@{ port = $Port; releaseVersion = $Health.releaseVersion; protocolVersion = $Health.protocolVersion } | ConvertTo-Json -Compress
+        return
+      }
+    } catch {}
+    Start-Sleep -Milliseconds 250
+  } while ([DateTime]::UtcNow -lt $Deadline)
+  throw "Windows agent generation on port $Port did not become healthy"
 }
 
 function Start-UpdateRestartWatcher {
-  # This task is deliberately outside the agent process. It waits without
-  # stopping anything, then starts the main task only after a drained agent has
-  # exited. Task Scheduler does not consistently apply RestartCount to an
-  # on-demand task that exits with the agent's restart code.
+  # This task is deliberately outside the agent process. Current agents own an
+  # atomic update-pending state; legacy agents are polled until idle before the
+  # watcher requests their hard drain. In both cases, the watcher restarts the
+  # main task only after the old process exits.
   $ExistingWatcher = Get-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
-  if ($ExistingWatcher -and [string]$ExistingWatcher.State -eq 'Running') { return }
+  if ($ExistingWatcher) {
+    Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
+  }
   $RestartScript = Join-Path $HelperDir 'wmux-windows-agent-update.ps1'
-  $Sequence = @"
-while (`$true) {
-  `$Main = Get-ScheduledTask -TaskName '$($TaskName -replace "'", "''")' -ErrorAction SilentlyContinue
-  if (-not `$Main) { exit 2 }
-  if ([string]`$Main.State -ne 'Running') {
-    Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
+  $Sequence = @'
+$ErrorActionPreference = 'Continue'
+$ConfigPath = __WMUX_CONFIG_PATH__
+$TaskName = __WMUX_TASK_NAME__
+
+function Get-AgentEndpoint {
+  $Document = if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
+    Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+  } else {
+    [pscustomobject]@{}
+  }
+  $HostValue = if ($Document.host) { [string]$Document.host } else { '127.0.0.1' }
+  if ($HostValue -in @('0.0.0.0', '::')) { $HostValue = '127.0.0.1' }
+  $PortValue = if ($Document.port) { [int]$Document.port } else { 3481 }
+  [pscustomobject]@{
+    url = "http://${HostValue}:$PortValue"
+    token = if ($Document.token) { [string]$Document.token } else { '' }
+  }
+}
+
+function Invoke-AgentRequest {
+  param([string]$Method, [string]$Path, [hashtable]$Body)
+  $Endpoint = Get-AgentEndpoint
+  $Headers = @{}
+  if ($Endpoint.token) { $Headers.Authorization = "Bearer $($Endpoint.token)" }
+  $Arguments = @{
+    Method = $Method
+    Uri = "$($Endpoint.url)$Path"
+    Headers = $Headers
+    TimeoutSec = 5
+  }
+  if ($Body) {
+    $Arguments.ContentType = 'application/json'
+    $Arguments.Body = $Body | ConvertTo-Json -Compress
+  }
+  Invoke-RestMethod @Arguments
+}
+
+while ($true) {
+  $Main = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if (-not $Main) { exit 2 }
+  if ([string]$Main.State -ne 'Running') {
+    Start-ScheduledTask -TaskName $TaskName
     exit 0
   }
+  try {
+    $Health = Invoke-AgentRequest -Method GET -Path '/health'
+    $SupportsPending = $Health.PSObject.Properties.Name -contains 'updatePending'
+    $ActiveSessions = if ($null -ne $Health.activeSessions) { [int]$Health.activeSessions } else { [int]$Health.sessions }
+    if ($SupportsPending) {
+      if (-not $Health.updatePending -and -not $Health.draining) {
+        Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true; allowNewSessions = $true } | Out-Null
+      }
+    } elseif ($ActiveSessions -eq 0 -and -not $Health.draining) {
+      Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true } | Out-Null
+    }
+  } catch {}
   Start-Sleep -Seconds 1
 }
-"@
+'@
+  $Sequence = $Sequence.Replace('__WMUX_CONFIG_PATH__', (ConvertTo-PowerShellLiteral $Config))
+  $Sequence = $Sequence.Replace('__WMUX_TASK_NAME__', (ConvertTo-PowerShellLiteral $TaskName))
   [System.IO.File]::WriteAllText($RestartScript, $Sequence, [System.Text.UTF8Encoding]::new($false))
   $MainTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
   $RestartAction = New-HiddenPowerShellAction -ScriptPath $RestartScript
@@ -269,9 +387,22 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Write-Output "Restarting $TaskName through the independent $RestartTaskName task"
   }
   'activate-update' {
+    $Health = Invoke-AgentRequest -Method GET -Path '/health'
+    $SupportsPending = $Health.PSObject.Properties.Name -contains 'updatePending'
+    $ActiveSessions = Get-ActiveSessionCount $Health
+    if (-not $SupportsPending -and $Health.draining -and $ActiveSessions -gt 0) {
+      $Health = Invoke-AgentRequest -Method DELETE -Path '/drain'
+      $ActiveSessions = Get-ActiveSessionCount $Health
+    }
     Start-UpdateRestartWatcher
     try {
-      $Drain = Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true }
+      if ($SupportsPending) {
+        $Drain = Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true; allowNewSessions = $true }
+      } elseif ($ActiveSessions -eq 0) {
+        $Drain = Invoke-AgentRequest -Method POST -Path '/drain' -Body @{ restartWhenIdle = $true }
+      } else {
+        $Drain = $Health
+      }
     } catch {
       Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
       Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -280,11 +411,14 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     }
     $ActiveSessions = Get-ActiveSessionCount $Drain
     if ($ActiveSessions -gt 0) {
-      Write-Output "Update staged; agent is draining $ActiveSessions active pane session(s)."
-      Write-Output 'New pane creation is paused. The agent will restart automatically after the final pane closes.'
+      Write-Output "Update staged; waiting for $ActiveSessions active pane session(s) to finish."
+      Write-Output 'New panes remain available. The agent will restart automatically after the final pane closes.'
     } else {
       Write-Output 'Update staged; no active panes remain. Agent restart has been scheduled.'
     }
+  }
+  'rollout-update' {
+    Start-AgentGeneration -Port $GenerationPort
   }
   'cancel-update' {
     $Drain = Invoke-AgentRequest -Method DELETE -Path '/drain'

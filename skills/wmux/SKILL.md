@@ -45,7 +45,7 @@ The helper reads `WMUX_URL`/`~/.wmux/url` and `WMUX_TOKEN`/`~/.wmux/token`; envi
 - Honor the current repository and host instructions.
 - Do not weaken wmux bind, Host/Origin, token, CORS, or helper-staging protections.
 - For Windows machines reached from a non-Windows wmux server, use `kind: "powershell-ssh"` behavior. Do not switch to legacy WSMan `powershell` unless explicitly debugging that path.
-- Prefer `wmux-windows-agent-service activate-update` for agent upgrades. It drains existing panes and restarts after the last pane closes; never use `restart --force` unless terminating every active agent-owned pane is explicitly intended.
+- Let normal pane creation roll outdated Windows agents onto a side-by-side generation; existing panes remain pinned to their owning generation. Use `wmux-windows-agent-service activate-update` only for a manual in-place restart at idle, and never use `restart --force` unless terminating every active agent-owned pane is explicitly intended.
 - Check `/api/bootstrap` for `reachable`, `reason`, and `backendDetail` before assuming a machine is ready. Windows status includes helper, stream, Python/FFmpeg, and agent health probes.
 - Use exact machine ids from `/api/bootstrap`; it merges static config with the dynamic heartbeat registry. Do not rely on stale docs if the live API differs.
 - Registered panes intentionally lack the broad `WMUX_TOKEN`. Before relying on `wmux-notify`, `wmux-run`, media, clipboard, or agent hooks there, verify that separate normal/scoped helper auth was provisioned; otherwise those helpers return `401`.

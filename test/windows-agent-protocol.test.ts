@@ -324,10 +324,60 @@ print(json.dumps({
   const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
-    drain: { sessions: 1, activeSessions: 1, draining: true, restartWhenIdle: true },
+    drain: { sessions: 1, activeSessions: 1, draining: true, updatePending: false, restartWhenIdle: true },
     sameSession: "pane_one",
     blocked: true,
     callbacks: ["restart"],
+    restartRequested: true,
+  });
+});
+
+test("Windows agent pending updates accept panes until the final session closes", () => {
+  const source = String.raw`
+import json
+import runpy
+import time
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+callbacks = []
+
+class FakeSession:
+    def __init__(self, session_id, config, payload, on_exit):
+        self.id = session_id
+        self.exited = False
+        self.on_exit = on_exit
+    def snapshot(self):
+        return {"id": self.id, "status": "exited" if self.exited else "running"}
+    def terminate(self):
+        self.exited = True
+        self.on_exit()
+
+state = module["AgentState"]({})
+state.set_shutdown_callback(lambda: callbacks.append("restart"))
+module["AgentState"].get_or_create.__globals__["Session"] = FakeSession
+state.get_or_create("pane_one", {})
+pending = state.begin_drain(True, True)
+state.get_or_create("pane_two", {})
+state.delete("pane_one")
+time.sleep(0.3)
+before_final_close = list(callbacks)
+state.delete("pane_two")
+time.sleep(0.4)
+print(json.dumps({
+    "pending": pending,
+    "beforeFinalClose": before_final_close,
+    "callbacks": callbacks,
+    "health": state.health(),
+    "restartRequested": state.restart_requested,
+}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    pending: { sessions: 1, activeSessions: 1, draining: false, updatePending: true, restartWhenIdle: true },
+    beforeFinalClose: [],
+    callbacks: ["restart"],
+    health: { sessions: 0, activeSessions: 0, draining: true, updatePending: false, restartWhenIdle: true },
     restartRequested: true,
   });
 });

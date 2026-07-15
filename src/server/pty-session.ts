@@ -12,6 +12,7 @@ interface PtyEvents {
   output: [string];
   title: [string];
   cwd: [string];
+  agentPort: [number];
   exit: [number | null];
 }
 

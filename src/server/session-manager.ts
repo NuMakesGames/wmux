@@ -266,8 +266,11 @@ export class SessionManager {
     const existing = this.sessions.get(pane.id);
     if (existing && !existing.isExited) return existing;
     const previousSessionMachine = this.sessionMachines.get(pane.id);
-    const machine = this.currentMachines().find((candidate) => candidate.id === pane.machineId);
-    if (!machine) throw new Error(`machine ${pane.machineId} not found`);
+    const configuredMachine = this.currentMachines().find((candidate) => candidate.id === pane.machineId);
+    if (!configuredMachine) throw new Error(`machine ${pane.machineId} not found`);
+    const machine = pane.agentPort && configuredMachine.kind === "powershell-ssh"
+      ? { ...configuredMachine, agentPort: pane.agentPort, agentUrl: undefined }
+      : configuredMachine;
     if (machine.source === "registered" && machine.online === false) {
       throw new Error(`machine ${pane.machineId} is offline`);
     }
@@ -316,6 +319,12 @@ export class SessionManager {
     });
     session.on("cwd", (cwd) => {
       this.state.updatePane(pane.id, { cwd });
+    });
+    session.on("agentPort", (agentPort) => {
+      machine.agentPort = agentPort;
+      machine.agentUrl = undefined;
+      this.sessionMachines.set(pane.id, structuredClone(machine));
+      this.state.updatePane(pane.id, { agentPort });
     });
     session.on("exit", (code) => {
       if (this.ignoredSessionExits.has(session)) return;

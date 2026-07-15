@@ -18,6 +18,7 @@ interface AgentEvents {
   output: [string];
   title: [string];
   cwd: [string];
+  agentPort: [number];
   exit: [number | null];
 }
 
@@ -67,6 +68,7 @@ export interface WindowsAgentHealth {
   sessions?: number;
   activeSessions?: number;
   draining?: boolean;
+  updatePending?: boolean;
   restartWhenIdle?: boolean;
   backend?: string;
   processTree?: string;
@@ -75,7 +77,7 @@ export interface WindowsAgentHealth {
   pywinptyAvailable?: boolean;
 }
 
-export type WindowsAgentUpdateActivator = (machine: MachineConfig) => Promise<void>;
+export type WindowsAgentUpdateActivator = (machine: MachineConfig, port?: number) => Promise<number | void>;
 
 const MAX_REPLAY_BYTES = 2 * 1024 * 1024;
 
@@ -105,11 +107,36 @@ export const probeWindowsAgent = async (
 ): Promise<{ reachable: boolean; health?: WindowsAgentHealth; reason?: string; url?: string }> => {
   const url = windowsAgentUrl(machine);
   if (!url) return { reachable: false, reason: "missing Windows agent URL" };
+  const probe = async (candidateUrl: string) => {
+    try {
+      const health = await requestJson<WindowsAgentHealth>("GET", `${candidateUrl}/health`, undefined, timeoutMs, authHeaders(machine));
+      return { reachable: health.ok === true, health, url: candidateUrl, reason: health.ok === true ? undefined : "agent health check failed" };
+    } catch (error) {
+      return { reachable: false, url: candidateUrl, reason: error instanceof Error ? error.message : "agent health check failed" };
+    }
+  };
+  const primary = await probe(url);
+  const expectedRelease = expectedWindowsAgentReleaseVersion();
+  const expectedProtocol = expectedWindowsAgentProtocolVersion();
+  const expectedHelpers = buildWindowsHelperBundle(machine).bundleVersion;
+  const isCurrent = (result: Awaited<ReturnType<typeof probe>>) =>
+    result.reachable
+    && (result.health?.releaseVersion ?? result.health?.version) === expectedRelease
+    && (result.health?.protocolVersion ?? 0) >= expectedProtocol
+    && result.health?.helperBundleVersion === expectedHelpers;
+  if (isCurrent(primary)) return primary;
+
   try {
-    const health = await requestJson<WindowsAgentHealth>("GET", `${url}/health`, undefined, timeoutMs, authHeaders(machine));
-    return { reachable: health.ok === true, health, url, reason: health.ok === true ? undefined : "agent health check failed" };
-  } catch (error) {
-    return { reachable: false, url, reason: error instanceof Error ? error.message : "agent health check failed" };
+    const parsed = new URL(url);
+    const basePort = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+    const candidates = await Promise.all(Array.from({ length: 8 }, (_, index) => {
+      const candidate = new URL(parsed);
+      candidate.port = String(basePort + index + 1);
+      return probe(candidate.toString().replace(/\/+$/, ""));
+    }));
+    return candidates.find(isCurrent) ?? primary;
+  } catch {
+    return primary;
   }
 };
 
@@ -131,6 +158,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private stopped = false;
   private paused = false;
   private lastTransportWarningAt = 0;
+  private agentUrl: string | undefined;
   readonly attachReady: Promise<void>;
   private resolveAttachReady!: () => void;
 
@@ -148,6 +176,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       this.resolveAttachReady = resolve;
     });
     this.cwd = pane.cwd ?? "";
+    this.agentUrl = windowsAgentUrl(machine);
     void this.start();
   }
 
@@ -295,16 +324,37 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
 
     const actualRelease = health.releaseVersion ?? health.version;
     const expectedRelease = expectedWindowsAgentReleaseVersion();
-    if (!actualRelease || actualRelease === expectedRelease) return !this.stopped;
+    const actualProtocol = health.protocolVersion ?? 0;
+    const expectedProtocol = expectedWindowsAgentProtocolVersion();
+    const releaseCurrent = actualRelease === expectedRelease;
+    const protocolCurrent = actualProtocol >= expectedProtocol;
+    const helpersCurrent = health.helperBundleVersion === helperBundle.bundleVersion;
+    if (!actualRelease || (releaseCurrent && protocolCurrent && helpersCurrent)) return !this.stopped;
+    const actualDisplay = releaseCurrent && !protocolCurrent
+      ? `${actualRelease}/protocol ${actualProtocol || "legacy"}`
+      : actualRelease;
+    const expectedDisplay = releaseCurrent && !protocolCurrent
+      ? `${expectedRelease}/protocol ${expectedProtocol}`
+      : expectedRelease;
 
     const existing = sessions.some((session) => session.id === this.pane.id && session.status !== "exited");
     if (existing) return !this.stopped;
 
     const supportsDrain =
-      (health.protocolVersion ?? 0) >= expectedWindowsAgentProtocolVersion()
+      actualProtocol >= 1
       || legacyAgentSupportsDrain(actualRelease);
     if (!supportsDrain) return !this.stopped;
 
+    const activeSessions = health.activeSessions ?? sessions.filter((session) => session.status !== "exited").length;
+    // A legacy update drain blocks every create request. Cancel it before
+    // staging or creating this pane; the current service helper will re-arm a
+    // compatibility watcher after the new session exists.
+    if (health.draining && activeSessions > 0) {
+      await this.delete("/drain");
+      health.draining = false;
+    }
+
+    this.reportRollingUpdate(actualDisplay, expectedDisplay, activeSessions);
     if (!health.draining) {
       if (health.helperBundleVersion !== helperBundle.bundleVersion) {
         const stagingId = `__wmux_update_${this.pane.id}_${Date.now().toString(36)}`;
@@ -321,20 +371,45 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
         }
       }
     }
-    // The agent cannot reliably restart its own Scheduled Task after exiting:
-    // Task Scheduler's restart-on-failure setting does not cover this on every
-    // supported host. The staged service helper creates an independent watcher
-    // task over SSH before it asks the agent to drain.
-    await this.activateUpdate(this.machine);
-    this.reportPendingUpdate(actualRelease, expectedRelease, health.activeSessions ?? 0);
+
+    const currentGeneration = await this.findCurrentGeneration(helperBundle);
+    if (currentGeneration !== undefined) {
+      this.routeToAgentPort(currentGeneration);
+      this.appendAndEmit(`\r\n[wmux] Updated Windows agent generation is ready on port ${currentGeneration}; opening pane.\r\n`);
+      return !this.stopped;
+    }
+
+    const rolloutPort = await this.selectRolloutPort();
+    const activatedPort = await this.activateUpdate(this.machine, rolloutPort);
+    if (typeof activatedPort === "number") {
+      this.routeToAgentPort(activatedPort);
+      const current = await this.get<WindowsAgentHealth>("/health", 3000);
+      const currentRelease = current.releaseVersion ?? current.version;
+      if (
+        current.ok !== true
+        || currentRelease !== expectedRelease
+        || (current.protocolVersion ?? 0) < expectedProtocol
+        || current.helperBundleVersion !== helperBundle.bundleVersion
+      ) {
+        throw new Error(`new Windows agent generation on port ${activatedPort} did not report the staged version`);
+      }
+      this.appendAndEmit(`\r\n[wmux] Updated Windows agent generation is ready on port ${activatedPort}; opening pane.\r\n`);
+      return !this.stopped;
+    }
+
+    // Compatibility path for custom activators that replace the base listener
+    // instead of returning a side-by-side generation port.
+    this.reportPendingUpdate(actualDisplay, expectedDisplay, health.activeSessions ?? 0);
 
     while (!this.stopped) {
       await delay(500);
       try {
         const current = await this.get<WindowsAgentHealth>("/health", 1500);
         const currentRelease = current.releaseVersion ?? current.version;
-        if (current.ok === true && currentRelease === expectedRelease) {
-          this.appendAndEmit(`\r\n[wmux] Windows agent updated to ${expectedRelease}; opening pane.\r\n`);
+        const currentProtocol = current.protocolVersion ?? 0;
+        const currentHelpers = current.helperBundleVersion === helperBundle.bundleVersion;
+        if (current.ok === true && currentRelease === expectedRelease && currentProtocol >= expectedProtocol && currentHelpers) {
+          this.appendAndEmit(`\r\n[wmux] Windows agent updated to ${expectedDisplay}; opening pane.\r\n`);
           return true;
         }
       } catch {
@@ -346,6 +421,72 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     return false;
   }
 
+  private baseAgentPort(): number {
+    if (this.machine.agentPort) return this.machine.agentPort;
+    if (!this.agentUrl) return 3481;
+    const parsed = new URL(this.agentUrl);
+    return parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+  }
+
+  private urlForAgentPort(port: number): string {
+    if (!this.agentUrl) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
+    const parsed = new URL(this.agentUrl);
+    parsed.port = String(port);
+    parsed.pathname = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/, "");
+  }
+
+  private async generationHealth(port: number, timeoutMs = 750): Promise<WindowsAgentHealth | undefined> {
+    try {
+      return await requestJson<WindowsAgentHealth>(
+        "GET",
+        `${this.urlForAgentPort(port)}/health`,
+        undefined,
+        timeoutMs,
+        authHeaders(this.machine),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async findCurrentGeneration(helperBundle: WindowsHelperBundle): Promise<number | undefined> {
+    const expectedRelease = expectedWindowsAgentReleaseVersion();
+    const expectedProtocol = expectedWindowsAgentProtocolVersion();
+    const basePort = this.baseAgentPort();
+    for (let port = basePort + 1; port <= basePort + 8; port += 1) {
+      const health = await this.generationHealth(port);
+      if (
+        health?.ok === true
+        && (health.releaseVersion ?? health.version) === expectedRelease
+        && (health.protocolVersion ?? 0) >= expectedProtocol
+        && health.helperBundleVersion === helperBundle.bundleVersion
+      ) return port;
+    }
+    return undefined;
+  }
+
+  private async selectRolloutPort(): Promise<number> {
+    const basePort = this.baseAgentPort();
+    let idleOutdatedPort: number | undefined;
+    for (let port = basePort + 1; port <= basePort + 8; port += 1) {
+      const health = await this.generationHealth(port);
+      if (!health?.ok) return port;
+      if ((health.activeSessions ?? health.sessions ?? 0) === 0 && idleOutdatedPort === undefined) {
+        idleOutdatedPort = port;
+      }
+    }
+    if (idleOutdatedPort !== undefined) return idleOutdatedPort;
+    throw new Error("all Windows agent rollout ports are occupied by active generations");
+  }
+
+  private routeToAgentPort(port: number): void {
+    this.agentUrl = this.urlForAgentPort(port);
+    this.emit("agentPort", port);
+  }
+
   private reportPendingUpdate(actual: string, expected: string, activeSessions: number): void {
     if (activeSessions > 0) {
       this.appendAndEmit(
@@ -354,6 +495,12 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       return;
     }
     this.appendAndEmit(`\r\n[wmux] Updating Windows agent ${actual} → ${expected}; waiting for its service to restart.\r\n`);
+  }
+
+  private reportRollingUpdate(actual: string, expected: string, activeSessions: number): void {
+    this.appendAndEmit(
+      `\r\n[wmux] Preparing Windows agent ${actual} → ${expected} for this pane on a new generation. ${activeSessions} existing pane(s) will remain on their current generation.\r\n`,
+    );
   }
 
   private async hydrateReplay(targetCursor: number): Promise<void> {
@@ -428,19 +575,19 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   }
 
   private async get<T>(path: string, timeoutMs = 5000): Promise<T> {
-    const url = windowsAgentUrl(this.machine);
+    const url = this.agentUrl;
     if (!url) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
     return requestJson<T>("GET", `${url}${path}`, undefined, timeoutMs, authHeaders(this.machine));
   }
 
   private async post<T = unknown>(path: string, body: unknown): Promise<T> {
-    const url = windowsAgentUrl(this.machine);
+    const url = this.agentUrl;
     if (!url) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
     return requestJson<T>("POST", `${url}${path}`, body, 5000, authHeaders(this.machine));
   }
 
   private async delete<T = unknown>(path: string): Promise<T> {
-    const url = windowsAgentUrl(this.machine);
+    const url = this.agentUrl;
     if (!url) throw new Error(`machine ${this.machine.id} is missing Windows agent URL`);
     return requestJson<T>("DELETE", `${url}${path}`, undefined, 5000, authHeaders(this.machine));
   }
@@ -494,7 +641,7 @@ const legacyAgentSupportsDrain = (release: string): boolean => {
   return major > 0 || minor >= 7;
 };
 
-export const activateWindowsAgentUpdate: WindowsAgentUpdateActivator = async (machine) => {
+export const activateWindowsAgentUpdate: WindowsAgentUpdateActivator = async (machine, port) => {
   if (!machine.host) throw new Error(`machine ${machine.id} is missing an SSH host`);
   const target = machine.user ? `${machine.user}@${machine.host}` : machine.host;
   const args = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"];
@@ -506,11 +653,12 @@ if (-not (Test-Path -LiteralPath $Service -PathType Leaf)) {
   Write-Error "wmux Windows agent service helper is not staged at $Service"
   exit 127
 }
-& pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Service activate-update
+& pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Service ${port ? `rollout-update --port ${port}` : "activate-update"}
 exit $LASTEXITCODE
 `;
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("ssh", args, { stdio: ["pipe", "ignore", "pipe"] });
+  return new Promise<number | void>((resolve, reject) => {
+    const child = spawn("ssh", args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
     let stderr = "";
     let settled = false;
     const finish = (error?: Error) => {
@@ -518,13 +666,29 @@ exit $LASTEXITCODE
       settled = true;
       clearTimeout(timer);
       if (error) reject(error);
-      else resolve();
+      else if (port) {
+        const line = stdout.trim().split(/\r?\n/).reverse().find((candidate) => candidate.trim().startsWith("{"));
+        if (!line) resolve(port);
+        else {
+          try {
+            const payload = JSON.parse(line) as { port?: number };
+            if (payload.port !== port) throw new Error(`expected port ${port}, received ${payload.port ?? "none"}`);
+            resolve(port);
+          } catch (parseError) {
+            reject(new Error(`invalid Windows agent rollout response: ${formatError(parseError)}`));
+          }
+        }
+      } else resolve();
     };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       finish(new Error(`timed out activating the Windows agent update on ${machine.id}`));
     }, 15_000);
     child.stderr.setEncoding("utf8");
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      if (stdout.length < 8192) stdout += chunk;
+    });
     child.stderr.on("data", (chunk) => {
       if (stderr.length < 4096) stderr += chunk;
     });

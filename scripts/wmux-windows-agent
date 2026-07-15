@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 RELEASE_VERSION = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 DEFAULT_REPLAY_BYTES = 2 * 1024 * 1024
 BACKEND_CONPTY = "conpty"
 BACKEND_STDIO = "stdio"
@@ -784,6 +784,7 @@ class AgentState:
         self.sessions: dict[str, Session] = {}
         self.lock = threading.Lock()
         self.draining = False
+        self.update_pending = False
         self.restart_when_idle = False
         self.restart_requested = False
         self.restart_scheduled = False
@@ -824,12 +825,14 @@ class AgentState:
                 "sessions": len(self.sessions),
                 "activeSessions": active_sessions,
                 "draining": self.draining,
+                "updatePending": self.update_pending,
                 "restartWhenIdle": self.restart_when_idle,
             }
 
-    def begin_drain(self, restart_when_idle: bool) -> dict[str, Any]:
+    def begin_drain(self, restart_when_idle: bool, allow_new_sessions: bool = False) -> dict[str, Any]:
         with self.lock:
-            self.draining = True
+            self.update_pending = restart_when_idle and allow_new_sessions
+            self.draining = not self.update_pending
             self.restart_when_idle = restart_when_idle
         self._schedule_restart_if_idle()
         return self.health()
@@ -838,6 +841,7 @@ class AgentState:
         with self.lock:
             if not self.restart_requested:
                 self.draining = False
+                self.update_pending = False
                 self.restart_when_idle = False
         return self.health()
 
@@ -852,7 +856,7 @@ class AgentState:
             active_sessions = any(not session.exited for session in self.sessions.values())
             if (
                 active_sessions
-                or not self.draining
+                or not (self.draining or self.update_pending)
                 or not self.restart_when_idle
                 or self.restart_requested
                 or self.restart_scheduled
@@ -867,8 +871,13 @@ class AgentState:
         with self.lock:
             self.restart_scheduled = False
             active_sessions = any(not session.exited for session in self.sessions.values())
-            if active_sessions or not self.draining or not self.restart_when_idle or self.restart_requested:
+            if active_sessions or not (self.draining or self.update_pending) or not self.restart_when_idle or self.restart_requested:
                 return
+            # Close the create/restart race atomically. Pending updates accept
+            # panes while any session is active, then become a hard drain only
+            # for the brief interval between the final close and process exit.
+            self.draining = True
+            self.update_pending = False
             self.restart_requested = True
             callback = self.shutdown_callback
         if callback:
@@ -943,7 +952,10 @@ class Handler(BaseHTTPRequestHandler):
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
         if parts == ["drain"]:
             body = self.read_json()
-            self.send_json(self.state.begin_drain(body.get("restartWhenIdle") is not False))
+            self.send_json(self.state.begin_drain(
+                body.get("restartWhenIdle") is not False,
+                body.get("allowNewSessions") is True,
+            ))
             return
         if len(parts) == 2 and parts[0] == "sessions":
             try:

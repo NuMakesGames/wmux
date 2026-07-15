@@ -351,17 +351,20 @@ Opt in from the machine's untracked config:
 Managed configs use `backend: "auto"`: ConPTY is preferred and terminal-safe
 stdio is the fallback when `pywinpty` is unavailable. Existing explicit
 `"conpty"` or `"stdio"` values remain pinned. New pane creation stages an
-outdated agent and requests a non-destructive update automatically. If Windows
-panes are active, the new pane visibly waits while the old panes keep running;
-the agent restarts after the last one closes. You can request the same process
-manually with:
+outdated agent and starts a side-by-side agent generation automatically. The
+new pane uses that generation while existing panes remain pinned to the agent
+that owns them; generation ports are persisted so wmux restarts reconnect each
+pane correctly. A pane shows rollout progress while its generation starts.
+
+For a manual in-place restart after the agent becomes idle, use:
 
 ```powershell
 wmux-windows-agent-service activate-update
 ```
 
-The agent drains existing sessions and restarts after the last pane closes. A
-forced agent restart still terminates its pane processes. See the
+The in-place path accepts sessions while the update is pending, enters a brief
+hard drain only after it becomes idle, and then restarts. A forced agent
+restart still terminates its pane processes. See the
 [Windows registration runbook](docs/WINDOWS_NODE_REGISTRATION.md) for setup and
 validation.
 

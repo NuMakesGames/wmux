@@ -48,6 +48,8 @@ export interface MachineStatus {
 export interface PaneState {
   id: string;
   machineId: string;
+  /** Windows agent generation port pinned for restart-safe side-by-side rollouts. */
+  agentPort?: number;
   title: string;
   cwd?: string;
   status: "idle" | "running" | "exited";

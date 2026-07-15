@@ -125,7 +125,9 @@ test("Windows agent service drains staged updates and refuses unsafe restarts", 
   assert.ok(content.includes("'/drain'"));
   assert.ok(content.includes("restartWhenIdle"));
   assert.ok(content.includes("Start-UpdateRestartWatcher"));
-  assert.ok(content.includes("[string]`$Main.State -ne 'Running'"));
+  assert.ok(content.includes("[string]$Main.State -ne 'Running'"));
+  assert.ok(content.includes("allowNewSessions = $true"));
+  assert.ok(content.includes("New panes remain available"));
   assert.ok(content.includes("Refusing to restart"));
   assert.ok(content.includes("restart --force"));
   assert.ok(content.includes("$RestartTaskName"));

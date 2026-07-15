@@ -72,22 +72,37 @@ def main() -> int:
             if status != 200 or session.get("status") != "running":
                 raise RuntimeError(f"failed to create smoke session: {status} {session}")
 
-            status, drain = request("POST", f"{base_url}/drain", {"restartWhenIdle": True})
-            if status != 200 or drain.get("activeSessions") != 1 or drain.get("draining") is not True:
+            status, drain = request("POST", f"{base_url}/drain", {
+                "restartWhenIdle": True,
+                "allowNewSessions": True,
+            })
+            if (status != 200 or drain.get("activeSessions") != 1
+                    or drain.get("draining") is not False or drain.get("updatePending") is not True):
                 raise RuntimeError(f"unexpected drain response: {status} {drain}")
 
-            blocked_status, blocked = request("POST", f"{base_url}/sessions/pane_blocked", {"cwd": root})
-            if blocked_status != 503 or blocked.get("error") != "agent_draining":
-                raise RuntimeError(f"new session was not blocked: {blocked_status} {blocked}")
+            allowed_status, allowed = request("POST", f"{base_url}/sessions/pane_allowed", {
+                "cwd": root,
+                "shell": "pwsh",
+                "cols": 80,
+                "rows": 24,
+            })
+            if allowed_status != 200 or allowed.get("status") != "running":
+                raise RuntimeError(f"new session was not allowed: {allowed_status} {allowed}")
 
             status, removed = request("DELETE", f"{base_url}/sessions/pane_smoke")
             if status != 200 or removed.get("removed") is not True:
                 raise RuntimeError(f"failed to close smoke session: {status} {removed}")
+            if process.poll() is not None:
+                raise RuntimeError("agent restarted before the final pane closed")
+
+            status, removed = request("DELETE", f"{base_url}/sessions/pane_allowed")
+            if status != 200 or removed.get("removed") is not True:
+                raise RuntimeError(f"failed to close allowed session: {status} {removed}")
 
             exit_code = process.wait(timeout=10)
             result = {
                 "activeSessionsBeforeClose": drain.get("activeSessions"),
-                "blockedStatus": blocked_status,
+                "allowedStatus": allowed_status,
                 "restartExitCode": exit_code,
             }
             print(json.dumps(result, separators=(",", ":")))

@@ -136,7 +136,9 @@ test("Windows agent detach preserves the remote session while kill deletes it", 
 
 test("a new Windows pane stages and safely activates an outdated agent", async () => {
   const expectedRelease = expectedWindowsAgentReleaseVersion();
-  let release = "0.7";
+  const expectedProtocol = expectedWindowsAgentProtocolVersion();
+  let release = expectedRelease;
+  let protocol = Math.max(1, expectedProtocol - 1);
   let helperBundleVersion = "stale";
   let staged = false;
   let drained = false;
@@ -149,7 +151,7 @@ test("a new Windows pane stages and safely activates an outdated agent", async (
         ok: true,
         version: release,
         releaseVersion: release,
-        protocolVersion: release === expectedRelease ? expectedWindowsAgentProtocolVersion() : undefined,
+        protocolVersion: protocol,
         helperBundleVersion,
         activeSessions: 0,
         draining: drained,
@@ -181,6 +183,7 @@ test("a new Windows pane stages and safely activates an outdated agent", async (
       drained = true;
       setTimeout(() => {
         release = expectedRelease;
+        protocol = expectedProtocol;
         drained = false;
       }, 20);
       response.end(JSON.stringify({ activeSessions: 0, draining: true, restartWhenIdle: true }));
@@ -233,11 +236,134 @@ test("a new Windows pane stages and safely activates an outdated agent", async (
   assert.equal(staged, true);
   assert.equal(drained, false);
   assert.equal(created, true);
-  assert.match(session.replayOutput, new RegExp(`Updating Windows agent 0\\.7 → ${expectedRelease}`));
-  assert.match(session.replayOutput, new RegExp(`updated to ${expectedRelease}`));
+  assert.match(session.replayOutput, new RegExp(`Updating Windows agent ${expectedRelease}/protocol ${expectedProtocol - 1} → ${expectedRelease}/protocol ${expectedProtocol}`));
+  assert.match(session.replayOutput, new RegExp(`updated to ${expectedRelease}/protocol ${expectedProtocol}`));
   session.detach();
   server.close();
   await once(server, "close");
+});
+
+test("a new pane cancels a legacy global drain and rolls onto a side-by-side generation", async () => {
+  let helperBundleVersion = "stale";
+  let draining = true;
+  let drainCancelled = false;
+  let staged = false;
+  let created = false;
+  let updateScheduled = false;
+  const generationServer = http.createServer((request, response) => {
+    const path = request.url ?? "";
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET" && path === "/health") {
+      response.end(JSON.stringify({
+        ok: true,
+        releaseVersion: expectedWindowsAgentReleaseVersion(),
+        protocolVersion: expectedWindowsAgentProtocolVersion(),
+        helperBundleVersion,
+        activeSessions: created ? 1 : 0,
+      }));
+      return;
+    }
+    if (request.method === "POST" && path === "/sessions/pane_deferred") {
+      created = true;
+      response.end(JSON.stringify({ id: "pane_deferred", pid: 456, base: 0, cursor: 0 }));
+      return;
+    }
+    if (request.method === "GET" && path.startsWith("/sessions/pane_deferred/output")) {
+      response.end(JSON.stringify({ base: 0, cursor: 0, dataBase64: "", exited: false }));
+      return;
+    }
+    response.writeHead(404).end(JSON.stringify({ error: "not_found" }));
+  });
+  const server = http.createServer((request, response) => {
+    const path = request.url ?? "";
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET" && path === "/health") {
+      response.end(JSON.stringify({
+        ok: true,
+        version: "0.7",
+        releaseVersion: "0.7",
+        helperBundleVersion,
+        activeSessions: 1,
+        draining,
+        restartWhenIdle: true,
+      }));
+      return;
+    }
+    if (request.method === "GET" && path === "/sessions") {
+      response.end(JSON.stringify({ sessions: [{ id: "pane_existing", status: "running" }] }));
+      return;
+    }
+    if (request.method === "DELETE" && path === "/drain") {
+      draining = false;
+      drainCancelled = true;
+      response.end(JSON.stringify({ activeSessions: 1, draining: false, restartWhenIdle: false }));
+      return;
+    }
+    if (request.method === "POST" && path.startsWith("/sessions/__wmux_update_")) {
+      assert.equal(draining, false, "legacy drain is cancelled before helper staging");
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+          helperBundle?: { bundleVersion?: string };
+        };
+        helperBundleVersion = body.helperBundle?.bundleVersion ?? helperBundleVersion;
+        staged = true;
+        response.end(JSON.stringify({ id: path.split("/")[2], status: "running" }));
+      });
+      return;
+    }
+    if (request.method === "DELETE" && path.startsWith("/sessions/__wmux_update_")) {
+      response.end(JSON.stringify({ removed: true }));
+      return;
+    }
+    response.writeHead(404).end(JSON.stringify({ error: "not_found" }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  generationServer.listen(0, "127.0.0.1");
+  await once(generationServer, "listening");
+  const generationAddress = generationServer.address();
+  assert.ok(generationAddress && typeof generationAddress === "object");
+  const session = new WindowsAgentSession(
+    {
+      id: "pane_deferred",
+      machineId: "windows",
+      title: "PowerShell",
+      status: "idle",
+      createdAt: new Date(0).toISOString(),
+    },
+    {
+      id: "windows",
+      name: "Windows",
+      kind: "powershell-ssh",
+      host: "127.0.0.1",
+      sessionBackend: "agent",
+      agentUrl: `http://127.0.0.1:${address.port}`,
+    },
+    80,
+    24,
+    {},
+    async () => {
+      assert.equal(created, false, "the new generation starts before it owns the pane");
+      updateScheduled = true;
+      return generationAddress.port;
+    },
+  );
+  await session.attachReady;
+  await waitUntil(() => updateScheduled);
+  assert.equal(drainCancelled, true);
+  assert.equal(staged, true);
+  assert.equal(created, true);
+  assert.match(session.replayOutput, /existing pane\(s\) will remain on their current generation/);
+  assert.match(session.replayOutput, /Updated Windows agent generation is ready/);
+  session.detach();
+  await Promise.all([
+    new Promise<void>((resolve) => server.close(() => resolve())),
+    new Promise<void>((resolve) => generationServer.close(() => resolve())),
+  ]);
 });
 
 test("OSC 7 cwd wins over a stale cwd returned by an older Windows agent", async () => {
