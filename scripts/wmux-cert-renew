@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${WMUX_CERT_DOMAIN:?WMUX_CERT_DOMAIN is required}"
+STATE_DIR="${WMUX_STATE_DIR:-${HOME}/.wmux}"
+CERT_FILE="${WMUX_CERT_FILE:-${STATE_DIR}/certs/${DOMAIN}.crt}"
+KEY_FILE="${WMUX_KEY_FILE:-${STATE_DIR}/certs/${DOMAIN}.key}"
+CHECKEND_SECONDS="${WMUX_CERT_CHECKEND_SECONDS:-2592000}"
+MIN_VALIDITY="${WMUX_CERT_MIN_VALIDITY:-720h}"
+RESTART_UNIT="${WMUX_CERT_RESTART_UNIT:-wmux.service}"
+
+if [[ ! "${DOMAIN}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+  echo "WMUX_CERT_DOMAIN must be a DNS name" >&2
+  exit 1
+fi
+if [[ ! "${CHECKEND_SECONDS}" =~ ^[0-9]+$ ]]; then
+  echo "WMUX_CERT_CHECKEND_SECONDS must be a non-negative integer" >&2
+  exit 1
+fi
+
+for command_name in openssl tailscale; do
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "${command_name} is required" >&2
+    exit 1
+  fi
+done
+
+if [[ -s "${CERT_FILE}" && -s "${KEY_FILE}" ]] &&
+  openssl x509 -checkend "${CHECKEND_SECONDS}" -noout -in "${CERT_FILE}"; then
+  exit 0
+fi
+
+umask 077
+mkdir -p "$(dirname "${CERT_FILE}")" "$(dirname "${KEY_FILE}")"
+tailscale cert \
+  --min-validity "${MIN_VALIDITY}" \
+  --cert-file "${CERT_FILE}" \
+  --key-file "${KEY_FILE}" \
+  "${DOMAIN}"
+chmod 644 "${CERT_FILE}"
+chmod 600 "${KEY_FILE}"
+
+if [[ -n "${RESTART_UNIT}" ]]; then
+  systemctl --user try-restart "${RESTART_UNIT}"
+fi

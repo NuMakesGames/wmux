@@ -25,6 +25,7 @@ This is intentionally not a multi-tenant SaaS app. Bearer authentication is defe
 - `npm run audit:sessions` audits local wmux-managed durable `tmux`/`screen` sessions.
 - `npm run audit:sessions -- --json` emits the same audit as JSON.
 - `scripts/install-user-service.sh` installs or updates the systemd user service. It picks a Tailscale IPv4 address when available; override with `WMUX_HOST` and `WMUX_PORT`.
+- `scripts/install-tailscale-cert-service.sh` obtains a Tailscale certificate and installs a daily user timer that renews it near expiry without restarting wmux on no-op checks.
 
 Operational incident work should default to the durable repair: restore service, identify why supervision or recovery failed, and remove that recurrence path. Do not stop at a manual restart unless the user explicitly asks for diagnosis or temporary recovery only.
 - `scripts/install-heartbeat-service.sh` installs the dynamic-host heartbeat systemd user timer after its URL, token, and machine descriptor are provisioned.

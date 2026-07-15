@@ -250,6 +250,23 @@ export const resolveMachineStatuses = async (
       }
       if (machine.kind === "local") {
         const runtimeVersion = machineReleaseVersion(machine);
+        if (machine.cwd) {
+          try {
+            if (!fs.statSync(path.resolve(machine.cwd)).isDirectory()) throw new Error("not a directory");
+          } catch {
+            return {
+              ...publicMachine,
+              reachable: false,
+              reason: "configured local cwd does not exist or is not a directory",
+              checkedAt,
+              endpoint: localEndpoint === "localhost" ? "127.0.0.1" : localEndpoint,
+              runtimeVersion,
+              expectedRuntimeVersion: runtimeVersion,
+              versionStatus: "unknown" as const,
+              backendDetail: localBackendDetail(machine),
+            };
+          }
+        }
         return {
           ...publicMachine,
           reachable: true,

@@ -112,7 +112,13 @@ const main = async (): Promise<void> => {
   server.listen(port, host, () => {
     console.log(`wmux listening on ${protocol}://${host}:${port}${dev ? " (dev)" : ""}`);
     if (auth.enabled) {
-      console.log(`wmux: access requires a token. Open ${publicUrl}/?token=${auth.token} once per browser.`);
+      if (auth.tokenGenerated) {
+        console.log(`wmux: access requires a token. Open ${publicUrl}/?token=${auth.token} once per browser.`);
+      } else if (auth.tokenPath) {
+        console.log(`wmux: access requires the token stored at ${auth.tokenPath}; existing tokens are not printed on restart.`);
+      } else {
+        console.log("wmux: access requires the token loaded from WMUX_TOKEN; environment tokens are not printed.");
+      }
     } else {
       console.log("wmux: authentication disabled (WMUX_DISABLE_AUTH=1); relying on network boundary only.");
     }

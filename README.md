@@ -85,6 +85,21 @@ WMUX_PUBLIC_URL=https://wmux-host.tailnet.ts.net:3478 \
 npm run start -- --host 100.x.y.z --port 3478
 ```
 
+For a Tailscale MagicDNS host, install the certificate and a daily renewal
+timer with:
+
+```bash
+sudo tailscale set --operator="$USER"
+WMUX_CERT_DOMAIN=wmux-host.tailnet.ts.net \
+  scripts/install-tailscale-cert-service.sh
+```
+
+The installer writes owner-protected material under `~/.wmux/certs` and
+enables `wmux-cert-renew.timer`. The timer renews within 30 days of expiry and
+restarts `wmux.service` only after a certificate was replaced. Pass the paths
+printed by the installer to `scripts/install-user-service.sh` through
+`WMUX_CERT_FILE`, `WMUX_KEY_FILE`, and `WMUX_PUBLIC_URL`.
+
 HTTPS is required for browser secure-context APIs such as Moonlight/WebCodecs.
 If managed SSH hosts cannot reach the browser-facing URL, set `WMUX_HELPER_URL`
 to their private callback URL. It affects staged helpers and agent callbacks
@@ -146,6 +161,9 @@ cp wmux.config.example.json wmux.config.json
 
 - `WMUX_CONFIG_PATH` selects one explicit file and disables fallback.
 - wmux adds the local machine unless `"localMachine": false` is set.
+- `kind: "local"` always executes on the current wmux server. Its display
+  name does not make it a remote target, and its `cwd` must exist on that
+  server.
 - Local and POSIX SSH machines default to `sessionBackend: "auto"`, preferring
   `tmux`, then `screen`; use `"pty"` to force a raw session.
 - Use `kind: "powershell-ssh"` for Windows hosts reached from Linux or macOS.
@@ -159,6 +177,12 @@ cp wmux.config.example.json wmux.config.json
 Never commit machine inventories, credentials, tokens, private-key paths, or
 personal service URLs. Windows setup is covered in
 [docs/WINDOWS_NODE_REGISTRATION.md](docs/WINDOWS_NODE_REGISTRATION.md).
+
+When moving the service to another computer, do not copy a server-relative
+`local` entry unchanged. Keep `local` for the new server and add the old server
+as an explicit SSH machine if it should remain a target. See
+[docs/SERVER_MIGRATION.md](docs/SERVER_MIGRATION.md) for the state, session,
+stream, helper-credential, SSH host-key, and HTTPS cutover checklist.
 
 ### Dynamic host registration
 

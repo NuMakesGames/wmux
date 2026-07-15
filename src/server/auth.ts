@@ -22,6 +22,10 @@ export interface AuthConfig {
   enabled: boolean;
   /** Shared static token — the path machines/helpers/curl use. */
   token: string;
+  /** Present when the shared token is backed by a file rather than WMUX_TOKEN. */
+  tokenPath?: string;
+  /** True only for the process invocation that created the shared token. */
+  tokenGenerated?: boolean;
   /** Whether username/password login is configured (drives the browser login UI). */
   loginEnabled: boolean;
   credentials?: AuthCredentials;
@@ -39,12 +43,14 @@ export const loadAuthConfig = (): AuthConfig => {
     return { enabled: false, token: "", loginEnabled: false, sessionSecret: "" };
   }
 
-  const token = resolveSharedToken();
+  const sharedToken = resolveSharedToken();
   const credentials = loadCredentials();
   const sessionSecret = loadOrCreateSessionSecret();
   return {
     enabled: true,
-    token,
+    token: sharedToken.token,
+    tokenPath: sharedToken.tokenPath,
+    tokenGenerated: sharedToken.generated,
     loginEnabled: Boolean(credentials),
     credentials: credentials ?? undefined,
     sessionSecret,
@@ -82,17 +88,23 @@ export const loadRegistrationAuthConfig = (): RegistrationAuthConfig => {
   return { token: generated, tokenPath };
 };
 
-const resolveSharedToken = (): string => {
+interface SharedTokenResolution {
+  token: string;
+  tokenPath?: string;
+  generated: boolean;
+}
+
+const resolveSharedToken = (): SharedTokenResolution => {
   const fromEnv = process.env.WMUX_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return { token: fromEnv, generated: false };
 
   const tokenPath = process.env.WMUX_TOKEN_PATH ?? defaultTokenPath();
   const existing = readTrimmedFile(tokenPath);
-  if (existing) return existing;
+  if (existing) return { token: existing, tokenPath, generated: false };
 
   const generated = crypto.randomBytes(24).toString("base64url");
   persistSecretFile(tokenPath, `${generated}\n`);
-  return generated;
+  return { token: generated, tokenPath, generated: true };
 };
 
 const loadCredentials = (): AuthCredentials | null => {

@@ -13,7 +13,7 @@ test("browser-facing machine status excludes server-only configuration", async (
       id: "local",
       name: "Local",
       kind: "local",
-      cwd: "/secret/worktree",
+      cwd: process.cwd(),
       shell: "/bin/private-shell",
       command: ["private-command"],
       agentToken: "agent-secret",
@@ -34,9 +34,25 @@ test("browser-facing machine status excludes server-only configuration", async (
   assert.equal(status.versionStatus, "current");
   assert.equal(status.stream?.gatewayUrl, "https://gateway.example");
   const serialized = JSON.stringify(status);
-  assert.doesNotMatch(serialized, /agent-secret|gateway-secret|private-command|private-shell|secret\/worktree/);
+  assert.doesNotMatch(serialized, /agent-secret|gateway-secret|private-command|private-shell/);
   assert.equal("agentToken" in status, false);
   assert.equal("command" in status, false);
+});
+
+test("local machine status rejects an unusable configured cwd before pane creation", async () => {
+  const [status] = await resolveMachineStatuses([
+    {
+      id: "local",
+      name: "Migrated Local",
+      kind: "local",
+      cwd: "/wmux-test-path-that-does-not-exist",
+    },
+  ]);
+
+  assert.equal(status.reachable, false);
+  assert.equal(status.versionStatus, "unknown");
+  assert.equal(status.reason, "configured local cwd does not exist or is not a directory");
+  assert.doesNotMatch(JSON.stringify(status), /wmux-test-path/);
 });
 
 test("machine release versions use one platform-suffixed scheme", () => {

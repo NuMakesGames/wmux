@@ -141,9 +141,27 @@ test("loadAuthConfig starts token-only without configured credentials", () => {
     assert.equal(auth.enabled, true);
     assert.equal(auth.loginEnabled, false);
     assert.ok(auth.token.length >= 16);
+    assert.equal(auth.tokenPath, path.join(dir, "token"));
+    assert.equal(auth.tokenGenerated, true);
     assert.ok(auth.sessionSecret.length >= 16);
     assert.equal(fs.existsSync(path.join(dir, "auth.json")), false);
     assert.ok(fs.existsSync(path.join(dir, "session-secret")));
+  });
+});
+
+test("loadAuthConfig does not mark an existing or environment token as newly generated", () => {
+  withIsolatedHome((dir) => {
+    const first = loadAuthConfig();
+    const existing = loadAuthConfig();
+    assert.equal(existing.token, first.token);
+    assert.equal(existing.tokenPath, path.join(dir, "token"));
+    assert.equal(existing.tokenGenerated, false);
+
+    process.env.WMUX_TOKEN = "from-environment";
+    const fromEnvironment = loadAuthConfig();
+    assert.equal(fromEnvironment.token, "from-environment");
+    assert.equal(fromEnvironment.tokenPath, undefined);
+    assert.equal(fromEnvironment.tokenGenerated, false);
   });
 });
 
