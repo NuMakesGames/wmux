@@ -86,7 +86,7 @@ import { spawn } from "node:child_process"
 
 const eventScript = ${JSON.stringify(eventScript)}
 
-const send = (input: Record<string, unknown>) => new Promise<void>((resolve) => {
+const sendNow = (input: Record<string, unknown>) => new Promise<void>((resolve) => {
   const child = spawn(eventScript, ["--agent", "opencode", "--opencode-hook"], {
     stdio: ["pipe", "ignore", "ignore"],
   })
@@ -96,6 +96,12 @@ const send = (input: Record<string, unknown>) => new Promise<void>((resolve) => 
   child.stdin.end(JSON.stringify(input))
 })
 
+let sendQueue = Promise.resolve()
+const send = (input: Record<string, unknown>) => {
+  sendQueue = sendQueue.then(() => sendNow(input)).catch(() => {})
+  return sendQueue
+}
+
 const text = (parts: Array<{ type: string; text?: string }>) =>
   parts.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\\n")
 
@@ -103,7 +109,7 @@ const sessionTitle = (title: string | undefined) =>
   title && !/^New session - \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$/.test(title) ? title : ""
 
 export default (async ({ client, directory }) => {
-  const active = new Map<string, { messageID: string; prompt: string; title: string }>()
+  const active = new Map<string, { messageID: string; prompt: string; title: string; pending: Set<string> }>()
 
   return {
     "chat.message": async (input, output) => {
@@ -111,7 +117,7 @@ export default (async ({ client, directory }) => {
       if (!session || session.data?.parentID) return
       const prompt = text(output.parts)
       const title = sessionTitle(session.data?.title)
-      active.set(input.sessionID, { messageID: output.message.id, prompt, title })
+      active.set(input.sessionID, { messageID: output.message.id, prompt, title, pending: new Set() })
       await send({ hook_event_name: "UserPromptSubmit", title, prompt })
     },
     event: async ({ event }) => {
@@ -120,11 +126,20 @@ export default (async ({ client, directory }) => {
       const current = active.get(sessionID)
       if (!current) return
 
-      if (event.type === "question.asked") {
+      if (event.type === "question.asked" || event.type === "permission.asked") {
+        const requestID = event.properties.id
+        if (!requestID) return
+        const key = event.type.split(".")[0] + ":" + requestID
+        if (current.pending.has(key)) return
+        current.pending.add(key)
         await send({ hook_event_name: "Question", title: current.title, prompt: current.prompt })
         return
       }
-      if (event.type === "question.replied" || event.type === "question.rejected") {
+      if (event.type === "question.replied" || event.type === "question.rejected" || event.type === "permission.replied") {
+        const requestID = event.properties.requestID
+        if (!requestID) return
+        const key = event.type.split(".")[0] + ":" + requestID
+        if (!current.pending.delete(key) || current.pending.size) return
         await send({ hook_event_name: "Resume", title: current.title, prompt: current.prompt })
         return
       }
