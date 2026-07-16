@@ -32,6 +32,11 @@ test("OpenCode installer writes an idempotent global plugin without touching con
     assert.match(plugin, /question\.asked/);
     assert.match(plugin, /question\.replied/);
     assert.match(plugin, /question\.rejected/);
+    assert.match(plugin, /permission\.asked/);
+    assert.match(plugin, /permission\.replied/);
+    assert.match(plugin, /pending: new Set\(\)/);
+    assert.match(plugin, /current\.pending\.delete\(key\) \|\| current\.pending\.size/);
+    assert.match(plugin, /sendQueue = sendQueue\.then\(\(\) => sendNow\(input\)\)\.catch\(\(\) => \{\}\)/);
     assert.match(plugin, /hook_event_name: "Question"/);
     assert.match(plugin, /hook_event_name: "Resume"/);
     assert.match(plugin, /UserPromptSubmit", title, prompt/);
@@ -59,13 +64,20 @@ test("generated OpenCode plugin forwards a complete top-level lifecycle", async 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-plugin-"));
   const configHome = path.join(home, "config");
   const captured: Record<string, unknown>[] = [];
+  let requestsInFlight = 0;
+  let maxRequestsInFlight = 0;
   const server = http.createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     request.on("end", () => {
       captured.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
-      response.writeHead(201, { "content-type": "application/json" });
-      response.end("{}");
+      requestsInFlight += 1;
+      maxRequestsInFlight = Math.max(maxRequestsInFlight, requestsInFlight);
+      setTimeout(() => {
+        requestsInFlight -= 1;
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end("{}");
+      }, 75);
     });
   });
   const savedEnv = {
@@ -114,19 +126,27 @@ test("generated OpenCode plugin forwards a complete top-level lifecycle", async 
       { sessionID: "session-1" },
       { message: { id: "user-1" }, parts: [{ type: "text", text: "fix hooks" }] },
     );
-    await plugin.event({ event: { type: "question.asked", properties: { sessionID: "session-1" } } });
-    await plugin.event({ event: { type: "question.replied", properties: { sessionID: "session-1" } } });
-    await plugin.event({ event: { type: "session.idle", properties: { sessionID: "session-1" } } });
+    const dispatches = [
+      plugin.event({ event: { type: "question.asked", properties: { sessionID: "session-1", id: "question-1" } } }),
+      plugin.event({ event: { type: "question.asked", properties: { sessionID: "session-1", id: "question-1" } } }),
+      plugin.event({ event: { type: "permission.asked", properties: { sessionID: "session-1", id: "permission-1" } } }),
+      plugin.event({ event: { type: "question.replied", properties: { sessionID: "session-1", requestID: "question-1" } } }),
+      plugin.event({ event: { type: "permission.replied", properties: { sessionID: "session-1", requestID: "permission-1" } } }),
+      plugin.event({ event: { type: "session.idle", properties: { sessionID: "session-1" } } }),
+    ];
+    await Promise.all(dispatches);
 
     assert.deepEqual(
       captured.map(({ status, title, message }) => ({ status, title, message })),
       [
         { status: "running", title: "OpenCode integration", message: undefined },
         { status: "waiting", title: "OpenCode integration", message: undefined },
+        { status: "waiting", title: "OpenCode integration", message: undefined },
         { status: "running", title: "OpenCode integration", message: undefined },
         { status: "completed", title: "OpenCode integration", message: "Done." },
       ],
     );
+    assert.equal(maxRequestsInFlight, 1);
   } finally {
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
