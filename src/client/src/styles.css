@@ -2257,6 +2257,41 @@ button.active-tool {
   opacity: 0;
 }
 
+.life-field-legend {
+  position: absolute;
+  left: 14px;
+  bottom: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: rgba(220, 191, 105, 0.34);
+  font: 700 9px/1 var(--wmux-mono-font);
+  letter-spacing: 0.12em;
+  pointer-events: none;
+  text-shadow: 0 0 16px rgba(244, 190, 62, 0.18);
+}
+
+.life-field-legend span + span::before {
+  content: "//";
+  margin-right: 10px;
+  color: rgba(126, 143, 163, 0.28);
+}
+
+@media (max-width: 700px) {
+  .life-field-legend {
+    left: 10px;
+    bottom: 10px;
+    font-size: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .life-field-legend span:last-child {
+    display: none;
+  }
+}
+
 .life-settings-toggle {
   position: absolute;
   right: 10px;

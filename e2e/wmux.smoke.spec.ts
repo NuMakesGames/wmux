@@ -59,6 +59,53 @@ test("keeps the loaded UI and recovers when a wake-up bootstrap briefly fails", 
   await expect.poll(() => requests, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
 });
 
+test("idle Life field stays bounded and pauses when it leaves the viewport", async ({ page, request }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "desktop WebGL lifecycle coverage");
+
+  const response = await request.get("/api/bootstrap");
+  expect(response.ok()).toBeTruthy();
+  const bootstrap = await response.json() as { workspaces: Array<{ id: string }> };
+
+  try {
+    for (const workspace of bootstrap.workspaces) {
+      const removed = await request.delete(`/api/workspaces/${workspace.id}`);
+      expect(removed.ok()).toBeTruthy();
+    }
+    await page.reload();
+
+    const canvas = page.getByLabel("Interactive Game of Life field; click a column to toggle a cell");
+    await expect(canvas).toBeVisible({ timeout: 20_000 });
+    await expect.poll(async () => Number(await canvas.getAttribute("data-render-frame") ?? 0)).toBeGreaterThan(2);
+
+    const renderSize = await canvas.evaluate((element: HTMLCanvasElement) => ({
+      pixels: element.width * element.height,
+      fps: Number(element.dataset.renderFps),
+    }));
+    expect(renderSize.pixels).toBeLessThanOrEqual(520_000);
+    expect(renderSize.fps).toBeGreaterThanOrEqual(8);
+    expect(renderSize.fps).toBeLessThanOrEqual(12);
+
+    await canvas.evaluate((element) => {
+      element.closest<HTMLElement>(".empty-workspace-view")!.style.display = "none";
+    });
+    await page.waitForTimeout(180);
+    const pausedAt = Number(await canvas.getAttribute("data-render-frame"));
+    await page.waitForTimeout(300);
+    expect(Number(await canvas.getAttribute("data-render-frame"))).toBe(pausedAt);
+
+    await canvas.evaluate((element) => {
+      element.closest<HTMLElement>(".empty-workspace-view")!.style.display = "";
+    });
+    await expect.poll(async () => Number(await canvas.getAttribute("data-render-frame"))).toBeGreaterThan(pausedAt);
+    await canvas.click({ position: { x: 80, y: 80 } });
+  } finally {
+    if (bootstrap.workspaces.length > 0) {
+      const restored = await request.post("/api/workspaces", { data: { machineId: "local" } });
+      expect(restored.ok()).toBeTruthy();
+    }
+  }
+});
+
 test("completes a Ctrl+Alt-drag rectangle on outside mouseup and clears it on keyboard input", async ({
   page,
   request,

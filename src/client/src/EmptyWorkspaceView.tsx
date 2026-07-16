@@ -5,6 +5,7 @@ export function EmptyWorkspaceView() {
   const [settings, setSettings] = useState<LifeViewSettings>(defaultLifeViewSettings);
   const [settingsStatus, setSettingsStatus] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rendererGeneration, setRendererGeneration] = useState(0);
   const settingsRef = useRef(settings);
 
   useEffect(() => {
@@ -25,8 +26,12 @@ export function EmptyWorkspaceView() {
       shaderUnavailable = false;
       canvas.classList.remove("shader-unavailable");
     };
+    const restoreRenderer = () => {
+      markAvailable();
+      setRendererGeneration((generation) => generation + 1);
+    };
     canvas.addEventListener("webglcontextlost", markUnavailable);
-    canvas.addEventListener("webglcontextrestored", markUnavailable);
+    canvas.addEventListener("webglcontextrestored", restoreRenderer);
 
     const gl = canvas.getContext("webgl", {
       antialias: false,
@@ -38,7 +43,7 @@ export function EmptyWorkspaceView() {
       markUnavailable();
       return () => {
         canvas.removeEventListener("webglcontextlost", markUnavailable);
-        canvas.removeEventListener("webglcontextrestored", markUnavailable);
+        canvas.removeEventListener("webglcontextrestored", restoreRenderer);
       };
     }
 
@@ -47,7 +52,7 @@ export function EmptyWorkspaceView() {
       markUnavailable();
       return () => {
         canvas.removeEventListener("webglcontextlost", markUnavailable);
-        canvas.removeEventListener("webglcontextrestored", markUnavailable);
+        canvas.removeEventListener("webglcontextrestored", restoreRenderer);
       };
     }
     markAvailable();
@@ -59,13 +64,17 @@ export function EmptyWorkspaceView() {
     const lifeResolutionLocation = gl.getUniformLocation(program, "u_life_resolution");
     const surfaceSpeedLocation = gl.getUniformLocation(program, "u_surface_speed");
     const heightMixLocation = gl.getUniformLocation(program, "u_height_mix");
+    const pointerLocation = gl.getUniformLocation(program, "u_pointer");
+    const interactionLocation = gl.getUniformLocation(program, "u_interaction");
     const life = createLifeSimulation();
+    const pointer = { x: 0, y: 0, active: 0 };
+    const interaction = { x: 0, y: 0, startedAt: -100 };
     const lifeTexture = gl.createTexture();
     if (!lifeTexture) {
       markUnavailable();
       return () => {
         canvas.removeEventListener("webglcontextlost", markUnavailable);
-        canvas.removeEventListener("webglcontextrestored", markUnavailable);
+        canvas.removeEventListener("webglcontextrestored", restoreRenderer);
         if (positionBuffer) gl.deleteBuffer(positionBuffer);
         gl.deleteProgram(program);
       };
@@ -81,23 +90,78 @@ export function EmptyWorkspaceView() {
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
 
+    const updatePointer = (event: PointerEvent) => {
+      const ground = unprojectGround(pointerUv(event, canvas));
+      pointer.x = Math.floor(ground[0]);
+      pointer.y = Math.floor(ground[1]);
+      pointer.active = 1;
+    };
+    const onPointerMove = (event: PointerEvent) => updatePointer(event);
+    const onPointerLeave = () => {
+      pointer.active = 0;
+    };
     const onPointerDown = (event: PointerEvent) => {
-      const hit = pickLifeCell(event, canvas, life, (performance.now() - startedAt) / 1000);
+      updatePointer(event);
+      const elapsedSeconds = (performance.now() - startedAt) / 1000;
+      const hit = pickLifeCell(event, canvas, life, elapsedSeconds, interaction);
       if (!hit) return;
       toggleLifeCell(life, hit.x, hit.y, performance.now());
+      interaction.x = hit.x;
+      interaction.y = hit.y;
+      interaction.startedAt = elapsedSeconds;
     };
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("pointerdown", onPointerDown);
 
     let animationFrame = 0;
     let animationTimer: number | undefined;
+    let destroyed = false;
+    let inViewport = true;
+    let resizePending = true;
+    let requestedFrameAt = 0;
+    let renderedFrames = 0;
+    const quality = createIdleRenderQuality();
     const startedAt = performance.now();
-    const scheduleRender = (delay = EMPTY_RENDER_INTERVAL_MS) => {
+    const canRender = () => !destroyed && inViewport && document.visibilityState !== "hidden";
+    const cancelScheduledRender = () => {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      if (animationTimer !== undefined) window.clearTimeout(animationTimer);
+      animationTimer = undefined;
+    };
+    const scheduleRender = (delay = quality.intervalMs) => {
+      if (!canRender() || animationTimer !== undefined || animationFrame !== 0) return;
       animationTimer = window.setTimeout(() => {
         animationTimer = undefined;
+        if (!canRender()) return;
+        requestedFrameAt = performance.now();
         animationFrame = requestAnimationFrame(render);
       }, delay);
     };
+    const resumeRendering = () => {
+      cancelScheduledRender();
+      if (canRender()) scheduleRender(0);
+    };
+    const onVisibilityChange = () => resumeRendering();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const resizeObserver = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(() => {
+          resizePending = true;
+          scheduleRender(0);
+        });
+    resizeObserver?.observe(canvas);
+    const intersectionObserver = typeof IntersectionObserver === "undefined"
+      ? null
+      : new IntersectionObserver(([entry]) => {
+          inViewport = entry?.isIntersecting ?? true;
+          resumeRendering();
+        });
+    intersectionObserver?.observe(canvas);
     const render = (now: number) => {
+      animationFrame = 0;
+      if (!canRender()) return;
       if (shaderUnavailable || gl.isContextLost()) {
         markUnavailable();
         scheduleRender(250);
@@ -105,7 +169,10 @@ export function EmptyWorkspaceView() {
       }
       const activeSettings = settingsRef.current;
       const elapsedSeconds = (now - startedAt) / 1000;
-      resizeCanvas(canvas, gl);
+      if (resizePending) {
+        resizeCanvas(canvas, gl, quality.scale);
+        resizePending = false;
+      }
       updateLifeSimulation(life, now, activeSettings);
       const heightMix = uploadLifeTexture(gl, lifeTexture, life, elapsedSeconds, activeSettings);
       gl.useProgram(program);
@@ -117,22 +184,36 @@ export function EmptyWorkspaceView() {
       gl.uniform2f(lifeResolutionLocation, life.width, life.height);
       gl.uniform1f(surfaceSpeedLocation, activeSettings.surfaceSpeed);
       gl.uniform1f(heightMixLocation, heightMix);
+      gl.uniform3f(pointerLocation, pointer.x, pointer.y, pointer.active);
+      gl.uniform4f(interactionLocation, interaction.x, interaction.y, interaction.startedAt, 1);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
-      scheduleRender(Math.max(0, EMPTY_RENDER_INTERVAL_MS - (performance.now() - now)));
+      renderedFrames += 1;
+      if (updateIdleRenderQuality(quality, Math.max(0, now - requestedFrameAt))) {
+        resizePending = true;
+      }
+      canvas.dataset.renderScale = quality.scale.toFixed(2);
+      canvas.dataset.renderFps = String(Math.round(1000 / quality.intervalMs));
+      canvas.dataset.renderFrame = String(renderedFrames);
+      scheduleRender(Math.max(0, quality.intervalMs - (performance.now() - now)));
     };
-    animationFrame = requestAnimationFrame(render);
+    scheduleRender(0);
 
     return () => {
-      cancelAnimationFrame(animationFrame);
-      if (animationTimer !== undefined) window.clearTimeout(animationTimer);
+      destroyed = true;
+      cancelScheduledRender();
+      resizeObserver?.disconnect();
+      intersectionObserver?.disconnect();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("webglcontextlost", markUnavailable);
-      canvas.removeEventListener("webglcontextrestored", markUnavailable);
+      canvas.removeEventListener("webglcontextrestored", restoreRenderer);
       if (positionBuffer) gl.deleteBuffer(positionBuffer);
       gl.deleteTexture(lifeTexture);
       gl.deleteProgram(program);
     };
-  }, []);
+  }, [rendererGeneration]);
 
   const updateSetting = (key: keyof LifeViewSettings, value: number) => {
     setSettings((current) => ({ ...current, [key]: value }));
@@ -178,7 +259,15 @@ export function EmptyWorkspaceView() {
 
   return (
     <div className="empty-workspace-view" aria-label="wmux idle column field">
-      <canvas ref={canvasRef} className="empty-shader-canvas" />
+      <canvas
+        ref={canvasRef}
+        className="empty-shader-canvas"
+        aria-label="Interactive Game of Life field; click a column to toggle a cell"
+      />
+      <div className="life-field-legend" aria-hidden="true">
+        <span>CONWAY FIELD</span>
+        <span>CLICK TO SEED</span>
+      </div>
       <button
         type="button"
         className="life-settings-toggle"
@@ -198,7 +287,7 @@ export function EmptyWorkspaceView() {
           <LifeSlider label="GoL step" value={settings.stepMs} min={600} max={9000} step={100} suffix="ms" onChange={(value) => updateSetting("stepMs", value)} />
           <LifeSlider label="Live fade" value={settings.transitionToLiveMs} min={600} max={12000} step={100} suffix="ms" onChange={(value) => updateSetting("transitionToLiveMs", value)} />
           <LifeSlider label="Dead fade" value={settings.transitionToDeadMs} min={400} max={9000} step={100} suffix="ms" onChange={(value) => updateSetting("transitionToDeadMs", value)} />
-          <LifeSlider label="Noise speed" value={settings.noiseSpeed} min={0} max={2} step={0.01} suffix="x" onChange={(value) => updateSetting("noiseSpeed", value)} />
+          <LifeSlider label="Wave speed" value={settings.noiseSpeed} min={0} max={2} step={0.01} suffix="x" onChange={(value) => updateSetting("noiseSpeed", value)} />
           <LifeSlider label="Shimmer" value={settings.surfaceSpeed} min={0} max={2} step={0.01} suffix="x" onChange={(value) => updateSetting("surfaceSpeed", value)} />
           {settingsStatus && <div className="life-settings-status">{settingsStatus}</div>}
         </div>
@@ -235,14 +324,69 @@ function LifeSlider({ label, value, min, max, step, suffix, onChange }: LifeSlid
   );
 }
 
-const resizeCanvas = (canvas: HTMLCanvasElement, gl: WebGLRenderingContext): void => {
-  const ratio = Math.min(window.devicePixelRatio || 1, 1.5) * EMPTY_RENDER_SCALE;
-  const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
-  const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
+const resizeCanvas = (
+  canvas: HTMLCanvasElement,
+  gl: WebGLRenderingContext,
+  renderScale: number,
+): void => {
+  const cssWidth = Math.max(1, canvas.clientWidth);
+  const cssHeight = Math.max(1, canvas.clientHeight);
+  const preferredRatio = Math.min(window.devicePixelRatio || 1, 1.5) * renderScale;
+  const pixelBudgetRatio = Math.sqrt(EMPTY_MAX_RENDER_PIXELS / (cssWidth * cssHeight));
+  const ratio = Math.min(preferredRatio, pixelBudgetRatio);
+  const width = Math.max(1, Math.floor(cssWidth * ratio));
+  const height = Math.max(1, Math.floor(cssHeight * ratio));
   if (canvas.width === width && canvas.height === height) return;
   canvas.width = width;
   canvas.height = height;
   gl.viewport(0, 0, width, height);
+};
+
+interface IdleRenderQuality {
+  scale: number;
+  intervalMs: number;
+  frameLagAverage: number;
+  sampleCount: number;
+  stableWindows: number;
+}
+
+const createIdleRenderQuality = (): IdleRenderQuality => ({
+  scale: EMPTY_RENDER_SCALE,
+  intervalMs: EMPTY_RENDER_INTERVAL_MS,
+  frameLagAverage: 0,
+  sampleCount: 0,
+  stableWindows: 0,
+});
+
+const updateIdleRenderQuality = (quality: IdleRenderQuality, frameLag: number): boolean => {
+  quality.frameLagAverage = quality.sampleCount === 0
+    ? frameLag
+    : quality.frameLagAverage * 0.82 + frameLag * 0.18;
+  quality.sampleCount += 1;
+  if (quality.sampleCount < EMPTY_QUALITY_SAMPLE_FRAMES) return false;
+
+  quality.sampleCount = 0;
+  if (quality.frameLagAverage > 34) {
+    const previousScale = quality.scale;
+    quality.scale = Math.max(EMPTY_MIN_RENDER_SCALE, quality.scale * 0.82);
+    quality.intervalMs = Math.min(1000 / 8, quality.intervalMs * 1.18);
+    quality.stableWindows = 0;
+    return quality.scale !== previousScale;
+  }
+
+  if (quality.frameLagAverage < 18) {
+    quality.stableWindows += 1;
+    if (quality.stableWindows >= 4) {
+      const previousScale = quality.scale;
+      quality.scale = Math.min(EMPTY_RENDER_SCALE, quality.scale / 0.9);
+      quality.intervalMs = Math.max(EMPTY_RENDER_INTERVAL_MS, quality.intervalMs / 1.12);
+      quality.stableWindows = 0;
+      return quality.scale !== previousScale;
+    }
+  } else {
+    quality.stableWindows = 0;
+  }
+  return false;
 };
 
 interface LifeSimulation {
@@ -270,12 +414,24 @@ interface LifeViewSettings {
   surfaceSpeed: number;
 }
 
+interface LifeInteraction {
+  x: number;
+  y: number;
+  startedAt: number;
+}
+
 const LIFE_WIDTH = 72;
 const LIFE_HEIGHT = 72;
-const EMPTY_RENDER_INTERVAL_MS = 1000 / 8;
+const EMPTY_RENDER_INTERVAL_MS = 1000 / 12;
 const EMPTY_RENDER_SCALE = 0.5;
+const EMPTY_MIN_RENDER_SCALE = 0.28;
+const EMPTY_MAX_RENDER_PIXELS = 520_000;
+const EMPTY_QUALITY_SAMPLE_FRAMES = 12;
 const HEIGHT_SAMPLE_INTERVAL_SECONDS = 1;
 const HEIGHT_TEXTURE_SCALE = 1.2;
+const INTERACTION_WAVE_DURATION_SECONDS = 3.4;
+const INTERACTION_WAVE_SPEED = 3.8;
+const INTERACTION_WAVE_HEIGHT = 0.28;
 const TILE_X = 0.205;
 const TILE_Y = 0.106;
 const HEIGHT_SCALE = 0.17;
@@ -486,6 +642,7 @@ const pickLifeCell = (
   canvas: HTMLCanvasElement,
   life: LifeSimulation,
   time: number,
+  interaction: LifeInteraction,
 ): { x: number; y: number } | null => {
   const uv = pointerUv(event, canvas);
   const ground = unprojectGround(uv);
@@ -499,7 +656,7 @@ const pickLifeCell = (
       const cellY = baseY + y;
       const cell: Vec2 = [cellX, cellY];
       const lifeValue = life.display[lifeIndexForCell(life, cellX, cellY)] ?? 0;
-      const height = sampledHeightForCell(life, cell, lifeValue, time);
+      const height = sampledHeightForCell(life, cell, lifeValue, time, interaction);
       const hitDepth = hitDepthForCell(uv, cell, height);
       if (hitDepth !== null && (!best || hitDepth > best.depth)) {
         best = { x: cellX, y: cellY, depth: hitDepth };
@@ -571,23 +728,45 @@ const pointInQuad = (point: Vec2, a: Vec2, b: Vec2, c: Vec2, d: Vec2): boolean =
 const edgeValue = (a: Vec2, b: Vec2, point: Vec2): number =>
   (point[0] - a[0]) * (b[1] - a[1]) - (point[1] - a[1]) * (b[0] - a[0]);
 
-const sampledHeightForCell = (simulation: LifeSimulation, cell: Vec2, life: number, time: number): number => {
+const sampledHeightForCell = (
+  simulation: LifeSimulation,
+  cell: Vec2,
+  life: number,
+  time: number,
+  interaction: LifeInteraction,
+): number => {
   const index = lifeIndexForCell(simulation, cell[0], cell[1]);
   const heightMix = Math.max(0, Math.min(
     1,
     (time - simulation.heightSampleStartedAt) / HEIGHT_SAMPLE_INTERVAL_SECONDS,
   ));
   const encodedHeight = mix(simulation.heightCurrent[index], simulation.heightNext[index], heightMix);
-  return encodedHeight / 255 * HEIGHT_TEXTURE_SCALE + life * 0.38;
+  return encodedHeight / 255 * HEIGHT_TEXTURE_SCALE
+    + life * 0.38
+    + interactionWaveForCell(cell, time, interaction) * INTERACTION_WAVE_HEIGHT;
 };
 
 const estimatedBaseHeightForCell = (cell: Vec2, time: number, settings: LifeViewSettings): number => {
-  const t = time * 0.085 * settings.noiseSpeed;
-  const broad = fbm(cell[0] * 0.105, cell[1] * 0.105, t, -t * 0.74);
-  const detail = fbm(cell[0] * 0.32, cell[1] * 0.32, -t * 0.56, t * 0.38);
-  const wave = Math.sin(cell[0] * 0.34 + cell[1] * 0.2 + time * 0.38 * settings.noiseSpeed) * 0.12;
-  const shaped = smoothstep(0.12, 0.92, broad * 0.76 + detail * 0.24 + wave);
-  return 0.06 + shaped * shaped * 1.12;
+  const cellPhase = Math.PI * 2 / LIFE_WIDTH;
+  const t = time * 0.42 * settings.noiseSpeed;
+  const diagonal = Math.sin((cell[0] + cell[1]) * cellPhase * 3 - t * 1.12);
+  const crossWave = Math.sin((cell[0] * 2 - cell[1]) * cellPhase * 2 + t * 0.76);
+  const longSwell = Math.sin((cell[0] - cell[1] * 2) * cellPhase + t * 0.48);
+  const interference = 0.5 + 0.5 * (diagonal * 0.55 + crossWave * 0.3 + longSwell * 0.15);
+  const shaped = smoothstep(0.08, 0.92, interference);
+  return 0.045 + shaped * shaped * 1.16;
+};
+
+const interactionWaveForCell = (cell: Vec2, time: number, interaction: LifeInteraction): number => {
+  const age = time - interaction.startedAt;
+  if (age < 0 || age >= INTERACTION_WAVE_DURATION_SECONDS) return 0;
+  const radius = age * INTERACTION_WAVE_SPEED;
+  const dx = cell[0] - interaction.x;
+  const dy = cell[1] - interaction.y;
+  const distanceSquared = dx * dx + dy * dy;
+  const bandWidth = Math.max(1.2, radius * 1.7);
+  const ring = 1 - smoothstep(0, bandWidth, Math.abs(distanceSquared - radius * radius));
+  return ring * (1 - smoothstep(0.2, INTERACTION_WAVE_DURATION_SECONDS, age));
 };
 
 const parseLifeViewSettings = (value: string): LifeViewSettings | null => {
@@ -671,8 +850,11 @@ const noise = (x: number, y: number): number => {
 
 const smoothFraction = (value: number): number => value * value * (3 - 2 * value);
 const mix = (a: number, b: number, value: number): number => a * (1 - value) + b * value;
-const hash = (x: number, y: number): number => fract(Math.sin(x * 127.1 + y * 311.7) * 43758.5453123);
-const fract = (value: number): number => value - Math.floor(value);
+const hash = (x: number, y: number): number => {
+  let value = Math.imul(x, 374_761_393) + Math.imul(y, 668_265_263);
+  value = Math.imul(value ^ (value >>> 13), 1_274_126_177);
+  return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295;
+};
 
 const createProgram = (
   gl: WebGLRenderingContext,
@@ -727,10 +909,13 @@ uniform sampler2D u_life;
 uniform vec2 u_life_resolution;
 uniform float u_surface_speed;
 uniform float u_height_mix;
+uniform vec3 u_pointer;
+uniform vec4 u_interaction;
 
 const float TILE_X = 0.205;
 const float TILE_Y = 0.106;
 const float HEIGHT_SCALE = 0.17;
+const float TOP_EDGE_INVERSE = 4.71;
 
 vec4 stateForCell(vec2 cell) {
   vec2 wrapped = mod(floor(cell), u_life_resolution);
@@ -762,73 +947,102 @@ float edgeValue(vec2 a, vec2 b, vec2 p) {
   return (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
 }
 
-float edgeDistance(vec2 a, vec2 b, vec2 p) {
-  return edgeValue(a, b, p) / max(length(b - a), 0.0001);
-}
-
-float quadDistance(vec2 p, vec2 a, vec2 b, vec2 c, vec2 d) {
+float quadDistance(vec2 p, vec2 a, vec2 b, vec2 c, vec2 d, float inverseA, float inverseB) {
   float winding = sign(edgeValue(a, b, c));
-  float e0 = edgeDistance(a, b, p) * winding;
-  float e1 = edgeDistance(b, c, p) * winding;
-  float e2 = edgeDistance(c, d, p) * winding;
-  float e3 = edgeDistance(d, a, p) * winding;
+  float e0 = edgeValue(a, b, p) * inverseA * winding;
+  float e1 = edgeValue(b, c, p) * inverseB * winding;
+  float e2 = edgeValue(c, d, p) * inverseA * winding;
+  float e3 = edgeValue(d, a, p) * inverseB * winding;
   return min(min(e0, e1), min(e2, e3));
 }
 
-float cornerDistance(vec2 p, vec2 a, vec2 b, vec2 c, vec2 d) {
-  return min(min(length(p - a), length(p - b)), min(length(p - c), length(p - d)));
+float cornerDistanceSquared(vec2 p, vec2 a, vec2 b, vec2 c, vec2 d) {
+  vec2 pa = p - a;
+  vec2 pb = p - b;
+  vec2 pc = p - c;
+  vec2 pd = p - d;
+  return min(min(dot(pa, pa), dot(pb, pb)), min(dot(pc, pc), dot(pd, pd)));
 }
 
-float roundedQuadMask(vec2 p, vec2 a, vec2 b, vec2 c, vec2 d, float radius) {
-  float distance = quadDistance(p, a, b, c, d);
+float roundedQuadMask(float distance, float cornerSquared, float radius) {
   float face = smoothstep(-0.002, 0.004, distance);
-  float corner = cornerDistance(p, a, b, c, d);
-  float cornerRound = smoothstep(radius * 0.22, radius, corner + max(distance, 0.0) * 0.55);
+  float radiusSquared = radius * radius;
+  float cornerRound = smoothstep(
+    radiusSquared * 0.1,
+    radiusSquared,
+    cornerSquared + max(distance, 0.0) * radius * 1.5
+  );
   return face * cornerRound;
 }
 
 vec3 metalRamp(float v) {
-  vec3 black = vec3(0.006, 0.0065, 0.0075);
-  vec3 graphite = vec3(0.058, 0.061, 0.068);
-  vec3 silver = vec3(0.66, 0.69, 0.74);
-  vec3 hot = vec3(1.0, 0.98, 0.88);
+  vec3 black = vec3(0.005, 0.006, 0.009);
+  vec3 graphite = vec3(0.045, 0.052, 0.065);
+  vec3 silver = vec3(0.48, 0.50, 0.54);
+  vec3 hot = vec3(0.98, 0.84, 0.40);
   vec3 color = mix(black, graphite, smoothstep(0.0, 0.62, v));
   color = mix(color, silver, smoothstep(0.56, 0.94, v));
   color = mix(color, hot, smoothstep(0.9, 1.0, v));
   return color;
 }
 
-vec3 faceColor(vec2 cell, float height, float face, float faceDistance, float corner, vec2 uv, float life, float grain) {
+vec3 faceColor(
+  vec2 cell,
+  float height,
+  float face,
+  float faceDistance,
+  float cornerSquared,
+  float life,
+  float grain,
+  float ripple
+) {
   float diagonal = smoothstep(-0.72, 0.82, sin((cell.x - cell.y) * 0.42 + u_time * 0.22 * u_surface_speed));
   float glint = pow(clamp(sin(cell.x * 0.58 - cell.y * 0.41 + u_time * 0.56 * u_surface_speed) * 0.5 + 0.5, 0.0, 1.0), 9.0);
   float heightLight = smoothstep(0.12, 1.46, height);
   vec3 color = metalRamp(heightLight * 0.72 + diagonal * 0.14 + grain * 0.1 + glint * 0.18);
-  vec3 panelLight = vec3(0.92, 0.96, 1.0);
-  vec3 panelCore = vec3(1.0, 1.0, 0.98);
+  vec3 coldLight = vec3(0.52, 0.67, 0.84);
+  vec3 gold = vec3(1.0, 0.66, 0.12);
+  vec3 hotGold = vec3(1.0, 0.94, 0.62);
+  float pulse = 0.88 + sin(u_time * 2.2 + cell.x * 0.7 - cell.y * 0.43) * 0.12;
+  vec2 pointerDelta = cell - u_pointer.xy;
+  float hover = u_pointer.z * (1.0 - smoothstep(0.2, 3.4, dot(pointerDelta, pointerDelta)));
+  float energy = clamp(life * pulse + ripple * 0.72 + hover * 0.16, 0.0, 1.35);
 
   if (face < 0.5) {
-    color *= vec3(1.08, 1.1, 1.14);
-    color = mix(color, panelCore, life * 0.74);
-    color += panelLight * life * 0.55;
+    color *= vec3(1.05, 1.08, 1.13);
+    color = mix(color, gold, energy * 0.52);
+    color += mix(gold, hotGold, life) * energy * 0.68;
   } else if (face < 1.5) {
-    color *= vec3(0.48, 0.5, 0.55);
-    color = mix(color, panelLight, life * 0.22);
-    color += panelLight * life * 0.12;
+    color *= vec3(0.43, 0.46, 0.54);
+    color = mix(color, gold, energy * 0.25);
+    color += gold * energy * 0.12;
   } else {
-    color *= vec3(0.31, 0.33, 0.38);
-    color = mix(color, panelLight, life * 0.16);
-    color += panelLight * life * 0.08;
+    color *= vec3(0.27, 0.31, 0.39);
+    color = mix(color, gold, energy * 0.18);
+    color += gold * energy * 0.08;
   }
 
-  float roundedBevel = 1.0 - smoothstep(0.012, 0.044, min(faceDistance, corner * 0.82));
+  float roundedBevel = 1.0 - smoothstep(0.012, 0.044, min(faceDistance, sqrt(cornerSquared) * 0.82));
   float rim = 1.0 - smoothstep(0.004, 0.019, faceDistance);
   color = mix(color * 0.8, color + vec3(0.14, 0.16, 0.19), roundedBevel * (face < 0.5 ? 0.52 : 0.34));
-  color += vec3(0.72, 0.78, 0.86) * rim * (face < 0.5 ? 0.42 : 0.22);
-  color += vec3(1.0, 0.93, 0.72) * glint * rim * 0.18;
-  color += panelLight * life * rim * (face < 0.5 ? 0.34 : 0.14);
-  float faceFrame = max(abs(uv.x) * 0.74, abs(uv.y) * 1.08);
-  color *= 1.0 - smoothstep(0.2, 1.62, faceFrame);
+  color += coldLight * rim * (face < 0.5 ? 0.32 : 0.15);
+  color += hotGold * (glint * 0.16 + energy * 0.28) * rim;
   return color;
+}
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float interactionWaveForCell(vec2 cell) {
+  float age = u_time - u_interaction.z;
+  if (age < 0.0 || age >= 3.4) return 0.0;
+  float radius = age * 3.8;
+  vec2 delta = cell - u_interaction.xy;
+  float distanceSquared = dot(delta, delta);
+  float bandWidth = max(1.2, radius * 1.7);
+  float ring = 1.0 - smoothstep(0.0, bandWidth, abs(distanceSquared - radius * radius));
+  return ring * (1.0 - smoothstep(0.2, 3.4, age));
 }
 
 void main() {
@@ -837,16 +1051,23 @@ void main() {
   uv.x *= mix(1.0, 1.72, portrait);
   uv.y *= mix(1.0, 0.94, portrait);
   vec2 ground = floor(unprojectGround(uv));
-  vec3 color = vec3(0.002, 0.0022, 0.0028);
+  float fieldGlow = 1.0 / (1.0 + dot(uv * vec2(0.76, 1.08), uv * vec2(0.76, 1.08)) * 2.8);
+  float horizon = 1.0 - smoothstep(0.0, 1.35, abs(uv.y + 0.14));
+  float dust = step(0.992, hash(floor(gl_FragCoord.xy * 0.32))) * 0.035;
+  vec3 color = vec3(0.0015, 0.002, 0.004);
+  color += vec3(0.012, 0.018, 0.032) * fieldGlow;
+  color += vec3(0.045, 0.025, 0.006) * horizon * fieldGlow * 0.34;
+  color += vec3(0.28, 0.2, 0.08) * dust * fieldGlow;
   float bestDepth = -100000.0;
   float ambientGrid = 0.0;
 
-  for (int y = -2; y <= 2; y++) {
-    for (int x = -2; x <= 2; x++) {
+  for (int y = -2; y <= 1; y++) {
+    for (int x = -2; x <= 1; x++) {
       vec2 cell = ground + vec2(float(x), float(y));
       vec4 state = stateForCell(cell);
       float life = state.x;
-      float height = state.y + life * 0.38;
+      float ripple = interactionWaveForCell(cell);
+      float height = state.y + life * 0.38 + ripple * 0.28;
       float grain = state.w;
       float gap = 0.04;
 
@@ -865,33 +1086,41 @@ void main() {
       vec2 g00 = projectPoint(b00);
       vec2 g10 = projectPoint(b10);
       vec2 g01 = projectPoint(b01);
+      float minX = min(min(s00.x, s10.x), min(s11.x, s01.x));
+      float maxX = max(max(s00.x, s10.x), max(s11.x, s01.x));
+      float minY = min(g00.y, min(g10.y, g01.y));
+      float maxY = max(max(s00.y, s10.y), max(s11.y, s01.y));
+      if (uv.x < minX - 0.006 || uv.x > maxX + 0.006 || uv.y < minY - 0.006 || uv.y > maxY + 0.006) {
+        continue;
+      }
       float depthBase = -(cell.x + cell.y) * 32.0 + (cell.x - cell.y) * 0.01;
+      float verticalInverse = 1.0 / max(height * HEIGHT_SCALE, 0.006);
 
-      float topDistance = quadDistance(uv, s00, s10, s11, s01);
-      float topCorner = cornerDistance(uv, s00, s10, s11, s01);
-      float topMask = roundedQuadMask(uv, s00, s10, s11, s01, 0.036);
+      float topDistance = quadDistance(uv, s00, s10, s11, s01, TOP_EDGE_INVERSE, TOP_EDGE_INVERSE);
+      float topCorner = cornerDistanceSquared(uv, s00, s10, s11, s01);
+      float topMask = roundedQuadMask(topDistance, topCorner, 0.036);
       float topDepth = depthBase + height * 2.0 + 3.0;
       if (topMask > 0.001 && topDepth > bestDepth) {
         bestDepth = topDepth;
-        color = mix(color, faceColor(cell, height, 0.0, topDistance, topCorner, uv, life, grain), topMask);
+        color = mix(color, faceColor(cell, height, 0.0, topDistance, topCorner, life, grain, ripple), topMask);
       }
 
-      float sideDistanceA = quadDistance(uv, s00, s10, g10, g00);
-      float sideCornerA = cornerDistance(uv, s00, s10, g10, g00);
-      float sideMaskA = roundedQuadMask(uv, s00, s10, g10, g00, 0.03);
+      float sideDistanceA = quadDistance(uv, s00, s10, g10, g00, TOP_EDGE_INVERSE, verticalInverse);
+      float sideCornerA = cornerDistanceSquared(uv, s00, s10, g10, g00);
+      float sideMaskA = roundedQuadMask(sideDistanceA, sideCornerA, 0.03);
       float sideDepthA = depthBase + height * 1.4 + 1.0;
       if (sideMaskA > 0.001 && sideDepthA > bestDepth) {
         bestDepth = sideDepthA;
-        color = mix(color, faceColor(cell, height, 1.0, sideDistanceA, sideCornerA, uv, life, grain), sideMaskA);
+        color = mix(color, faceColor(cell, height, 1.0, sideDistanceA, sideCornerA, life, grain, ripple), sideMaskA);
       }
 
-      float sideDistanceB = quadDistance(uv, s01, s00, g00, g01);
-      float sideCornerB = cornerDistance(uv, s01, s00, g00, g01);
-      float sideMaskB = roundedQuadMask(uv, s01, s00, g00, g01, 0.03);
+      float sideDistanceB = quadDistance(uv, s01, s00, g00, g01, TOP_EDGE_INVERSE, verticalInverse);
+      float sideCornerB = cornerDistanceSquared(uv, s01, s00, g00, g01);
+      float sideMaskB = roundedQuadMask(sideDistanceB, sideCornerB, 0.03);
       float sideDepthB = depthBase + height * 1.4 + 0.5;
       if (sideMaskB > 0.001 && sideDepthB > bestDepth) {
         bestDepth = sideDepthB;
-        color = mix(color, faceColor(cell, height, 2.0, sideDistanceB, sideCornerB, uv, life, grain), sideMaskB);
+        color = mix(color, faceColor(cell, height, 2.0, sideDistanceB, sideCornerB, life, grain, ripple), sideMaskB);
       }
 
       ambientGrid += max(topMask, max(sideMaskA, sideMaskB)) * (0.008 + life * 0.02);
@@ -900,11 +1129,25 @@ void main() {
 
   vec2 sheen = normalize(vec2(-0.58, 0.82));
   float lightSweep = pow(clamp(dot(normalize(uv + vec2(0.42, -0.1)), sheen) * 0.5 + 0.5, 0.0, 1.0), 9.0);
-  color += vec3(0.05, 0.055, 0.07) * ambientGrid;
-  color += vec3(0.2, 0.22, 0.27) * lightSweep * 0.035;
+  color += vec3(0.05, 0.06, 0.085) * ambientGrid;
+  color += vec3(0.34, 0.28, 0.14) * lightSweep * 0.034;
+
+  float interactionAge = u_time - u_interaction.z;
+  if (interactionAge >= 0.0 && interactionAge < 3.6) {
+    vec4 interactionState = stateForCell(u_interaction.xy);
+    float interactionHeight = interactionState.y + interactionState.x * 0.38;
+    vec2 interactionCenter = projectPoint(vec3(u_interaction.xy + vec2(0.5), interactionHeight + 0.05));
+    float interactionDistance = length(uv - interactionCenter);
+    float interactionFade = 1.0 - smoothstep(0.4, 3.6, interactionAge);
+    float ring = 1.0 - smoothstep(0.012, 0.045, abs(interactionDistance - interactionAge * 0.36));
+    float flare = 1.0 / (1.0 + interactionDistance * interactionDistance * 72.0);
+    color += vec3(1.0, 0.55, 0.08) * (ring * 0.22 + flare * 0.28) * interactionFade;
+  }
+
   float squareFrame = max(abs(uv.x) * 0.78, abs(uv.y) * 1.08);
-  color *= 1.0 - smoothstep(0.28, 1.74, squareFrame);
-  color = pow(color, vec3(0.86));
+  color *= 1.0 - smoothstep(0.32, 1.7, squareFrame);
+  color *= 0.985 + sin(gl_FragCoord.y * 0.72) * 0.015;
+  color = pow(color, vec3(0.84));
 
   gl_FragColor = vec4(color, 1.0);
 }
