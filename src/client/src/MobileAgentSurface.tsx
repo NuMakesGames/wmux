@@ -132,6 +132,8 @@ export function MobileAgentSurface({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const previewUrlsRef = useRef(new Set<string>());
   const stickToBottomRef = useRef(true);
+  const preserveBottomDuringResizeRef = useRef(false);
+  const userScrollIntentRef = useRef(false);
   const composerPaneRef = useRef(pane?.id);
 
   const machine = workspace ? machines.find((candidate) => candidate.id === workspace.machineId) : undefined;
@@ -181,14 +183,21 @@ export function MobileAgentSurface({
     const thread = threadRef.current;
     if (!thread) return;
     let frame: number | undefined;
+    let releaseFrame: number | undefined;
     const pinAfterResize = () => {
       if (!stickToBottomRef.current) return;
+      preserveBottomDuringResizeRef.current = true;
       if (frame !== undefined) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         frame = undefined;
         if (!stickToBottomRef.current) return;
         thread.scrollTop = thread.scrollHeight;
         setThreadAtBottom(true);
+        if (releaseFrame !== undefined) window.cancelAnimationFrame(releaseFrame);
+        releaseFrame = window.requestAnimationFrame(() => {
+          releaseFrame = undefined;
+          preserveBottomDuringResizeRef.current = false;
+        });
       });
     };
     const observer = new ResizeObserver(pinAfterResize);
@@ -198,6 +207,8 @@ export function MobileAgentSurface({
       observer.disconnect();
       window.visualViewport?.removeEventListener("resize", pinAfterResize);
       if (frame !== undefined) window.cancelAnimationFrame(frame);
+      if (releaseFrame !== undefined) window.cancelAnimationFrame(releaseFrame);
+      preserveBottomDuringResizeRef.current = false;
     };
   }, [workspace?.id, pane?.id]);
 
@@ -394,8 +405,24 @@ export function MobileAgentSurface({
           role="log"
           aria-live="polite"
           aria-relevant="additions"
+          onPointerDown={() => {
+            userScrollIntentRef.current = true;
+          }}
+          onTouchStart={() => {
+            userScrollIntentRef.current = true;
+          }}
+          onWheel={() => {
+            userScrollIntentRef.current = true;
+          }}
           onScroll={(event) => {
             const thread = event.currentTarget;
+            const userInitiated = userScrollIntentRef.current;
+            userScrollIntentRef.current = false;
+            if (preserveBottomDuringResizeRef.current && stickToBottomRef.current && !userInitiated) {
+              thread.scrollTop = thread.scrollHeight;
+              setThreadAtBottom(true);
+              return;
+            }
             const atBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 72;
             stickToBottomRef.current = atBottom;
             setThreadAtBottom(atBottom);

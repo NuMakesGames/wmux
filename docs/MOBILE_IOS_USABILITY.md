@@ -81,7 +81,9 @@ width.
    remains occluded, even through a transient non-editable focus target. Listen
    to focus changes as well as viewport events so state settles promptly.
 2. Observe the Chat thread's size and re-pin it to the bottom whenever it grows
-   or shrinks while the user has not intentionally scrolled away.
+   or shrinks while the user has not intentionally scrolled away. Preserve that
+   intent across the intermediate scroll event iOS emits during viewport
+   expansion so the event cannot disable the pending re-pin.
 3. Restore composer focus synchronously from the send gesture so iOS keeps the
    software keyboard open for consecutive messages.
 4. Re-fit the active terminal on visual viewport resize/scroll and after a

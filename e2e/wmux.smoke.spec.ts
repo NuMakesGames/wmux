@@ -448,6 +448,15 @@ test("mobile chat retains focus and bottom anchoring across viewport changes", a
     element.scrollTop = element.scrollHeight;
   });
 
+  await thread.evaluate((element) => {
+    window.visualViewport?.dispatchEvent(new Event("resize"));
+    element.scrollTop = Math.max(0, element.scrollTop - 96);
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(() => thread.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight,
+  )).toBeLessThan(2);
+
   await page.setViewportSize({ width: 390, height: 520 });
   await page.setViewportSize({ width: 390, height: 760 });
   await expect.poll(() => thread.evaluate((element) =>
@@ -455,6 +464,7 @@ test("mobile chat retains focus and bottom anchoring across viewport changes", a
   )).toBeLessThan(2);
 
   await thread.evaluate((element) => {
+    element.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     element.scrollTop = 0;
   });
   await page.setViewportSize({ width: 390, height: 560 });
