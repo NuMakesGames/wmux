@@ -93,7 +93,10 @@ test("agent-event helper sends bearer auth and maps Claude start hooks to runnin
   assert.ok(content.includes("$Summary = 'claude running'"), "Claude start hooks must emit a fresh running summary");
   assert.ok(content.includes("$Message = ''"), "start hooks must discard the previous assistant response");
   assert.ok(content.includes("-TimeoutSec 10"), "agent events must not hang indefinitely during delivery");
-  assert.ok(content.includes("hook is missing WMUX_PANE_ID"), "missing hook context must be observable");
+  const contextGuardIndex = content.indexOf("if (-not $Force -and -not $PaneId -and -not $WorkspaceId)");
+  const hookInputIndex = content.indexOf("$HookInput = if ($ClaudeHook -or $CodexHook)");
+  assert.ok(contextGuardIndex >= 0 && contextGuardIndex < hookInputIndex, "missing hook context must return before hook input is processed");
+  assert.ok(content.slice(contextGuardIndex, hookInputIndex).includes("exit 0"), "missing hook context must be a successful no-op");
 });
 
 test("Windows Codex hooks bypass the cmd shim and migrate wmux-owned entries", () => {

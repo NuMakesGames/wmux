@@ -154,6 +154,10 @@ for ($Index = 0; $Index -lt $args.Count; $Index++) {
   }
 }
 
+if (-not $Force -and -not $PaneId -and -not $WorkspaceId) {
+  exit 0
+}
+
 $HookInput = if ($ClaudeHook -or $CodexHook) { Read-HookInput } else { $null }
 if ($HookInput) {
   if (-not $Transcript) {
@@ -195,14 +199,6 @@ if ($CodexHook -and $HookInput) {
     $Status = 'completed'
     if (-not $Summary) { $Summary = 'codex completed' }
   }
-}
-
-if (-not $Force -and -not $PaneId -and -not $WorkspaceId) {
-  if ($ClaudeHook -or $CodexHook) {
-    [Console]::Error.WriteLine('wmux-agent-event: hook is missing WMUX_PANE_ID and WMUX_WORKSPACE_ID; start the agent from a newly bootstrapped wmux pane')
-    exit 2
-  }
-  exit 0
 }
 
 $Payload = [ordered]@{

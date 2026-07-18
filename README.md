@@ -382,6 +382,9 @@ wmux-hooks install opencode
 wmux-hooks status
 ```
 
+Installed harness hooks silently no-op when the agent is launched outside a
+wmux pane, so one global hook configuration can be shared across environments.
+
 The Claude installer merges lifecycle commands into `~/.claude/settings.json`.
 The Codex installer merges commands into `~/.codex/hooks.json`; start a new
 Codex session, run `/hooks`, and review and trust the wmux command before

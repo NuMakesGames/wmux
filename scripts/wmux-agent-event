@@ -197,6 +197,9 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
+    if not args.force and not args.pane and not args.workspace:
+        return 0
+
     hook_input = read_hook_input() if args.claude_hook or args.codex_hook or args.opencode_hook else {}
     transcript = args.transcript or hook_input.get("transcript_path") or hook_input.get("agent_transcript_path") or ""
     transcript_title, transcript_summary_text, transcript_message = transcript_summary(transcript)
@@ -267,16 +270,6 @@ def main():
         payload["workspaceId"] = args.workspace
     if args.tab:
         payload["tabId"] = args.tab
-
-    if not args.force and not any(key in payload for key in ("paneId", "workspaceId")):
-        if args.claude_hook or args.codex_hook or args.opencode_hook:
-            print(
-                "wmux-agent-event: hook is missing WMUX_PANE_ID and WMUX_WORKSPACE_ID; "
-                "start the agent from a newly bootstrapped wmux pane",
-                file=sys.stderr,
-            )
-            return 0
-        return 0
 
     # Event delivery is telemetry; a down/unauthenticated server must never
     # fail the agent hook that invoked us (Claude/Codex surface non-zero hook

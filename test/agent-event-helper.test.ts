@@ -235,25 +235,28 @@ test("OpenCode hooks report running, waiting, failed, and completed lifecycles",
   }
 });
 
-test("OpenCode hooks warn but do not fail without wmux pane context", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-context-"));
+test("agent harness hooks silently return without wmux pane context", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-hook-context-"));
   try {
-    const { stderr } = await execFileAsync(
-      path.join(repoRoot, "scripts", "wmux-agent-event"),
-      ["--agent", "opencode", "--opencode-hook"],
-      {
-        env: {
-          ...process.env,
-          HOME: dir,
-          WMUX_TOKEN: "",
-          WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
-          WMUX_PANE_ID: "",
-          WMUX_WORKSPACE_ID: "",
-          HOOK_INPUT: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "no context" }),
+    for (const agent of ["claude", "codex", "opencode"]) {
+      const { stdout, stderr } = await execFileAsync(
+        path.join(repoRoot, "scripts", "wmux-agent-event"),
+        ["--agent", agent, `--${agent}-hook`],
+        {
+          env: {
+            ...process.env,
+            HOME: dir,
+            WMUX_TOKEN: "",
+            WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
+            WMUX_PANE_ID: "",
+            WMUX_WORKSPACE_ID: "",
+            HOOK_INPUT: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "no context" }),
+          },
         },
-      },
-    );
-    assert.match(stderr, /hook is missing WMUX_PANE_ID and WMUX_WORKSPACE_ID/);
+      );
+      assert.equal(stdout, "");
+      assert.equal(stderr, "");
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
