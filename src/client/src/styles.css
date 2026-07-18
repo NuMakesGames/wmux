@@ -1146,20 +1146,24 @@ button.active-tool {
   background: var(--black);
 }
 
-.open-tui-mobile-chrome-canvas {
+  .open-tui-mobile-chrome-canvas {
   position: absolute;
-  inset: var(--wmux-mobile-top-inset, 0) 0 0;
+  inset:
+    var(--wmux-mobile-top-inset, 0)
+    var(--wmux-mobile-right-inset, 0)
+    0
+    var(--wmux-mobile-left-inset, 0);
   display: block;
-  width: 100%;
+  width: calc(100% - var(--wmux-mobile-left-inset, 0px) - var(--wmux-mobile-right-inset, 0px));
   height: calc(100% - var(--wmux-mobile-top-inset, 0px));
   pointer-events: none;
 }
 
 .open-tui-mobile-chrome-actions {
   position: absolute;
-  right: 8px;
+  right: calc(8px + var(--wmux-mobile-right-inset, 0px));
   bottom: 4px;
-  left: 8px;
+  left: calc(8px + var(--wmux-mobile-left-inset, 0px));
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
@@ -4570,6 +4574,11 @@ button.active-tool {
     grid-template-rows: 44px minmax(0, 1fr) auto;
   }
 
+  .terminal-host-shell {
+    padding-right: var(--wmux-mobile-right-inset);
+    padding-left: var(--wmux-mobile-left-inset);
+  }
+
   .open-tui-pane-toolbar > .open-tui-canvas {
     display: none;
   }
@@ -4581,6 +4590,8 @@ button.active-tool {
     height: 44px;
     min-width: 0;
     overflow: hidden;
+    padding-right: var(--wmux-mobile-right-inset);
+    padding-left: var(--wmux-mobile-left-inset);
     background: #090907;
     font-family: var(--wmux-mono-font);
   }

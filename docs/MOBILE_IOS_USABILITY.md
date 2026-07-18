@@ -67,6 +67,14 @@ installed app stays on the previous workspace. The page advertises a status-bar
 style, but does not declare standalone capability or publish a web app manifest
 whose scope includes direct workspace and tab routes.
 
+### 7. Landscape terminal content extends behind the sensor cutout
+
+With the software keyboard open or closed in landscape, the terminal's last
+columns, pane controls, and Canvas chrome status extend under the Dynamic
+Island. Other mobile surfaces already consume the left and right safe-area
+insets, but the terminal host and Canvas chrome still use the full edge-to-edge
+width.
+
 ## Implemented fix set
 
 1. Preserve an already-detected keyboard-open state while the visual viewport
@@ -83,6 +91,9 @@ whose scope includes direct workspace and tab routes.
 6. Publish standalone install metadata and a web app manifest with `/` as both
    its start URL and scope so direct workspace routes remain inside the pinned
    app.
+7. Apply the existing horizontal safe-area inset variables to the terminal
+   host, pane toolbar, and Canvas mobile chrome so fitting uses only visible
+   landscape width.
 
 ## Acceptance criteria
 
@@ -100,4 +111,6 @@ whose scope includes direct workspace and tab routes.
   height back to the thread.
 - Workspace and tab navigation remains in the installed app instead of opening
   the modal Safari browser.
+- Landscape terminal columns, pane controls, and status text remain outside the
+  sensor cutout in both keyboard states.
 - Desktop behavior and the `?legacy=1` fallback remain unchanged.

@@ -360,7 +360,31 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
   await expect(chrome.getByRole("button", { name: "Open chat" })).toHaveAttribute("aria-pressed", "true");
   await chrome.getByRole("button", { name: "Open terminal" }).click();
   await expect(chrome.getByRole("button", { name: "Open terminal" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator(".terminal-pane.active")).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+  const activePane = page.locator(".terminal-pane.active");
+  await expect(activePane).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+
+  const appShell = page.locator("main.app-shell");
+  await appShell.evaluate((element: HTMLElement) => {
+    element.style.setProperty("--wmux-mobile-left-inset", "32px");
+    element.style.setProperty("--wmux-mobile-right-inset", "48px");
+  });
+  await expect.poll(() => activePane.locator(".terminal-host-shell").evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return { left: style.paddingLeft, right: style.paddingRight };
+  })).toEqual({ left: "32px", right: "48px" });
+  const chromeInsets = await page.locator(".open-tui-mobile-chrome-canvas").evaluate((canvas) => {
+    const chromeRect = canvas.parentElement!.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    return {
+      left: Math.round(canvasRect.left - chromeRect.left),
+      right: Math.round(chromeRect.right - canvasRect.right),
+    };
+  });
+  expect(chromeInsets).toEqual({ left: 32, right: 48 });
+  await appShell.evaluate((element: HTMLElement) => {
+    element.style.removeProperty("--wmux-mobile-left-inset");
+    element.style.removeProperty("--wmux-mobile-right-inset");
+  });
 
   await chrome.getByRole("button", { name: "Open workspaces and hosts" }).click();
   const navigation = page.getByRole("complementary", { name: "Workspace navigation" });
