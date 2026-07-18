@@ -55,7 +55,8 @@ COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node scripts ./scripts
 COPY deploy/docker/docker-bind-host.mjs deploy/docker/docker-healthcheck.mjs /usr/local/lib/wmux/
 COPY deploy/docker/docker-entrypoint.sh /usr/local/bin/wmux-docker-entrypoint
-RUN chmod 755 /usr/local/bin/wmux-docker-entrypoint \
+RUN chmod 0644 /usr/local/lib/wmux/docker-bind-host.mjs /usr/local/lib/wmux/docker-healthcheck.mjs \
+  && chmod 755 /usr/local/bin/wmux-docker-entrypoint \
   && find /app/scripts -maxdepth 1 -type f -exec sed -i 's/\r$//' {} + \
   && find /app/scripts -maxdepth 1 -type f -exec chmod 755 {} +
 
