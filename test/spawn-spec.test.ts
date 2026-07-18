@@ -24,6 +24,7 @@ const fixedEnv: Record<string, string> = {
   WMUX_STREAM_HOST: "10.0.0.1",
   WMUX_PUBLIC_URL: "http://10.0.0.1:3478",
   HOME: "/home/operator",
+  SHELL: "/bin/bash",
 };
 
 const extraEnv = {
@@ -52,8 +53,9 @@ const machines: Array<{ label: string; machine: MachineConfig }> = [
 ];
 
 const sampleSpecs = () => {
-  const saved = { ...process.env };
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-spawn-spec-"));
+  const touchedKeys = [...Object.keys(fixedEnv), "XDG_RUNTIME_DIR"];
+  const saved = new Map(touchedKeys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, fixedEnv, { XDG_RUNTIME_DIR: runtimeDir });
   try {
     return machines.map(({ label, machine }) => {
@@ -71,8 +73,7 @@ const sampleSpecs = () => {
       };
     });
   } finally {
-    for (const key of [...Object.keys(fixedEnv), "XDG_RUNTIME_DIR"]) {
-      const value = saved[key];
+    for (const [key, value] of saved) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
