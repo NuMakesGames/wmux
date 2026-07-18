@@ -37,6 +37,7 @@ import type {
   TerminalClipboard,
   TerminalMedia,
   TerminalNotification,
+  WorkspaceReorderPosition,
   WmuxSettings,
 } from "./types.js";
 import { buildWindowsHelperBundle, buildWindowsPowerShellBootstrap } from "./windows-helpers.js";
@@ -628,6 +629,33 @@ export const createHttpServer = (
           body.createdBy === "agent" ? "agent" : "user",
         );
         sendJson(response, 201, { workspace, state: currentPayload() });
+        return;
+      }
+
+      if (url.pathname === "/api/workspaces/reorder" && request.method === "POST") {
+        const body = (await readBody(request)) as {
+          workspaceId?: unknown;
+          targetWorkspaceId?: unknown;
+          position?: unknown;
+        };
+        if (
+          typeof body.workspaceId !== "string" ||
+          typeof body.targetWorkspaceId !== "string" ||
+          (body.position !== "before" && body.position !== "after")
+        ) {
+          sendJson(response, 400, { error: "invalid_workspace_reorder" });
+          return;
+        }
+        const reordered = state.reorderWorkspace(
+          body.workspaceId,
+          body.targetWorkspaceId,
+          body.position as WorkspaceReorderPosition,
+        );
+        if (!reordered) {
+          sendJson(response, 404, { error: "workspace_not_found" });
+          return;
+        }
+        sendJson(response, 200, { state: currentPayload() });
         return;
       }
 

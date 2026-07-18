@@ -147,6 +147,31 @@ test("mutations round-trip through flush and reload", () => {
   });
 });
 
+test("workspace reordering persists and ignores no-op moves", () => {
+  withTempState((filePath) => {
+    const store = new StateStore(machines, filePath);
+    const first = store.snapshot().workspaces[0];
+    const second = store.createWorkspace("local");
+    const third = store.createWorkspace("local");
+
+    assert.deepEqual(store.snapshot().workspaces.map((workspace) => workspace.id), [third.id, second.id, first.id]);
+    assert.equal(store.reorderWorkspace(third.id, first.id, "after"), true);
+    assert.deepEqual(store.snapshot().workspaces.map((workspace) => workspace.id), [second.id, first.id, third.id]);
+
+    const revision = store.snapshot().revision;
+    assert.equal(store.reorderWorkspace(first.id, second.id, "after"), true);
+    assert.equal(store.snapshot().revision, revision);
+    assert.equal(store.reorderWorkspace("missing", first.id, "before"), false);
+    assert.equal(store.snapshot().revision, revision);
+
+    store.flush();
+    assert.deepEqual(
+      new StateStore(machines, filePath).snapshot().workspaces.map((workspace) => workspace.id),
+      [second.id, first.id, third.id],
+    );
+  });
+});
+
 test("Windows agent generation ports persist across restart", () => {
   withTempState((filePath) => {
     const store = new StateStore(machines, filePath);

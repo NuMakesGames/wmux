@@ -69,6 +69,49 @@ test("health epochs use safe restart-sortable process bases", () => {
   assert.throws(() => nextHealthEpoch(Number.MAX_SAFE_INTEGER), /health epoch exhausted/);
 });
 
+test("workspace reorder API moves existing workspaces and validates targets", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-http-reorder-"));
+  const machines: MachineConfig[] = [{ id: "local", name: "Local", kind: "local" }];
+  const state = new StateStore(machines, path.join(dir, "state.json"));
+  const first = state.snapshot().workspaces[0];
+  const second = state.createWorkspace("local");
+  const third = state.createWorkspace("local");
+  const settings = new SettingsStore(path.join(dir, "settings.json"));
+  const server = await createHttpServer("127.0.0.1", state, machines, {} as SessionManager, settings, {
+    auth: { enabled: false, token: "", loginEnabled: false, sessionSecret: "test" },
+  });
+  const port = await listen(server);
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/workspaces/reorder`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: third.id, targetWorkspaceId: first.id, position: "after" }),
+    });
+    const payload = await response.json() as { state: BootstrapPayload };
+    assert.equal(response.status, 200);
+    assert.deepEqual(payload.state.workspaces.map((workspace) => workspace.id), [second.id, first.id, third.id]);
+
+    const invalid = await fetch(`http://127.0.0.1:${port}/api/workspaces/reorder`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: third.id, targetWorkspaceId: first.id, position: "middle" }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const missing = await fetch(`http://127.0.0.1:${port}/api/workspaces/reorder`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: "missing", targetWorkspaceId: first.id, position: "before" }),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    state.flush();
+    await close(server);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("mutations use cached health and publish revisioned WebSocket snapshots", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-http-sync-"));
   const healthDelayMs = 600;

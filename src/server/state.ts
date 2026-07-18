@@ -22,6 +22,7 @@ import type {
   TerminalRun,
   TitleSource,
   Workspace,
+  WorkspaceReorderPosition,
 } from "./types.js";
 
 const now = (): string => new Date().toISOString();
@@ -207,6 +208,24 @@ export class StateStore extends EventEmitter {
     this.state.activeWorkspaceId = workspace.id;
     this.save();
     return workspace;
+  }
+
+  reorderWorkspace(
+    workspaceId: string,
+    targetWorkspaceId: string,
+    position: WorkspaceReorderPosition,
+  ): boolean {
+    const sourceIndex = this.state.workspaces.findIndex((workspace) => workspace.id === workspaceId);
+    const originalTargetIndex = this.state.workspaces.findIndex((workspace) => workspace.id === targetWorkspaceId);
+    if (sourceIndex === -1 || originalTargetIndex === -1) return false;
+    if (workspaceId === targetWorkspaceId) return true;
+
+    const [workspace] = this.state.workspaces.splice(sourceIndex, 1);
+    const targetIndex = this.state.workspaces.findIndex((candidate) => candidate.id === targetWorkspaceId);
+    const insertionIndex = targetIndex + (position === "after" ? 1 : 0);
+    this.state.workspaces.splice(insertionIndex, 0, workspace);
+    if (sourceIndex !== insertionIndex) this.save();
+    return true;
   }
 
   createTab(workspaceId: string, machineId?: string, cwd?: string): SurfaceTab {
