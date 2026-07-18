@@ -72,6 +72,7 @@ export interface PaneState {
 
 export type TitleSource = "default" | "auto" | "user";
 export type WorkspaceCreator = "user" | "agent";
+export type WorkspaceReorderPosition = "before" | "after";
 export type SplitDirection = "horizontal" | "vertical";
 
 export type LayoutNode =

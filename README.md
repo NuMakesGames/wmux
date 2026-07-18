@@ -279,6 +279,8 @@ token. wmux is not a hardened multi-user service.
 ## Workspaces and Interaction
 
 - Workspaces contain linked tabs and draggable split panes.
+- Drag workspace rows in the sidebar to persist a custom order. Workspace-number
+  shortcuts follow that saved order; newly created workspaces start at the top.
 - Agents using the bundled skill can create or reuse visible workspaces. These
   persist like user-created workspaces, appear with an `AI` badge, and retain
   direct links for monitoring or handoff.

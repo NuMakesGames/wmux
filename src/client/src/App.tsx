@@ -56,6 +56,7 @@ import type {
   TerminalMedia,
   TerminalNotification,
   TerminalRun,
+  WorkspaceReorderPosition,
   WmuxSettings,
 } from "./types";
 
@@ -77,6 +78,12 @@ interface TerminalFocusRequest {
 interface PendingAction {
   key: string;
   label: string;
+}
+
+interface WorkspaceDropPreview {
+  workspaceId: string;
+  targetWorkspaceId: string;
+  position: WorkspaceReorderPosition;
 }
 
 export function App() {
@@ -103,6 +110,7 @@ export function App() {
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
   const [previewSettings, setPreviewSettings] = useState<WmuxSettings | null>(null);
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
+  const [workspaceDropPreview, setWorkspaceDropPreview] = useState<WorkspaceDropPreview | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [streamOpen, setStreamOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -115,6 +123,8 @@ export function App() {
   const [terminalFocusRequest, setTerminalFocusRequest] = useState<TerminalFocusRequest | null>(null);
   const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
   const pendingActionKeys = useRef(new Set<string>());
+  const draggedWorkspaceId = useRef<string | null>(null);
+  const workspaceDropPreviewRef = useRef<WorkspaceDropPreview | null>(null);
   const terminalFocusToken = useRef(0);
   const bootstrapRetryTimer = useRef<number | undefined>(undefined);
   const bootstrapRetryAttempt = useRef(0);
@@ -669,6 +679,16 @@ export function App() {
     await refresh(response.state);
   });
 
+  const reorderWorkspace = guard(
+    (workspaceId: string, _targetWorkspaceId: string, _position: WorkspaceReorderPosition) => `workspace:${workspaceId}:reorder`,
+    "Reordering workspace...",
+    async (workspaceId: string, targetWorkspaceId: string, position: WorkspaceReorderPosition) => {
+      if (workspaceId === targetWorkspaceId) return;
+      const response = await api.reorderWorkspace(workspaceId, targetWorkspaceId, position);
+      await refresh(response.state);
+    },
+  );
+
   const sendPaneInput = async (paneId: string, data: string): Promise<void> => {
     try {
       await refresh(await api.sendPaneInput(paneId, data));
@@ -1137,6 +1157,7 @@ export function App() {
           onTargetMachineChange={setNewMachineId}
           onCreateWorkspace={() => createWorkspace(targetMachineId)}
           onActivateWorkspace={activateWorkspaceFromChrome}
+          onReorderWorkspace={reorderWorkspace}
         />
       ) : (
       <aside
@@ -1243,14 +1264,59 @@ export function App() {
               <a
                 key={workspace.id}
                 href={workspaceTabPath(workspace.id, tab.id)}
-                title={tooltip}
+                title={`${tooltip} / Drag to reorder`}
+                draggable
                 aria-current={workspace.id === activeWorkspace?.id ? "page" : undefined}
                 className={`workspace-item ${workspace.id === activeWorkspace?.id ? "active" : ""} ${
                   machine?.reachable ? "" : "disabled"
                 } ${workspace.createdBy === "agent" ? "agent-created" : ""} ${
                   latestAgentStatus ? `agent-${latestAgentStatus}` : ""
+                } ${workspaceDropPreview?.workspaceId === workspace.id ? "dragging" : ""} ${
+                  workspaceDropPreview?.targetWorkspaceId === workspace.id
+                    ? `drop-${workspaceDropPreview.position}`
+                    : ""
                 }`}
                 onClick={(event) => activateWorkspaceLink(event, workspace.id, tab.id, { focusTerminal: true })}
+                onDragStart={(event) => {
+                  draggedWorkspaceId.current = workspace.id;
+                  workspaceDropPreviewRef.current = null;
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", workspace.id);
+                  setWorkspaceDropPreview(null);
+                }}
+                onDragOver={(event) => {
+                  const sourceWorkspaceId = draggedWorkspaceId.current;
+                  if (!sourceWorkspaceId || sourceWorkspaceId === workspace.id) {
+                    workspaceDropPreviewRef.current = null;
+                    setWorkspaceDropPreview(null);
+                    return;
+                  }
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const position: WorkspaceReorderPosition = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                  workspaceDropPreviewRef.current = { workspaceId: sourceWorkspaceId, targetWorkspaceId: workspace.id, position };
+                  setWorkspaceDropPreview((current) =>
+                    current?.workspaceId === sourceWorkspaceId &&
+                    current.targetWorkspaceId === workspace.id &&
+                    current.position === position
+                      ? current
+                      : { workspaceId: sourceWorkspaceId, targetWorkspaceId: workspace.id, position },
+                  );
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const preview = workspaceDropPreviewRef.current;
+                  draggedWorkspaceId.current = null;
+                  workspaceDropPreviewRef.current = null;
+                  setWorkspaceDropPreview(null);
+                  if (preview) void reorderWorkspace(preview.workspaceId, preview.targetWorkspaceId, preview.position);
+                }}
+                onDragEnd={() => {
+                  draggedWorkspaceId.current = null;
+                  workspaceDropPreviewRef.current = null;
+                  setWorkspaceDropPreview(null);
+                }}
                 >
                   <span className={`workspace-state-dot ${workspaceStateClass}`} title={workspaceStateTitle} />
                   {hasBell ? <Bell size={10} className="workspace-bell-indicator" aria-label="Terminal bell" /> : null}

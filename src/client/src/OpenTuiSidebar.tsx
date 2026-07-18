@@ -15,7 +15,7 @@ import {
 import { WMUX_MONO_FONT_FAMILY } from "./fonts";
 import { loadMachineTargetPickerExpanded, persistMachineTargetPickerExpanded } from "./machine-target";
 import { compactMiddlePath } from "./path-display";
-import type { MachineVersionStatus } from "./types";
+import type { MachineVersionStatus, WorkspaceReorderPosition } from "./types";
 import { useOpenTuiTheme, type OpenTuiTheme } from "./color-scheme-context";
 
 export interface OpenTuiSidebarWorkspace {
@@ -54,6 +54,11 @@ interface OpenTuiSidebarProps {
   onTargetMachineChange: (machineId: string) => void;
   onCreateWorkspace: () => void;
   onActivateWorkspace: (workspaceId: string, tabId: string) => void;
+  onReorderWorkspace: (
+    workspaceId: string,
+    targetWorkspaceId: string,
+    position: WorkspaceReorderPosition,
+  ) => void | Promise<void>;
 }
 
 type HitAction =
@@ -81,6 +86,23 @@ interface SidebarRenderModel {
   animationTick: number;
   workspaces: OpenTuiSidebarWorkspace[];
   machines: OpenTuiSidebarMachine[];
+  workspaceDropPreview: WorkspaceDropPreview | null;
+}
+
+interface WorkspaceDropPreview {
+  workspaceId: string;
+  targetWorkspaceId: string;
+  position: WorkspaceReorderPosition;
+}
+
+interface WorkspacePointerDrag {
+  pointerId: number;
+  workspaceId: string;
+  startX: number;
+  startY: number;
+  dragging: boolean;
+  targetWorkspaceId?: string;
+  position?: WorkspaceReorderPosition;
 }
 
 export function OpenTuiSidebar({
@@ -92,14 +114,18 @@ export function OpenTuiSidebar({
   onTargetMachineChange,
   onCreateWorkspace,
   onActivateWorkspace,
+  onReorderWorkspace,
 }: OpenTuiSidebarProps) {
   const theme = useOpenTuiTheme();
   const [hostPickerOpen, setHostPickerOpen] = useState(() => loadMachineTargetPickerExpanded(window.localStorage));
   const [animationTick, setAnimationTick] = useState(0);
+  const [workspaceDropPreview, setWorkspaceDropPreview] = useState<WorkspaceDropPreview | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hitsRef = useRef<HitZone[]>([]);
   const metricsRef = useRef<CellMetrics>({ width: 8, height: 16, cols: 1, rows: 1 });
   const paintRef = useRef<(() => void) | null>(null);
+  const workspaceDragRef = useRef<WorkspacePointerDrag | null>(null);
+  const suppressClickRef = useRef(false);
   const hasRunningWorkspace = workspaces.some((workspace) => workspace.agentStatus === "running");
 
   useEffect(() => {
@@ -121,8 +147,9 @@ export function OpenTuiSidebar({
       animationTick,
       workspaces,
       machines,
+      workspaceDropPreview,
     }),
-    [animationTick, hostPickerOpen, machines, targetMachineId, targetMachineName, targetMachineReachable, workspaces],
+    [animationTick, hostPickerOpen, machines, targetMachineId, targetMachineName, targetMachineReachable, workspaceDropPreview, workspaces],
   );
   const renderModelRef = useRef(renderModel);
 
@@ -158,13 +185,21 @@ export function OpenTuiSidebar({
     };
   }, [theme]);
 
-  const onClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+  const hitAt = (clientX: number, clientY: number): HitZone | undefined => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas) return undefined;
     const rect = canvas.getBoundingClientRect();
-    const row = Math.floor((event.clientY - rect.top) / metricsRef.current.height);
-    const col = Math.floor((event.clientX - rect.left) / metricsRef.current.width);
-    const hit = hitsRef.current.find((candidate) => candidate.row === row && col >= candidate.col && col < candidate.col + candidate.width);
+    const row = Math.floor((clientY - rect.top) / metricsRef.current.height);
+    const col = Math.floor((clientX - rect.left) / metricsRef.current.width);
+    return hitsRef.current.find((candidate) => candidate.row === row && col >= candidate.col && col < candidate.col + candidate.width);
+  };
+
+  const onClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    const hit = hitAt(event.clientX, event.clientY);
     if (!hit) return;
     if (hit.action.type === "create-workspace") onCreateWorkspace();
     if (hit.action.type === "toggle-host-picker") setHostPickerOpen((value) => !value);
@@ -175,20 +210,95 @@ export function OpenTuiSidebar({
     if (hit.action.type === "workspace") onActivateWorkspace(hit.action.workspaceId, hit.action.tabId);
   };
 
+  const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.button !== 0) return;
+    const hit = hitAt(event.clientX, event.clientY);
+    if (hit?.action.type !== "workspace") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    workspaceDragRef.current = {
+      pointerId: event.pointerId,
+      workspaceId: hit.action.workspaceId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false,
+    };
+  };
+
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const row = Math.floor((event.clientY - rect.top) / metricsRef.current.height);
-    const col = Math.floor((event.clientX - rect.left) / metricsRef.current.width);
-    const hit = hitsRef.current.find((candidate) => candidate.row === row && col >= candidate.col && col < candidate.col + candidate.width);
+    const drag = workspaceDragRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      if (!drag.dragging && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 5) {
+        drag.dragging = true;
+        suppressClickRef.current = true;
+      }
+      if (drag.dragging) {
+        event.preventDefault();
+        const hit = hitAt(event.clientX, event.clientY);
+        if (hit?.action.type === "workspace" && hit.action.workspaceId !== drag.workspaceId) {
+          const targetWorkspaceId = hit.action.workspaceId;
+          const targetRows = hitsRef.current
+            .filter((candidate) => candidate.action.type === "workspace" && candidate.action.workspaceId === targetWorkspaceId)
+            .map((candidate) => candidate.row);
+          const midpoint = (Math.min(...targetRows) + Math.max(...targetRows) + 1) / 2;
+          const position: WorkspaceReorderPosition = hit.row < midpoint ? "before" : "after";
+          drag.targetWorkspaceId = targetWorkspaceId;
+          drag.position = position;
+          const nextPreview = {
+            workspaceId: drag.workspaceId,
+            targetWorkspaceId,
+            position,
+          };
+          setWorkspaceDropPreview((current) =>
+            current?.workspaceId === nextPreview.workspaceId &&
+            current.targetWorkspaceId === nextPreview.targetWorkspaceId &&
+            current.position === nextPreview.position
+              ? current
+              : nextPreview,
+          );
+        } else {
+          drag.targetWorkspaceId = undefined;
+          drag.position = undefined;
+          setWorkspaceDropPreview(null);
+        }
+        canvas.style.cursor = "grabbing";
+        canvas.title = "Reorder workspace";
+        return;
+      }
+    }
+    const hit = hitAt(event.clientX, event.clientY);
     canvas.style.cursor = hit ? "pointer" : "default";
-    canvas.title = hit?.title ?? "";
+    canvas.title = hit?.action.type === "workspace" ? `${hit.title} / drag to reorder` : hit?.title ?? "";
+  };
+
+  const finishWorkspaceDrag = (event: React.PointerEvent<HTMLCanvasElement>, cancelled = false) => {
+    const drag = workspaceDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    workspaceDragRef.current = null;
+    setWorkspaceDropPreview(null);
+    event.currentTarget.style.cursor = "default";
+    event.currentTarget.title = "";
+    if (drag.dragging) window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+    if (!cancelled && drag.dragging && drag.targetWorkspaceId && drag.position) {
+      void onReorderWorkspace(drag.workspaceId, drag.targetWorkspaceId, drag.position);
+    }
   };
 
   return (
     <aside id="wmux-sidebar" className="sidebar open-tui-sidebar" aria-label="Workspace navigation">
-      <canvas ref={canvasRef} className="open-tui-canvas" onClick={onClick} onPointerMove={onPointerMove} />
+      <canvas
+        ref={canvasRef}
+        className="open-tui-canvas"
+        onClick={onClick}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={finishWorkspaceDrag}
+        onPointerCancel={(event) => finishWorkspaceDrag(event, true)}
+      />
     </aside>
   );
 }
@@ -382,6 +492,10 @@ const drawSidebarGrid = (
         ].filter(Boolean).join(" / "),
         { type: "workspace", workspaceId: workspace.id, tabId: workspace.tabId },
       );
+      if (model.workspaceDropPreview?.targetWorkspaceId === workspace.id) {
+        const indicatorRow = model.workspaceDropPreview.position === "before" ? itemStart : row - 1;
+        write(indicatorRow, Math.max(0, cols - 3), model.workspaceDropPreview.position === "before" ? "^^" : "vv", rgba.gold, 700);
+      }
       visibleWorkspaceCount++;
     }
   }

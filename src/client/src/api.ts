@@ -1,5 +1,5 @@
 import { authHeaders } from "./token";
-import type { BootstrapPayload, DoctorReport, DurableSessionAudit, SplitDirection, WmuxSettings } from "./types";
+import type { BootstrapPayload, DoctorReport, DurableSessionAudit, SplitDirection, WorkspaceReorderPosition, WmuxSettings } from "./types";
 
 export class UnauthorizedError extends Error {
   constructor() {
@@ -94,6 +94,11 @@ export const api = {
     }),
   closeWorkspace: (workspaceId: string) =>
     json<{ state: BootstrapPayload }>(`/api/workspaces/${workspaceId}`, { method: "DELETE" }),
+  reorderWorkspace: (workspaceId: string, targetWorkspaceId: string, position: WorkspaceReorderPosition) =>
+    json<{ state: BootstrapPayload }>("/api/workspaces/reorder", {
+      method: "POST",
+      body: JSON.stringify({ workspaceId, targetWorkspaceId, position }),
+    }),
   setWorkspaceTitle: (workspaceId: string, title: string) =>
     json<{ state: BootstrapPayload }>(`/api/workspaces/${workspaceId}/title`, {
       method: "POST",
