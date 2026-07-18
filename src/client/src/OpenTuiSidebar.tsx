@@ -108,7 +108,7 @@ export function OpenTuiSidebar({
 
   useEffect(() => {
     if (!hasRunningWorkspace) return;
-    const timer = window.setInterval(() => setAnimationTick((value) => (value + 1) % runningFrames.length), 140);
+    const timer = window.setInterval(() => setAnimationTick((value) => (value + 1) % runningFrames.length), 280);
     return () => window.clearInterval(timer);
   }, [hasRunningWorkspace]);
 

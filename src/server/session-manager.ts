@@ -151,7 +151,7 @@ export class SessionManager {
       return;
     }
     const initialSize = normalizeSize(cols, rows);
-    this.recycleIdleDurableClient(pane);
+    const recycledIdleDurableClient = this.recycleIdleDurableClient(pane);
     if (!this.sockets.has(paneId)) this.sockets.set(paneId, new Set());
     const paneSockets = this.sockets.get(paneId);
     paneSockets?.add(socket);
@@ -219,6 +219,9 @@ export class SessionManager {
         resizeOwner,
         replay: attachReplay.data,
         replayKind: attachReplay.kind,
+        ...(recycledIdleDurableClient && attachReplay.kind === "raw" && attachReplay.data === ""
+          ? { waitForRefresh: true as const }
+          : {}),
       });
       this.scheduleDurableClientRefresh(pane, socket);
     };
@@ -499,14 +502,15 @@ export class SessionManager {
     return sessionDriverForMachine(machine).capabilities(machine).refreshClient;
   }
 
-  private recycleIdleDurableClient(pane: PaneState): void {
-    if (!this.shouldUseDurableClientRefresh(pane) || this.hasPaneConnections(pane.id)) return;
+  private recycleIdleDurableClient(pane: PaneState): boolean {
+    if (!this.shouldUseDurableClientRefresh(pane) || this.hasPaneConnections(pane.id)) return false;
     const existing = this.sessions.get(pane.id);
-    if (!existing || existing.isExited) return;
+    if (!existing || existing.isExited) return false;
     this.ignoredSessionExits.add(existing);
     this.sessions.delete(pane.id);
     this.resizeOwners.delete(pane.id);
     existing.kill();
+    return true;
   }
 
   private hasPaneConnections(paneId: string): boolean {

@@ -58,6 +58,22 @@ class HttpError extends Error {
 const MAX_JSON_BODY = 1024 * 1024;
 const MAX_UPLOAD_BODY = 12 * 1024 * 1024;
 
+export const HEALTH_EPOCH_PROCESS_STRIDE = 1024;
+export const healthEpochForProcessStart = (startedAtMs: number): number => {
+  const epoch = Math.trunc(startedAtMs) * HEALTH_EPOCH_PROCESS_STRIDE;
+  if (!Number.isSafeInteger(epoch) || epoch < 0) throw new Error("unsafe health epoch process start");
+  return epoch;
+};
+export const nextHealthEpoch = (current: number): number => {
+  if (!Number.isSafeInteger(current) || current >= Number.MAX_SAFE_INTEGER) {
+    throw new Error("health epoch exhausted");
+  }
+  return current + 1;
+};
+// A later process must sort after same-revision state from an earlier process;
+// the stride reserves room for ordinary in-process health increments.
+export const PROCESS_HEALTH_EPOCH_BASE = healthEpochForProcessStart(Date.now());
+
 // Lifetime of a login-issued session token. Long enough to be convenient on a
 // trusted network; a restart with a rotated secret invalidates all sessions.
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -162,6 +178,7 @@ export const createHttpServer = (
   let streamStatusKey = "";
   let machinePublishRequested = false;
   let streamPublishRequested = false;
+  let healthEpoch = PROCESS_HEALTH_EPOCH_BASE;
   let vite: ViteDevServer | undefined;
   const protocol = options.tls ? "https" : "http";
 
@@ -195,9 +212,9 @@ export const createHttpServer = (
   const machineInputKey = (): string => machineCatalogFingerprint();
   const streamInputKey = (): string => `${streamMutationRevision}:${streamCatalogFingerprint()}`;
 
-  const currentMachineStatuses = (): MachineStatus[] => {
+  const currentMachineStatuses = (statuses = machineStatuses): MachineStatus[] => {
     const latest = new Map(currentMachines().map((machine) => [machine.id, machine]));
-    return machineStatuses.map((status) => {
+    return statuses.map((status) => {
       const machine = latest.get(status.id);
       if (!machine) return status;
       return {
@@ -210,11 +227,18 @@ export const createHttpServer = (
       };
     });
   };
+  const updatePublicMachineStatuses = (next: MachineStatus[]): boolean => {
+    const publicNext = currentMachineStatuses(next);
+    const changed = !samePublicHealth(machineStatuses, publicNext);
+    machineStatuses = publicNext;
+    return changed;
+  };
 
   const currentPayload = () => {
     const snapshot = state.snapshot();
     return {
       revision: snapshot.revision,
+      healthEpoch,
       machines: currentMachineStatuses(),
       workspaces: snapshot.workspaces,
       activeWorkspaceId: snapshot.activeWorkspaceId,
@@ -235,7 +259,8 @@ export const createHttpServer = (
     }
     const expectedKey = machineInputKey();
     if (!force && machineStatusKey === expectedKey) {
-      if (machinePublishRequested) healthEvents.emit("change", "machines");
+      const changed = updatePublicMachineStatuses(machineStatuses);
+      if (changed && machinePublishRequested) healthEvents.emit("change", { machines: machineStatuses });
       machinePublishRequested = false;
       return;
     }
@@ -245,9 +270,9 @@ export const createHttpServer = (
     machineRefresh = machineStatusResolver(machines, bindHost)
       .then((next) => {
         if (refreshKey !== machineInputKey()) return;
-        machineStatuses = next;
+        const changed = updatePublicMachineStatuses(next);
         machineStatusKey = refreshKey;
-        if (machinePublishRequested) healthEvents.emit("change", "machines");
+        if (changed && machinePublishRequested) healthEvents.emit("change", { machines: machineStatuses });
         machinePublishRequested = false;
       })
       .finally(() => {
@@ -275,9 +300,10 @@ export const createHttpServer = (
     streamRefresh = (async () => {
       const next = await streamStatusResolver(machines, bindHost, streamRequests);
       if (refreshKey !== streamInputKey()) return;
+      const changed = !samePublicHealth(streamStatuses, next);
       streamStatuses = next;
       streamStatusKey = refreshKey;
-      if (streamPublishRequested) healthEvents.emit("change", "streams");
+      if (changed && streamPublishRequested) healthEvents.emit("change", { streams: streamStatuses });
       streamPublishRequested = false;
     })().finally(() => {
       streamRefresh = null;
@@ -570,12 +596,18 @@ export const createHttpServer = (
           terminalFontSize?: number;
           terminalScrollbackRows?: number;
           colorScheme?: WmuxSettings["colorScheme"];
+          inactiveTabStreaming?: WmuxSettings["inactiveTabStreaming"];
+          tuiFrameRate?: WmuxSettings["tuiFrameRate"];
+          terminalScrollMode?: WmuxSettings["terminalScrollMode"];
           machineAliases?: Record<string, string>;
         };
         settings.update({
           terminalFontSize: body.terminalFontSize,
           terminalScrollbackRows: body.terminalScrollbackRows,
           colorScheme: body.colorScheme,
+          inactiveTabStreaming: body.inactiveTabStreaming,
+          tuiFrameRate: body.tuiFrameRate,
+          terminalScrollMode: body.terminalScrollMode,
           machineAliases: body.machineAliases,
         });
         sendJson(response, 200, { settings: settings.snapshot(), state: currentPayload() });
@@ -1043,7 +1075,10 @@ export const createHttpServer = (
   };
   const onStateChange = () => broadcastSnapshot("state");
   const onSettingsChange = () => broadcastSnapshot("settings");
-  const onHealthChange = (reason: string) => broadcastSnapshot(reason);
+  const onHealthChange = (delta: { machines?: MachineStatus[]; streams?: StreamStatus[] }) => {
+    healthEpoch = nextHealthEpoch(healthEpoch);
+    broadcastEventMessage({ type: "health", revision: state.snapshot().revision, healthEpoch, ...delta });
+  };
   const onNotification = (notification: TerminalNotification) => {
     broadcastEventMessage({ type: "notification", notification });
   };
@@ -1182,6 +1217,12 @@ export const createHttpServer = (
 
   return setupDevServer().then(() => server);
 };
+
+// checkedAt is internal freshness metadata: polling updates it, but it must not
+// cause a browser-wide state rebuild when the public health is unchanged.
+const samePublicHealth = <T extends { checkedAt: string }>(previous: T[], next: T[]): boolean =>
+  JSON.stringify(previous.map(({ checkedAt: _checkedAt, ...status }) => status)) ===
+  JSON.stringify(next.map(({ checkedAt: _checkedAt, ...status }) => status));
 
 const serveViteRequest = async (
   vite: ViteDevServer,

@@ -1,10 +1,13 @@
 import { memo, useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { TerminalPane } from "./TerminalPane";
-import type { LayoutNode, MachineStatus, PaneState, SplitDirection, SurfaceTab, TerminalMedia, TerminalRun } from "./types";
+import type { LayoutNode, MachineStatus, PaneState, SplitDirection, SurfaceTab, TerminalMedia, TerminalRun, TerminalScrollMode } from "./types";
 
 interface Props {
   tab: SurfaceTab;
   viewActive: boolean;
+  inactiveTabStreaming: "suspend" | "live";
+  tuiFrameRate: 15 | 30 | 60;
+  terminalScrollMode: TerminalScrollMode;
   machines: MachineStatus[];
   terminalFontSize: number;
   terminalScrollbackRows: number;
@@ -26,6 +29,9 @@ interface Props {
 export const LayoutView = memo(function LayoutView({
   tab,
   viewActive,
+  inactiveTabStreaming,
+  tuiFrameRate,
+  terminalScrollMode,
   machines,
   terminalFontSize,
   terminalScrollbackRows,
@@ -107,6 +113,10 @@ export const LayoutView = memo(function LayoutView({
           pane={pane}
           tabId={tab.id}
           active={viewActive && tab.activePaneId === pane.id}
+          tabVisible={viewActive}
+          inactiveTabStreaming={inactiveTabStreaming}
+          tuiFrameRate={tuiFrameRate}
+          terminalScrollMode={terminalScrollMode}
           unreadCount={unreadByPaneId.get(pane.id) ?? 0}
           machines={machines}
           terminalFontSize={terminalFontSize}
@@ -155,6 +165,10 @@ interface LayoutPaneProps {
   pane: PaneState;
   tabId: string;
   active: boolean;
+  tabVisible: boolean;
+  inactiveTabStreaming: "suspend" | "live";
+  tuiFrameRate: 15 | 30 | 60;
+  terminalScrollMode: TerminalScrollMode;
   unreadCount: number;
   machines: MachineStatus[];
   terminalFontSize: number;
@@ -176,6 +190,10 @@ const LayoutPane = memo(function LayoutPane({
   pane,
   tabId,
   active,
+  tabVisible,
+  inactiveTabStreaming,
+  tuiFrameRate,
+  terminalScrollMode,
   unreadCount,
   machines,
   terminalFontSize,
@@ -201,6 +219,10 @@ const LayoutPane = memo(function LayoutPane({
     <TerminalPane
       pane={pane}
       active={active}
+      tabVisible={tabVisible}
+      inactiveTabStreaming={inactiveTabStreaming}
+      tuiFrameRate={tuiFrameRate}
+      terminalScrollMode={terminalScrollMode}
       unreadCount={unreadCount}
       machines={machines}
       terminalFontSize={terminalFontSize}

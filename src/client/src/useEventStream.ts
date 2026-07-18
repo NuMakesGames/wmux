@@ -15,6 +15,7 @@ export type ServiceConnection = "connecting" | "online" | "offline";
 interface UseEventStreamCallbacks {
   // Receives either a revisioned socket snapshot or a recovery bootstrap.
   onResync: (payload: BootstrapPayload) => void;
+  onHealth: (delta: Extract<EventServerMessage, { type: "health" }>) => void;
   onAuthRequired: () => void;
 }
 
@@ -95,6 +96,7 @@ export function useEventStream(callbacks: UseEventStreamCallbacks) {
         if (message.type === "snapshot" && message.state) {
           callbacksRef.current.onResync(message.state);
         }
+        if (message.type === "health") callbacksRef.current.onHealth(message);
         if (message.type === "state") {
           scheduleResync(0);
         }

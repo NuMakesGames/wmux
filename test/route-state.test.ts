@@ -55,7 +55,15 @@ const payload = (): BootstrapPayload =>
     ],
     agentEvents: [],
     runs: [],
-    settings: { terminalFontSize: 14, terminalScrollbackRows: 1000, colorScheme: "wmux", machineAliases: {} },
+    settings: {
+      terminalFontSize: 14,
+      terminalScrollbackRows: 1000,
+      colorScheme: "wmux",
+      inactiveTabStreaming: "suspend",
+      tuiFrameRate: 15,
+      terminalScrollMode: "batched",
+      machineAliases: {},
+    },
     streams: [],
   }) as unknown as BootstrapPayload;
 

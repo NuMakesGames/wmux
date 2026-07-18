@@ -45,6 +45,19 @@ export interface SynchronizedOutputState {
   flushTimer: number | undefined;
 }
 
+export interface AlternateScreenState { active: boolean; carry: string; }
+
+export interface WheelScrollCoalescer {
+  push: (lines: number) => void;
+  dispose: () => void;
+}
+
+interface WheelScrollCoalescerOptions {
+  scrollLines: (lines: number) => void;
+  requestFrame: (callback: () => void) => number;
+  cancelFrame: (frame: number) => void;
+}
+
 export interface TerminalFitter {
   fit: () => void;
   dispose: () => void;
@@ -119,11 +132,157 @@ export const SYNCHRONIZED_OUTPUT_SEQUENCES = [SYNCHRONIZED_OUTPUT_START, SYNCHRO
 export const MAX_SYNCHRONIZED_OUTPUT_BUFFER_CHARS = 512 * 1024;
 export const MAX_SYNCHRONIZED_OUTPUT_HOLD_MS = 500;
 export const TERMINAL_OUTPUT_BATCH_MS = 16;
+export const createAlternateScreenState = (): AlternateScreenState => ({ active: false, carry: "" });
+export const resetAlternateScreenState = (state: AlternateScreenState): void => {
+  state.active = false;
+  state.carry = "";
+};
+// Track DEC alternate-buffer switches without transforming output. This is
+// deliberately separate from synchronized output: DEC 2026 bytes still flow
+// through the existing atomic-output path unchanged.
+export const pushAlternateScreenState = (state: AlternateScreenState, data: string): boolean => {
+  const input = state.carry + data;
+  state.carry = input.slice(Math.max(0, input.length - 12));
+  for (const match of input.matchAll(/\x1b\[\?(?:47|1047|1049)([hl])/g)) state.active = match[1] === "h";
+  return state.active;
+};
+export const terminalOutputDelay = (
+  alternateScreen: boolean,
+  tuiFrameRate: 15 | 30 | 60,
+  lastOutputAt: number,
+  now: number,
+): number => {
+  if (!alternateScreen) return TERMINAL_OUTPUT_BATCH_MS;
+  return now - lastOutputAt > 180 ? 0 : Math.round(1000 / tuiFrameRate);
+};
+
+export const createWheelScrollCoalescer = ({
+  scrollLines,
+  requestFrame,
+  cancelFrame,
+}: WheelScrollCoalescerOptions): WheelScrollCoalescer => {
+  let pendingLines = 0;
+  let frame: number | undefined;
+  let disposed = false;
+
+  const flush = () => {
+    frame = undefined;
+    const lines = Math.trunc(pendingLines);
+    pendingLines -= lines;
+    if (lines !== 0) scrollLines(lines);
+  };
+
+  return {
+    push: (lines) => {
+      if (disposed || !Number.isFinite(lines) || lines === 0) return;
+      pendingLines += lines;
+      if (pendingLines === 0 && frame !== undefined) {
+        cancelFrame(frame);
+        frame = undefined;
+        return;
+      }
+      if (frame === undefined) frame = requestFrame(flush);
+    },
+    dispose: () => {
+      disposed = true;
+      pendingLines = 0;
+      if (frame !== undefined) cancelFrame(frame);
+      frame = undefined;
+    },
+  };
+};
 // Replay chunk size in UTF-16 code units; ~128 KiB keeps each drain step
 // well under a frame budget while a 2 MiB replay finishes in ~16 steps.
 export const REPLAY_CHUNK_CHARS = 128 * 1024;
 export const CONTEXT_COPY_BRIDGE_TIMEOUT_MS = 30_000;
 export const OSC52_PENDING_MS = 60_000;
+
+export const DURABLE_REFRESH_FIRST_NUDGE_MS = 120;
+export const DURABLE_REFRESH_QUIET_MS = 80;
+export const DURABLE_REFRESH_FALLBACK_MS = 700;
+
+export interface DurableRefreshRevealGate {
+  begin: () => void;
+  noteOutput: () => void;
+  cancel: () => void;
+}
+
+interface DurableRefreshRevealGateOptions {
+  onReveal: () => void;
+  isReady?: () => boolean;
+  now?: () => number;
+  setTimer?: (callback: () => void, delayMs: number) => number;
+  clearTimer?: (timer: number) => void;
+}
+
+export const shouldWaitForDurableRefresh = (ready: {
+  replay: string;
+  replayKind: "raw" | "checkpoint";
+  waitForRefresh?: true;
+}): boolean => ready.waitForRefresh === true && ready.replayKind === "raw" && ready.replay === "";
+
+export const createDurableRefreshRevealGate = ({
+  onReveal,
+  isReady = () => true,
+  now = () => Date.now(),
+  setTimer = (callback, delayMs) => window.setTimeout(callback, delayMs),
+  clearTimer = (timer) => window.clearTimeout(timer),
+}: DurableRefreshRevealGateOptions): DurableRefreshRevealGate => {
+  let generation = 0;
+  let startedAt = 0;
+  let pending = false;
+  let quietTimer: number | undefined;
+  let fallbackTimer: number | undefined;
+
+  const clearTimers = () => {
+    if (quietTimer !== undefined) clearTimer(quietTimer);
+    if (fallbackTimer !== undefined) clearTimer(fallbackTimer);
+    quietTimer = undefined;
+    fallbackTimer = undefined;
+  };
+  const reveal = (expectedGeneration: number) => {
+    if (!pending || generation !== expectedGeneration) return;
+    pending = false;
+    clearTimers();
+    onReveal();
+  };
+  const revealAfterQuiet = (expectedGeneration: number) => {
+    quietTimer = undefined;
+    if (!pending || generation !== expectedGeneration) return;
+    if (!isReady()) {
+      quietTimer = setTimer(() => revealAfterQuiet(expectedGeneration), DURABLE_REFRESH_QUIET_MS);
+      return;
+    }
+    reveal(expectedGeneration);
+  };
+  const cancel = () => {
+    generation += 1;
+    pending = false;
+    clearTimers();
+  };
+
+  return {
+    begin: () => {
+      cancel();
+      pending = true;
+      startedAt = now();
+      const expectedGeneration = generation;
+      fallbackTimer = setTimer(() => reveal(expectedGeneration), DURABLE_REFRESH_FALLBACK_MS);
+    },
+    noteOutput: () => {
+      if (!pending) return;
+      if (quietTimer !== undefined) clearTimer(quietTimer);
+      const expectedGeneration = generation;
+      const currentTime = now();
+      const revealAt = Math.max(
+        startedAt + DURABLE_REFRESH_FIRST_NUDGE_MS + DURABLE_REFRESH_QUIET_MS,
+        currentTime + DURABLE_REFRESH_QUIET_MS,
+      );
+      quietTimer = setTimer(() => revealAfterQuiet(expectedGeneration), Math.max(0, revealAt - currentTime));
+    },
+    cancel,
+  };
+};
 
 export const createSynchronizedOutputState = (): SynchronizedOutputState => ({
   active: false,

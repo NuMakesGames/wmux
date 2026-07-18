@@ -12,6 +12,11 @@ wmux provides:
 - browser-aware clipboard, media, notifications, and screen streaming,
 - static machine configuration or dynamic host registration.
 
+Terminal settings include a full-screen redraw cap at 15 FPS by default, 30 FPS,
+or 60 FPS and scrolling mode: Performance
+(batched, default) or Smooth (immediate). Normal shell output remains low-latency;
+the redraw cap applies only while an alternate-screen application is active.
+
 > [!CAUTION]
 > wmux grants terminal access to its machines. It is designed for one trusted
 > user behind loopback, Tailscale, or another private network boundary—not the
@@ -285,7 +290,10 @@ token. wmux is not a hardened multi-user service.
   indicators stay hidden unless an underlying runtime or helper update is
   needed.
 - Settings persist in `~/.wmux/settings.json` and include a shared terminal and
-  canvas-chrome color scheme, terminal size, scrollback, and user-facing host aliases.
+  canvas-chrome color scheme, terminal size, scrollback, user-facing host aliases,
+  inactive-tab streaming, and terminal scroll mode. Hidden cached tabs suspend
+  terminal sockets by default while preserving their mounted terminal views;
+  choose live streaming to retain the previous behavior.
 - Pasting a PNG, JPEG, WebP, or GIF into a connected terminal stages a private
   temporary file in that pane's target filesystem and pastes its quoted native
   path. Local, POSIX SSH, PowerShell-over-SSH, and current Windows-agent panes

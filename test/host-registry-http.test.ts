@@ -13,7 +13,13 @@ import type { SessionManager } from "../src/server/session-manager.js";
 import { SettingsStore } from "../src/server/settings.js";
 import { StateStore } from "../src/server/state.js";
 import { resolveStreamStatuses } from "../src/server/streams.js";
-import type { BootstrapPayload, MachineConfig, MachineStatus, StreamStatus } from "../src/server/types.js";
+import type {
+  BootstrapPayload,
+  EventServerMessage,
+  MachineConfig,
+  MachineStatus,
+  StreamStatus,
+} from "../src/server/types.js";
 
 const sharedAuth: AuthConfig = {
   enabled: true,
@@ -411,18 +417,27 @@ test("timestamp-only heartbeats neither restart probes nor hide current presence
     await withTimeout(ready, "event socket ready");
 
     const latestSeenAt = startedAt + 15_000;
-    const presenceSnapshot = new Promise<{ reason?: string; state?: BootstrapPayload }>((resolve) => {
+    const publishedMessages: EventServerMessage[] = [];
+    const presenceDelta = new Promise<Extract<EventServerMessage, { type: "health" }>>((resolve) => {
       events?.on("message", (raw) => {
-        const message = JSON.parse(raw.toString()) as { type?: string; reason?: string; state?: BootstrapPayload };
-        if (message.type === "snapshot" && message.reason === "machines") resolve(message);
+        const message = JSON.parse(raw.toString()) as EventServerMessage;
+        publishedMessages.push(message);
+        if (message.type === "health" && message.machines) resolve(message);
       });
     });
     app.registry.register(input, "127.0.0.3", latestSeenAt);
-    const published = await withTimeout(presenceSnapshot, "machine presence snapshot");
+    const published = await withTimeout(presenceDelta, "machine presence health delta");
     assert.equal(machineCalls, 2);
+    assert.equal(published.revision, middle.revision);
+    assert.ok(published.healthEpoch > middle.healthEpoch);
     assert.equal(
-      published.state?.machines.find((machine) => machine.id === "roamer")?.lastSeenAt,
+      published.machines?.find((machine) => machine.id === "roamer")?.lastSeenAt,
       new Date(latestSeenAt).toISOString(),
+    );
+    assert.equal(
+      publishedMessages.some((message) => message.type === "snapshot"),
+      false,
+      "presence-only health changes do not publish full snapshots",
     );
   } finally {
     releaseSecond?.();

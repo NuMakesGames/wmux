@@ -11,6 +11,9 @@ export const defaultSettings: WmuxSettings = {
   terminalFontSize: 14,
   terminalScrollbackRows: 10_000,
   colorScheme: "wmux",
+  inactiveTabStreaming: "suspend",
+  tuiFrameRate: 15,
+  terminalScrollMode: "batched",
   machineAliases: {},
 };
 
@@ -160,6 +163,33 @@ export function SettingsModal({
         </div>
         <div className="settings-body">
           <section className="settings-section">
+            <h3>Full-screen output</h3>
+            <label className="settings-row">
+              <span>Redraw rate</span>
+              <select value={draft.tuiFrameRate} onChange={(event) => applyDraft({ ...draft, tuiFrameRate: Number(event.target.value) as WmuxSettings["tuiFrameRate"] })}>
+                <option value={15}>15 FPS</option>
+                <option value={30}>30 FPS</option>
+                <option value={60}>60 FPS</option>
+              </select>
+            </label>
+          </section>
+          <section className="settings-section">
+            <h3>Terminal scrolling</h3>
+            <label className="settings-row">
+              <span>Scroll behavior</span>
+              <select
+                value={draft.terminalScrollMode}
+                onChange={(event) => applyDraft({
+                  ...draft,
+                  terminalScrollMode: event.target.value as WmuxSettings["terminalScrollMode"],
+                })}
+              >
+                <option value="batched">Performance (batched)</option>
+                <option value="immediate">Smooth (immediate)</option>
+              </select>
+            </label>
+          </section>
+          <section className="settings-section">
             <h3>Appearance</h3>
             <label className="settings-row">
               <span>Color scheme</span>
@@ -250,6 +280,22 @@ export function SettingsModal({
             ))}
           </section>
           <section className="settings-section">
+            <h3>Inactive tabs</h3>
+            <label className="settings-row">
+              <span>Terminal streaming</span>
+              <select
+                value={draft.inactiveTabStreaming}
+                onChange={(event) => applyDraft({
+                  ...draft,
+                  inactiveTabStreaming: event.target.value as WmuxSettings["inactiveTabStreaming"],
+                })}
+              >
+                <option value="suspend">Suspend hidden tabs</option>
+                <option value="live">Keep hidden tabs live</option>
+              </select>
+            </label>
+          </section>
+          <section className="settings-section">
             <h3>Durable sessions</h3>
             <div className="settings-command-row">
               <button type="button" onClick={runSessionAudit} disabled={sessionAuditLoading}>
@@ -327,6 +373,15 @@ const normalizeSettings = (settings: WmuxSettings): WmuxSettings => ({
   colorScheme: terminalColorSchemes.some((scheme) => scheme.id === settings.colorScheme)
     ? settings.colorScheme
     : defaultSettings.colorScheme,
+  inactiveTabStreaming: settings.inactiveTabStreaming === "live" || settings.inactiveTabStreaming === "suspend"
+    ? settings.inactiveTabStreaming
+    : defaultSettings.inactiveTabStreaming,
+  tuiFrameRate: settings.tuiFrameRate === 15 || settings.tuiFrameRate === 30 || settings.tuiFrameRate === 60
+    ? settings.tuiFrameRate
+    : defaultSettings.tuiFrameRate,
+  terminalScrollMode: settings.terminalScrollMode === "batched" || settings.terminalScrollMode === "immediate"
+    ? settings.terminalScrollMode
+    : defaultSettings.terminalScrollMode,
   machineAliases: Object.fromEntries(
     Object.entries(settings.machineAliases ?? {})
       .map(([machineId, alias]) => [machineId, cleanAlias(alias)] as const)
