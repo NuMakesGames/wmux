@@ -357,3 +357,76 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
   await chrome.getByRole("button", { name: "Open actions" }).click();
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
 });
+
+test("mobile chat retains focus and bottom anchoring across viewport changes", async ({ page, request }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("mobile-"), "mobile-only viewport coverage");
+
+  const response = await request.get("/api/bootstrap");
+  expect(response.ok()).toBeTruthy();
+  const bootstrap = await response.json() as {
+    activeWorkspaceId: string;
+    workspaces: Array<{
+      id: string;
+      activeTabId: string;
+      tabs: Array<{ id: string; activePaneId: string }>;
+    }>;
+  };
+  const workspace = bootstrap.workspaces.find((candidate) => candidate.id === bootstrap.activeWorkspaceId);
+  const tab = workspace?.tabs.find((candidate) => candidate.id === workspace.activeTabId);
+  expect(workspace).toBeTruthy();
+  expect(tab).toBeTruthy();
+
+  for (let index = 0; index < 10; index += 1) {
+    const notification = await request.post("/api/notifications", {
+      data: {
+        workspaceId: workspace?.id,
+        tabId: tab?.id,
+        paneId: tab?.activePaneId,
+        title: `Mobile viewport event ${index + 1}`,
+        body: "Enough structured activity to keep the mobile thread scrollable while its visual viewport changes.",
+      },
+    });
+    expect(notification.ok()).toBeTruthy();
+  }
+  const agentEvent = await request.post("/api/agent-events", {
+    data: {
+      workspaceId: workspace?.id,
+      tabId: tab?.id,
+      paneId: tab?.activePaneId,
+      agent: "codex",
+      status: "running",
+      title: "Mobile keyboard regression",
+      summary: "Keep the composer available for follow-up input",
+    },
+  });
+  expect(agentEvent.ok()).toBeTruthy();
+
+  await page.reload();
+  const chrome = page.getByRole("banner", { name: "Mobile session controls" });
+  await chrome.getByRole("button", { name: "Open chat" }).click();
+  const thread = page.locator(".mobile-agent-thread");
+  await expect(thread).toBeVisible();
+  await thread.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+
+  await page.setViewportSize({ width: 390, height: 520 });
+  await page.setViewportSize({ width: 390, height: 760 });
+  await expect.poll(() => thread.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight,
+  )).toBeLessThan(2);
+
+  await thread.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await page.setViewportSize({ width: 390, height: 560 });
+  await page.setViewportSize({ width: 390, height: 720 });
+  await expect.poll(() => thread.evaluate((element) => element.scrollTop)).toBe(0);
+  await expect(page.getByRole("button", { name: "Latest" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Latest" }).click();
+  const composer = page.getByRole("textbox", { name: "Agent message" });
+  await composer.fill("mobile follow-up");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(composer).toBeFocused();
+});

@@ -178,6 +178,30 @@ export function MobileAgentSurface({
   }, [threadScrollKey, workspace?.id, pane?.id]);
 
   useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    let frame: number | undefined;
+    const pinAfterResize = () => {
+      if (!stickToBottomRef.current) return;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined;
+        if (!stickToBottomRef.current) return;
+        thread.scrollTop = thread.scrollHeight;
+        setThreadAtBottom(true);
+      });
+    };
+    const observer = new ResizeObserver(pinAfterResize);
+    observer.observe(thread);
+    window.visualViewport?.addEventListener("resize", pinAfterResize);
+    return () => {
+      observer.disconnect();
+      window.visualViewport?.removeEventListener("resize", pinAfterResize);
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    };
+  }, [workspace?.id, pane?.id]);
+
+  useEffect(() => {
     stickToBottomRef.current = true;
     setThreadAtBottom(true);
   }, [workspace?.id, pane?.id]);
@@ -419,6 +443,7 @@ export function MobileAgentSurface({
         className="mobile-agent-composer"
         onSubmit={(event) => {
           event.preventDefault();
+          composerRef.current?.focus({ preventScroll: true });
           void submitDraft();
         }}
       >

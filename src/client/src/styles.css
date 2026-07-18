@@ -4704,8 +4704,46 @@ button.active-tool {
   }
 
   .mobile-keyboard-open .mobile-agent-composer {
-    padding-bottom: 6px;
+    gap: 6px;
+    padding:
+      4px
+      calc(8px + var(--wmux-mobile-right-inset, 0px))
+      4px
+      calc(8px + var(--wmux-mobile-left-inset, 0px));
     border-radius: 0;
+  }
+
+  .mobile-keyboard-open .mobile-agent-composer-handle {
+    display: none;
+  }
+
+  .mobile-keyboard-open .mobile-agent-input-row {
+    grid-template-columns: minmax(0, 1fr) 44px;
+    gap: 6px;
+  }
+
+  .mobile-keyboard-open .mobile-agent-input-row textarea {
+    min-height: 44px;
+    padding: 10px 12px;
+  }
+
+  .mobile-keyboard-open .mobile-agent-send {
+    height: 44px;
+  }
+
+  .mobile-keyboard-open .mobile-agent-composer-actions {
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .mobile-keyboard-open .mobile-agent-composer-actions button {
+    width: 44px;
+    min-width: 44px;
+    padding: 0;
+  }
+
+  .mobile-keyboard-open .mobile-agent-composer-actions button span {
+    display: none;
   }
 
   .mobile-keyboard-open .topbar,

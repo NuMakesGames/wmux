@@ -25,6 +25,26 @@ test("mobile keyboard detection requires an editable focus target", () => {
   }, portrait), false);
 });
 
+test("an open keyboard survives a transient move to a non-editable control", () => {
+  assert.equal(mobileKeyboardLikelyOpen({
+    isMobile: true,
+    layoutHeight: 844,
+    viewportHeight: 520,
+    viewportWidth: 390,
+    editableFocused: false,
+    keyboardWasOpen: true,
+  }, portrait), true);
+
+  assert.equal(mobileKeyboardLikelyOpen({
+    isMobile: true,
+    layoutHeight: 844,
+    viewportHeight: 844,
+    viewportWidth: 390,
+    editableFocused: false,
+    keyboardWasOpen: true,
+  }, portrait), false);
+});
+
 test("mobile keyboard detection handles visual and layout viewport resizing", () => {
   assert.equal(mobileKeyboardLikelyOpen({
     isMobile: true,

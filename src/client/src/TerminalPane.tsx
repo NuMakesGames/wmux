@@ -236,6 +236,8 @@ export const TerminalPane = memo(function TerminalPane({
     let removeContextCopyBridgeDismissListeners: (() => void) | undefined;
     let terminalOutputTimer: number | undefined;
     let osc52PendingTimer: number | undefined;
+    let viewportFitFrame: number | undefined;
+    let viewportFitTimer: number | undefined;
     let queuedTerminalOutput = "";
     const alternateScreenState = createAlternateScreenState();
     let lastTerminalOutputAt = 0;
@@ -702,6 +704,23 @@ export const TerminalPane = memo(function TerminalPane({
     };
 
     const announceResizeStateSoon = () => requestAnimationFrame(announceResizeState);
+    const settleVisualViewportResize = () => {
+      if (!activeRef.current) return;
+      if (viewportFitFrame !== undefined) window.cancelAnimationFrame(viewportFitFrame);
+      viewportFitFrame = window.requestAnimationFrame(() => {
+        viewportFitFrame = undefined;
+        announceResizeState();
+      });
+      if (viewportFitTimer !== undefined) window.clearTimeout(viewportFitTimer);
+      viewportFitTimer = window.setTimeout(() => {
+        viewportFitTimer = undefined;
+        announceResizeState();
+      }, 160);
+    };
+    const visualViewport = window.visualViewport;
+    visualViewport?.addEventListener("resize", settleVisualViewportResize);
+    visualViewport?.addEventListener("scroll", settleVisualViewportResize);
+    window.addEventListener("orientationchange", settleVisualViewportResize);
 
     const createSocketController = (term: Terminal) => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -1094,6 +1113,11 @@ export const TerminalPane = memo(function TerminalPane({
       bufferDisposable?.dispose();
       if (terminalOutputTimer !== undefined) window.clearTimeout(terminalOutputTimer);
       if (osc52PendingTimer !== undefined) window.clearTimeout(osc52PendingTimer);
+      if (viewportFitFrame !== undefined) window.cancelAnimationFrame(viewportFitFrame);
+      if (viewportFitTimer !== undefined) window.clearTimeout(viewportFitTimer);
+      visualViewport?.removeEventListener("resize", settleVisualViewportResize);
+      visualViewport?.removeEventListener("scroll", settleVisualViewportResize);
+      window.removeEventListener("orientationchange", settleVisualViewportResize);
       if (selectionRestoreTimer !== undefined) window.clearTimeout(selectionRestoreTimer);
       clearContextCopyBridge();
       if (mouseDownListener) terminalRef.current?.element?.removeEventListener("mousedown", mouseDownListener, { capture: true });

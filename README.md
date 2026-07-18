@@ -513,7 +513,9 @@ collapses while the software keyboard is open without destroying the active
 terminal session.
 
 The Chat surface displays trusted structured agent events, not parsed PTY
-output. Live terminal progress remains in Term view.
+output. Live terminal progress remains in Term view. The hands-on iOS
+regression checklist and viewport behavior are documented in
+[docs/MOBILE_IOS_USABILITY.md](docs/MOBILE_IOS_USABILITY.md).
 
 ## Development
 
