@@ -185,7 +185,9 @@ export function MobileAgentSurface({
     let frame: number | undefined;
     let releaseFrame: number | undefined;
     const pinAfterResize = () => {
-      if (!stickToBottomRef.current) return;
+      const bottomGap = thread.scrollHeight - thread.scrollTop - thread.clientHeight;
+      if (!stickToBottomRef.current && bottomGap >= 72) return;
+      stickToBottomRef.current = true;
       preserveBottomDuringResizeRef.current = true;
       if (frame !== undefined) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {

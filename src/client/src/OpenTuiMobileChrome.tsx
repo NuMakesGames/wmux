@@ -189,11 +189,11 @@ const drawMobileChrome = (
   const versionText = model.versionStatus === "outdated" && model.versionLabel ? `[${model.versionLabel}]` : "";
   const actionRowCount = rows >= 5 ? 3 : 2;
   const actionRow = Math.max(0, rows - actionRowCount);
-  if (actionRow >= 4) {
+  if (actionRow >= 3) {
     write(1, 1, `> ${model.workspaceName}`, rgba.gold, true);
     if (versionText) write(1, Math.max(1, cols - versionText.length - 1), versionText, versionColor, true);
-    write(2, 1, `${statusMark} ${model.statusLabel}`, statusColor, true);
-    if (model.subtitle) write(3, 1, model.subtitle, rgba.muted);
+    const detail = [model.statusLabel, model.subtitle].filter(Boolean).join(" / ");
+    write(2, 1, `${statusMark} ${detail}`, statusColor, true);
   } else if (actionRow >= 2) {
     const context = [model.workspaceName, versionText, `${statusMark} ${model.statusLabel}`, model.subtitle].filter(Boolean).join(" / ");
     write(1, 1, `> ${context}`, ["running", "waiting"].includes(model.status) ? statusColor : rgba.gold, true);

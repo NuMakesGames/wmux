@@ -499,6 +499,7 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
 
   const chrome = page.getByRole("banner", { name: "Mobile session controls" });
   await expect(chrome).toBeVisible();
+  await expect.poll(() => chrome.evaluate((element) => Math.round(element.getBoundingClientRect().height))).toBe(96);
   await expect(chrome.getByRole("button", { name: "Open chat" })).toHaveAttribute("aria-pressed", "true");
   await chrome.getByRole("button", { name: "Open terminal" }).click();
   await expect(chrome.getByRole("button", { name: "Open terminal" })).toHaveAttribute("aria-pressed", "true");
@@ -626,6 +627,19 @@ test("mobile chat retains focus and bottom anchoring across viewport changes", a
   await chrome.getByRole("button", { name: "Open chat" }).click();
   const thread = page.locator(".mobile-agent-thread");
   await expect(thread).toBeVisible();
+  const messageStyle = await page.locator(".mobile-agent-message").first().evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return {
+      borderRadius: style.borderRadius,
+      borderBottomStyle: style.borderBottomStyle,
+      marginLeft: style.marginLeft,
+    };
+  });
+  expect(messageStyle).toEqual({ borderRadius: "0px", borderBottomStyle: "solid", marginLeft: "0px" });
+  const inputPrompt = await page.locator(".mobile-agent-input-row").evaluate((element) =>
+    window.getComputedStyle(element, "::before").content,
+  );
+  expect(inputPrompt).toBe('">"');
   await thread.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
   });
