@@ -43,7 +43,7 @@ interface OpenTuiSettingsModalProps {
 }
 
 type FieldId = "font" | "scrollback" | `alias:${string}`;
-type ChoiceId = "scheme";
+type ChoiceId = "scheme" | "inactive-streaming" | "frame-rate" | "terminal-scroll";
 type FocusId = FieldId | ChoiceId | "dom" | "close" | "audit" | "reset" | "cancel" | "save" | `cleanup:${string}:${string}`;
 
 interface EditState {
@@ -277,6 +277,24 @@ export function OpenTuiSettingsModal({
     setFocusId("scheme");
   };
 
+  const adjustInactiveStreaming = () => {
+    const current = commitEditing();
+    applyNextDraft({ ...current, inactiveTabStreaming: current.inactiveTabStreaming === "suspend" ? "live" : "suspend" });
+    setFocusId("inactive-streaming");
+  };
+  const adjustTerminalScroll = () => {
+    const current = commitEditing();
+    applyNextDraft({ ...current, terminalScrollMode: current.terminalScrollMode === "batched" ? "immediate" : "batched" });
+    setFocusId("terminal-scroll");
+  };
+  const adjustFrameRate = (direction: -1 | 1) => {
+    const current = commitEditing();
+    const rates = [15, 30, 60] as const;
+    const index = Math.max(0, rates.indexOf(current.tuiFrameRate));
+    applyNextDraft({ ...current, tuiFrameRate: rates[modulo(index + direction, rates.length)] });
+    setFocusId("frame-rate");
+  };
+
   const activate = async (id: FocusId) => {
     if (id === "dom") {
       commitEditing();
@@ -306,6 +324,12 @@ export function OpenTuiSettingsModal({
       adjustScheme(1);
       return;
     }
+    if (id === "inactive-streaming") {
+      adjustInactiveStreaming();
+      return;
+    }
+    if (id === "frame-rate") { adjustFrameRate(1); return; }
+    if (id === "terminal-scroll") { adjustTerminalScroll(); return; }
     if (id.startsWith("cleanup:")) {
       commitEditing();
       const [, backend, ...nameParts] = id.split(":");
@@ -379,15 +403,21 @@ export function OpenTuiSettingsModal({
       moveFocus(-1);
       return;
     }
-    if (event.key === "ArrowLeft" && (focusId === "font" || focusId === "scrollback" || focusId === "scheme")) {
+    if (event.key === "ArrowLeft" && (focusId === "font" || focusId === "scrollback" || focusId === "scheme" || focusId === "inactive-streaming" || focusId === "frame-rate" || focusId === "terminal-scroll")) {
       event.preventDefault();
       if (focusId === "scheme") adjustScheme(-1);
+      else if (focusId === "inactive-streaming") adjustInactiveStreaming();
+      else if (focusId === "frame-rate") adjustFrameRate(-1);
+      else if (focusId === "terminal-scroll") adjustTerminalScroll();
       else adjustNumber(focusId, -1);
       return;
     }
-    if (event.key === "ArrowRight" && (focusId === "font" || focusId === "scrollback" || focusId === "scheme")) {
+    if (event.key === "ArrowRight" && (focusId === "font" || focusId === "scrollback" || focusId === "scheme" || focusId === "inactive-streaming" || focusId === "frame-rate" || focusId === "terminal-scroll")) {
       event.preventDefault();
       if (focusId === "scheme") adjustScheme(1);
+      else if (focusId === "inactive-streaming") adjustInactiveStreaming();
+      else if (focusId === "frame-rate") adjustFrameRate(1);
+      else if (focusId === "terminal-scroll") adjustTerminalScroll();
       else adjustNumber(focusId, 1);
       return;
     }
@@ -406,13 +436,19 @@ export function OpenTuiSettingsModal({
     const hit = hitFromEvent(event.clientX, event.clientY);
     panelRef.current?.focus();
     if (!hit) return;
-    if (hit.action === "increment" && (hit.id === "font" || hit.id === "scrollback" || hit.id === "scheme")) {
+    if (hit.action === "increment" && (hit.id === "font" || hit.id === "scrollback" || hit.id === "scheme" || hit.id === "inactive-streaming" || hit.id === "frame-rate" || hit.id === "terminal-scroll")) {
       if (hit.id === "scheme") adjustScheme(1);
+      else if (hit.id === "inactive-streaming") adjustInactiveStreaming();
+      else if (hit.id === "frame-rate") adjustFrameRate(1);
+      else if (hit.id === "terminal-scroll") adjustTerminalScroll();
       else adjustNumber(hit.id, 1);
       return;
     }
-    if (hit.action === "decrement" && (hit.id === "font" || hit.id === "scrollback" || hit.id === "scheme")) {
+    if (hit.action === "decrement" && (hit.id === "font" || hit.id === "scrollback" || hit.id === "scheme" || hit.id === "inactive-streaming" || hit.id === "frame-rate" || hit.id === "terminal-scroll")) {
       if (hit.id === "scheme") adjustScheme(-1);
+      else if (hit.id === "inactive-streaming") adjustInactiveStreaming();
+      else if (hit.id === "frame-rate") adjustFrameRate(-1);
+      else if (hit.id === "terminal-scroll") adjustTerminalScroll();
       else adjustNumber(hit.id, -1);
       return;
     }
@@ -494,6 +530,15 @@ const buildLayout = (
     id: "scheme",
     label: "color scheme",
     value: terminalColorSchemes.find((scheme) => scheme.id === draft.colorScheme)?.name ?? terminalColorSchemes[0].name,
+    height: 2,
+  });
+  push({ kind: "choice", id: "frame-rate", label: "full-screen redraw", value: `${draft.tuiFrameRate} FPS`, height: 2 });
+  push({ kind: "choice", id: "terminal-scroll", label: "terminal scrolling", value: draft.terminalScrollMode === "batched" ? "Performance (batched)" : "Smooth (immediate)", height: 2 });
+  push({
+    kind: "choice",
+    id: "inactive-streaming",
+    label: "hidden tabs",
+    value: draft.inactiveTabStreaming === "suspend" ? "suspend streaming" : "keep streaming live",
     height: 2,
   });
   push({

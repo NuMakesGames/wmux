@@ -29,11 +29,44 @@ export const reconcile = <T>(prev: unknown, next: T): T => {
 };
 
 export const isIncomingRevisionStale = (
-  current: { revision: number } | null | undefined,
-  incoming: { revision: number },
-): boolean => Boolean(current && incoming.revision < current.revision);
+  current: { revision: number; healthEpoch: number } | null | undefined,
+  incoming: { revision: number; healthEpoch: number },
+): boolean => Boolean(current && (
+  incoming.revision < current.revision ||
+  (incoming.revision === current.revision && incoming.healthEpoch < current.healthEpoch)
+));
 
-export const reconcileIncomingRevision = <T extends { revision: number }>(
+export const isIncomingRevisionNewer = (
+  current: { revision: number; healthEpoch: number },
+  incoming: { revision: number; healthEpoch: number },
+): boolean => incoming.revision > current.revision || (
+  incoming.revision === current.revision && incoming.healthEpoch > current.healthEpoch
+);
+
+export const healthDeltaRequiresResync = (
+  current: { revision: number } | null | undefined,
+  delta: { revision: number },
+): boolean => !current || delta.revision > current.revision;
+
+export const bootstrapSatisfiesHealthDelta = (
+  required: { revision: number; healthEpoch: number } | null | undefined,
+  incoming: { revision: number; healthEpoch: number },
+): boolean => !required || !isIncomingRevisionStale(required, incoming);
+
+export const applyHealthDelta = <T extends { revision: number; healthEpoch: number; machines: unknown[]; streams: unknown[] }>(
+  current: T | null | undefined,
+  delta: { revision: number; healthEpoch: number; machines?: unknown[]; streams?: unknown[] },
+): T | null | undefined => {
+  if (!current || delta.revision !== current.revision || delta.healthEpoch <= current.healthEpoch) return current;
+  return reconcile(current, {
+    ...current,
+    healthEpoch: delta.healthEpoch,
+    ...(delta.machines ? { machines: delta.machines } : {}),
+    ...(delta.streams ? { streams: delta.streams } : {}),
+  });
+};
+
+export const reconcileIncomingRevision = <T extends { revision: number; healthEpoch: number }>(
   current: T | null | undefined,
   incoming: T,
 ): T => current && isIncomingRevisionStale(current, incoming) ? current : reconcile(current, incoming);

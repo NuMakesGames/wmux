@@ -47,9 +47,13 @@ import {
   CONTEXT_COPY_BRIDGE_TIMEOUT_MS,
   OSC52_PENDING_MS,
   createSynchronizedOutputState,
+  createAlternateScreenState,
+  resetAlternateScreenState,
   resetSynchronizedOutput,
   drainSynchronizedOutput,
   pushSynchronizedOutput,
+  pushAlternateScreenState,
+  terminalOutputDelay,
   stripWmuxControlSequences,
   terminalSelectionManager,
   readTerminalSelectionPosition,
@@ -58,6 +62,7 @@ import {
   kittyImageToMedia,
   createLocalMediaId,
   wheelLines,
+  createWheelScrollCoalescer,
   hasMouseTracking,
   mouseWheelSequence,
   mouseReleaseSequence,
@@ -68,6 +73,9 @@ import {
   cursorPositionResponse,
   readCellMetrics,
   waitForVisibleBox,
+  createDurableRefreshRevealGate,
+  shouldWaitForDurableRefresh,
+  type DurableRefreshRevealGate,
 } from "./terminal-pane-runtime";
 import type {
   MachineStatus,
@@ -75,11 +83,16 @@ import type {
   SplitDirection,
   TerminalMedia,
   TerminalRun,
+  TerminalScrollMode,
 } from "./types";
 
 interface Props {
   pane: PaneState;
   active: boolean;
+  tabVisible: boolean;
+  inactiveTabStreaming: "suspend" | "live";
+  tuiFrameRate: 15 | 30 | 60;
+  terminalScrollMode: TerminalScrollMode;
   unreadCount: number;
   machines: MachineStatus[];
   terminalFontSize: number;
@@ -99,6 +112,10 @@ interface Props {
 export const TerminalPane = memo(function TerminalPane({
   pane,
   active,
+  tabVisible,
+  inactiveTabStreaming,
+  tuiFrameRate,
+  terminalScrollMode,
   unreadCount,
   machines,
   terminalFontSize,
@@ -119,6 +136,11 @@ export const TerminalPane = memo(function TerminalPane({
   const rectangularSelectionRef = useRef<RectangularSelection | null>(null);
   const fitAddonRef = useRef<TerminalFitter | null>(null);
   const reconnectRef = useRef<(() => void) | null>(null);
+  const socketControllerRef = useRef<PaneSocketController | null>(null);
+  const suspendSocketRef = useRef(inactiveTabStreaming === "suspend" && !tabVisible);
+  const discardPendingOutputRef = useRef<(() => void) | null>(null);
+  const tuiFrameRateRef = useRef(tuiFrameRate);
+  const terminalScrollModeRef = useRef(terminalScrollMode);
   const outputCarryRef = useRef("");
   const osc52ParserRef = useRef(new Osc52Parser());
   const pendingOsc52Ref = useRef<{ text: string; generation: number; expiresAt: number } | undefined>();
@@ -154,9 +176,28 @@ export const TerminalPane = memo(function TerminalPane({
   }, [onActivate]);
 
   useEffect(() => {
+    tuiFrameRateRef.current = tuiFrameRate;
+  }, [tuiFrameRate]);
+
+  useEffect(() => {
+    terminalScrollModeRef.current = terminalScrollMode;
+  }, [terminalScrollMode]);
+
+  useEffect(() => {
     if (activeRef.current !== active) inputEpochRef.current += 1;
     activeRef.current = active;
   }, [active]);
+
+  useEffect(() => {
+    const shouldSuspend = inactiveTabStreaming === "suspend" && !tabVisible;
+    const wasSuspended = suspendSocketRef.current;
+    suspendSocketRef.current = shouldSuspend;
+    if (shouldSuspend) {
+      socketControllerRef.current?.pause();
+      if (!wasSuspended) discardPendingOutputRef.current?.();
+    }
+    else socketControllerRef.current?.resume();
+  }, [inactiveTabStreaming, tabVisible]);
 
   useEffect(() => {
     focusSignalRef.current = focusSignal;
@@ -196,10 +237,16 @@ export const TerminalPane = memo(function TerminalPane({
     let terminalOutputTimer: number | undefined;
     let osc52PendingTimer: number | undefined;
     let queuedTerminalOutput = "";
+    const alternateScreenState = createAlternateScreenState();
+    let lastTerminalOutputAt = 0;
     let replayChunks: string[] = [];
     let replayBufferedOutput: string[] = [];
     let replayDrainTimer: number | undefined;
     let replayingTerminalOutput = false;
+    let outputGeneration = 0;
+    let revealGeneration = 0;
+    let durableRefreshRevealGate: DurableRefreshRevealGate | undefined;
+    let wheelScroll: ReturnType<typeof createWheelScrollCoalescer> | undefined;
     let terminalCanvas: HTMLCanvasElement | undefined;
     // The server preserves a pane whose process died abnormally instead of
     // deleting it, so a keypress here re-attaches (and re-spawns) on demand
@@ -382,6 +429,7 @@ export const TerminalPane = memo(function TerminalPane({
     };
 
     const handleKittyGraphic = (graphic: KittyGraphicPayload) => {
+      const generation = outputGeneration;
       if (graphic.virtualPlacement && graphic.imageId) {
         kittyVirtualPlacementsRef.current.set(graphic.imageId, {
           cols: Math.max(1, graphic.displayColumns ?? 1),
@@ -393,7 +441,7 @@ export const TerminalPane = memo(function TerminalPane({
 
       void materializeKittyGraphic(graphic)
         .then((image) => {
-          if (cancelled || removed) return;
+          if (cancelled || removed || generation !== outputGeneration) return;
           const media = kittyImageToMedia(image, pane, graphic.imageId);
           if (graphic.action !== "q" && graphic.imageId) kittyImageCacheRef.current.set(graphic.imageId, media);
           if (graphic.virtualPlacement && graphic.imageId) updateKittyInlineMedia(graphic.imageId, media);
@@ -401,6 +449,7 @@ export const TerminalPane = memo(function TerminalPane({
           sendKittyResponse(graphic.imageId, graphic.quiet, "ok", "OK");
         })
         .catch((error: unknown) => {
+          if (cancelled || removed || generation !== outputGeneration) return;
           const message = error instanceof Error ? error.message : "Kitty graphics decode failed";
           sendKittyResponse(graphic.imageId, graphic.quiet, "error", `EINVAL: ${message}`);
         });
@@ -441,7 +490,12 @@ export const TerminalPane = memo(function TerminalPane({
       if (!text) return;
       queuedTerminalOutput += text;
       if (terminalOutputTimer !== undefined) return;
-      terminalOutputTimer = window.setTimeout(() => flushQueuedTerminalText(term), TERMINAL_OUTPUT_BATCH_MS);
+      // Let the first full-screen frame after an idle prompt appear promptly;
+      // sustained redraw remains capped at the configured cadence.
+      const now = Date.now();
+      const delay = terminalOutputDelay(alternateScreenState.active, tuiFrameRateRef.current, lastTerminalOutputAt, now);
+      lastTerminalOutputAt = now;
+      terminalOutputTimer = window.setTimeout(() => flushQueuedTerminalText(term), delay);
     };
 
     const flushSynchronizedOutput = (term: Terminal) => {
@@ -459,6 +513,7 @@ export const TerminalPane = memo(function TerminalPane({
     };
 
     const handleTerminalText = (term: Terminal, text: string) => {
+      pushAlternateScreenState(alternateScreenState, text);
       const chunks = pushSynchronizedOutput(synchronizedOutputRef.current, text);
       for (const chunk of chunks) queueTerminalText(term, chunk);
       scheduleSynchronizedOutputFlush(term);
@@ -523,11 +578,28 @@ export const TerminalPane = memo(function TerminalPane({
     // Live output arriving mid-drain is buffered to preserve ordering.
     const replayDraining = () => replayChunks.length > 0 || replayDrainTimer !== undefined;
 
-    const revealTerminal = () => {
+    const revealTerminal = (flushPendingWrite = false) => {
+      const generation = revealGeneration;
       requestAnimationFrame(() => {
-        if (!cancelled) setTerminalReady(true);
+        if (cancelled || generation !== revealGeneration) return;
+        const term = terminalRef.current;
+        if (flushPendingWrite && term) flushQueuedTerminalText(term);
+        setTerminalReady(true);
       });
     };
+
+    const cancelPendingReveal = () => {
+      revealGeneration += 1;
+      durableRefreshRevealGate?.cancel();
+    };
+
+    durableRefreshRevealGate = createDurableRefreshRevealGate({
+      onReveal: () => revealTerminal(true),
+      isReady: () => {
+        const synchronized = synchronizedOutputRef.current;
+        return !synchronized.active && synchronized.carry === "";
+      },
+    });
 
     const resetReplayDrain = () => {
       if (replayDrainTimer !== undefined) {
@@ -537,8 +609,28 @@ export const TerminalPane = memo(function TerminalPane({
       replayChunks = [];
       replayBufferedOutput = [];
       replayingTerminalOutput = false;
-      osc52ParserRef.current.reset();
     };
+
+    const resetPendingOutput = () => {
+      cancelPendingReveal();
+      outputGeneration += 1;
+      if (terminalOutputTimer !== undefined) {
+        window.clearTimeout(terminalOutputTimer);
+        terminalOutputTimer = undefined;
+      }
+      queuedTerminalOutput = "";
+      resetAlternateScreenState(alternateScreenState);
+      lastTerminalOutputAt = 0;
+      resetReplayDrain();
+      resetSynchronizedOutput(synchronizedOutputRef.current);
+      outputCarryRef.current = "";
+      osc52ParserRef.current.reset();
+      kittyParserRef.current = new KittyGraphicsParser();
+      kittyPlaceholderStripRef.current.pendingPlaceholderMarks = false;
+      wmuxControlCarryRef.current = "";
+      pendingVirtualImageIdRef.current = undefined;
+    };
+    discardPendingOutputRef.current = resetPendingOutput;
 
     // Replay is display-only. Never let an incomplete replay request borrow a
     // terminator from subsequent live output.
@@ -583,7 +675,7 @@ export const TerminalPane = memo(function TerminalPane({
       }, 0);
     };
 
-    const finishReplayDrainNow = (term: Terminal) => {
+    const finishReplayDrainNow = (term: Terminal, reveal = true) => {
       if (replayDrainTimer !== undefined) {
         window.clearTimeout(replayDrainTimer);
         replayDrainTimer = undefined;
@@ -597,7 +689,7 @@ export const TerminalPane = memo(function TerminalPane({
       replayBufferedOutput = [];
       for (const data of buffered) handleOutput(term, data);
       flushQueuedTerminalText(term);
-      revealTerminal();
+      if (reveal) revealTerminal();
     };
 
     const foreground = () => isForegroundTerminal(activeRef.current);
@@ -621,6 +713,7 @@ export const TerminalPane = memo(function TerminalPane({
         },
         onConnectionChange: (nextConnected, issue) => {
           if (cancelled) return;
+          if (!nextConnected) cancelPendingReveal();
           if (connectedRef.current !== nextConnected) inputEpochRef.current += 1;
           connectedRef.current = nextConnected;
           setConnected(nextConnected);
@@ -633,36 +726,33 @@ export const TerminalPane = memo(function TerminalPane({
           if (cancelled) return;
         if (message.type === "ready") {
           setTerminalReady(false);
-          outputCarryRef.current = "";
-          osc52ParserRef.current.reset();
+          resetPendingOutput();
           pendingOsc52Ref.current = undefined;
           if (osc52PendingTimer !== undefined) window.clearTimeout(osc52PendingTimer);
           setHasPendingOsc52(false);
-          queuedTerminalOutput = "";
-          if (terminalOutputTimer !== undefined) {
-            window.clearTimeout(terminalOutputTimer);
-            terminalOutputTimer = undefined;
-          }
-          resetReplayDrain();
-          resetSynchronizedOutput(synchronizedOutputRef.current);
           term.clear();
           setKittyInlineItems([]);
           if (message.replay) startReplayDrain(term, message.replay);
+          else if (shouldWaitForDurableRefresh(message)) durableRefreshRevealGate?.begin();
           else revealTerminal();
         }
         if (message.type === "output") {
           if (replayDraining()) replayBufferedOutput.push(message.data);
           else handleOutput(term, message.data);
+          durableRefreshRevealGate?.noteOutput();
         }
         if (message.type === "exit") {
-          finishReplayDrainNow(term);
+          cancelPendingReveal();
+          finishReplayDrainNow(term, false);
           flushQueuedTerminalText(term);
           term.write(`\r\n[wmux] process exited with code ${message.code}. Press any key to restart.\r\n`);
+          revealTerminal();
           setConnectionIssue(`Process exited with code ${message.code}`);
           awaitingRestart = true;
         }
         if (message.type === "removed") {
-          finishReplayDrainNow(term);
+          cancelPendingReveal();
+          finishReplayDrainNow(term, false);
           flushQueuedTerminalText(term);
           removed = true;
           socketController?.markRemoved();
@@ -680,6 +770,11 @@ export const TerminalPane = memo(function TerminalPane({
         fontFamily: WMUX_MONO_FONT_FAMILY,
         scrollback: terminalScrollbackRows,
         theme: colorScheme.terminal,
+      });
+      wheelScroll = createWheelScrollCoalescer({
+        scrollLines: (lines) => term.scrollLines(lines),
+        requestFrame: (callback) => requestAnimationFrame(callback),
+        cancelFrame: (frame) => cancelAnimationFrame(frame),
       });
       term.open(containerRef.current);
       configureTerminalInput(term);
@@ -943,7 +1038,11 @@ export const TerminalPane = memo(function TerminalPane({
           return true;
         }
         const lines = wheelLines(event, term);
-        if (lines !== 0) term.scrollLines(lines);
+        if (terminalScrollModeRef.current === "immediate") {
+          if (lines !== 0) term.scrollLines(lines);
+        } else {
+          wheelScroll?.push(lines);
+        }
         return true;
       });
 
@@ -970,19 +1069,25 @@ export const TerminalPane = memo(function TerminalPane({
         }
       });
       socketController = createSocketController(term);
+      socketControllerRef.current = socketController;
       reconnectRef.current = () => {
         awaitingRestart = false;
         socketController?.reconnect();
       };
-      socketController.start();
+      if (suspendSocketRef.current) socketController.pause();
+      else socketController.start();
     };
     void start();
 
     return () => {
       cancelled = true;
+      cancelPendingReveal();
+      wheelScroll?.dispose();
+      if (discardPendingOutputRef.current === resetPendingOutput) discardPendingOutputRef.current = null;
       rectangularSelection?.dispose();
       rectangularSelectionRef.current = null;
       socketController?.dispose();
+      if (socketControllerRef.current === socketController) socketControllerRef.current = null;
       if (replayDrainTimer !== undefined) window.clearTimeout(replayDrainTimer);
       scrollDisposable?.dispose();
       renderDisposable?.dispose();

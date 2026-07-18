@@ -14,6 +14,9 @@ export const TERMINAL_COLOR_SCHEME_IDS = [
   "tokyo-night",
 ] as const;
 export type TerminalColorSchemeId = (typeof TERMINAL_COLOR_SCHEME_IDS)[number];
+export type InactiveTabStreaming = "suspend" | "live";
+export type TuiFrameRate = 15 | 30 | 60;
+export type TerminalScrollMode = "batched" | "immediate";
 
 /** Browser-safe stream configuration. Server-only credentials never cross this boundary. */
 export interface MachineStreamConfig {
@@ -181,11 +184,15 @@ export interface WmuxSettings {
   terminalFontSize: number;
   terminalScrollbackRows: number;
   colorScheme: TerminalColorSchemeId;
+  inactiveTabStreaming: InactiveTabStreaming;
+  tuiFrameRate: TuiFrameRate;
+  terminalScrollMode: TerminalScrollMode;
   machineAliases: Record<string, string>;
 }
 
 export interface BootstrapPayload {
   revision: number;
+  healthEpoch: number;
   machines: MachineStatus[];
   workspaces: Workspace[];
   activeWorkspaceId: string;
@@ -271,6 +278,7 @@ export type PaneServerMessage =
       replay: string;
       replayKind: PaneReplayKind;
       outputOnly?: boolean;
+      waitForRefresh?: true;
     }
   | { type: "output"; paneId: string; data: string }
   | { type: "title"; paneId: string; title: string }
@@ -284,6 +292,7 @@ export type EventClientMessage =
 export type EventServerMessage =
   | { type: "ready" }
   | { type: "snapshot"; reason: string; revision: number; state: BootstrapPayload }
+  | { type: "health"; revision: number; healthEpoch: number; machines?: MachineStatus[]; streams?: StreamStatus[] }
   | { type: "notification"; notification: TerminalNotification }
   | { type: "media"; media: TerminalMedia }
   | { type: "clipboard"; clipboard: TerminalClipboard }

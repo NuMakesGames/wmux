@@ -4,16 +4,19 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { z } from "zod";
 import type { WmuxSettings } from "./types.js";
-import { TERMINAL_COLOR_SCHEME_IDS, type TerminalColorSchemeId } from "../shared/protocol.js";
+import { TERMINAL_COLOR_SCHEME_IDS, type InactiveTabStreaming, type TerminalColorSchemeId, type TerminalScrollMode, type TuiFrameRate } from "../shared/protocol.js";
 
 const defaultPath = (): string => path.join(os.homedir(), ".wmux", "settings.json");
-export const CURRENT_SETTINGS_SCHEMA_VERSION = 2;
+export const CURRENT_SETTINGS_SCHEMA_VERSION = 5;
 
 const persistedSettingsSchema = z.object({
   schemaVersion: z.literal(CURRENT_SETTINGS_SCHEMA_VERSION),
   terminalFontSize: z.unknown().optional(),
   terminalScrollbackRows: z.unknown().optional(),
   colorScheme: z.unknown().optional(),
+  inactiveTabStreaming: z.unknown().optional(),
+  tuiFrameRate: z.unknown().optional(),
+  terminalScrollMode: z.unknown().optional(),
   machineAliases: z.unknown().optional(),
 }).strict();
 
@@ -21,6 +24,9 @@ export const defaultSettings: WmuxSettings = {
   terminalFontSize: 14,
   terminalScrollbackRows: 10_000,
   colorScheme: "wmux",
+  inactiveTabStreaming: "suspend",
+  tuiFrameRate: 15,
+  terminalScrollMode: "batched",
   machineAliases: {},
 };
 
@@ -42,6 +48,9 @@ export class SettingsStore extends EventEmitter {
       terminalFontSize: input.terminalFontSize ?? this.settings.terminalFontSize,
       terminalScrollbackRows: input.terminalScrollbackRows ?? this.settings.terminalScrollbackRows,
       colorScheme: input.colorScheme ?? this.settings.colorScheme,
+      inactiveTabStreaming: input.inactiveTabStreaming ?? this.settings.inactiveTabStreaming,
+      tuiFrameRate: input.tuiFrameRate ?? this.settings.tuiFrameRate,
+      terminalScrollMode: input.terminalScrollMode ?? this.settings.terminalScrollMode,
       machineAliases: input.machineAliases ?? this.settings.machineAliases,
     });
     this.save(true);
@@ -100,7 +109,7 @@ export class SettingsStore extends EventEmitter {
           `settings schema ${version} is newer than this wmux build supports (${CURRENT_SETTINGS_SCHEMA_VERSION})`,
         );
       }
-      const candidate = version === undefined || version === 1
+      const candidate = version === undefined || version === 1 || version === 2 || version === 3 || version === 4
         ? { ...record, schemaVersion: CURRENT_SETTINGS_SCHEMA_VERSION, colorScheme: record.colorScheme ?? defaultSettings.colorScheme }
         : record;
       const parsed = persistedSettingsSchema.parse(candidate);
@@ -131,11 +140,17 @@ const normalizeSettings = (input: {
   terminalFontSize?: unknown;
   terminalScrollbackRows?: unknown;
   colorScheme?: unknown;
+  inactiveTabStreaming?: unknown;
+  tuiFrameRate?: unknown;
+  terminalScrollMode?: unknown;
   machineAliases?: unknown;
 }): WmuxSettings => ({
   terminalFontSize: clampFontSize(input.terminalFontSize),
   terminalScrollbackRows: clampScrollbackRows(input.terminalScrollbackRows),
   colorScheme: cleanColorScheme(input.colorScheme),
+  inactiveTabStreaming: cleanInactiveTabStreaming(input.inactiveTabStreaming),
+  tuiFrameRate: cleanTuiFrameRate(input.tuiFrameRate),
+  terminalScrollMode: cleanTerminalScrollMode(input.terminalScrollMode),
   machineAliases: cleanAliases(input.machineAliases),
 });
 
@@ -145,6 +160,15 @@ const cleanColorScheme = (value: unknown): TerminalColorSchemeId =>
   typeof value === "string" && colorSchemeIds.has(value)
     ? value as TerminalColorSchemeId
     : defaultSettings.colorScheme;
+
+const cleanInactiveTabStreaming = (value: unknown): InactiveTabStreaming =>
+  value === "live" || value === "suspend" ? value : defaultSettings.inactiveTabStreaming;
+
+const cleanTuiFrameRate = (value: unknown): TuiFrameRate =>
+  value === 15 || value === 30 || value === 60 ? value : defaultSettings.tuiFrameRate;
+
+const cleanTerminalScrollMode = (value: unknown): TerminalScrollMode =>
+  value === "batched" || value === "immediate" ? value : defaultSettings.terminalScrollMode;
 
 const clampFontSize = (value: unknown): number => {
   const numeric = typeof value === "number" && Number.isFinite(value) ? value : defaultSettings.terminalFontSize;

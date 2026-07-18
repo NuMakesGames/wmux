@@ -64,7 +64,7 @@ test("idle durable-client recycle keeps the old endpoint snapshot through later 
     sessionMachines: Map<string, MachineConfig>;
     shouldUseDurableClientRefresh: (pane: typeof pane) => boolean;
     hasPaneConnections: (paneId: string) => boolean;
-    recycleIdleDurableClient: (pane: typeof pane) => void;
+    recycleIdleDurableClient: (pane: typeof pane) => boolean;
   };
   let killed = false;
   internals.sessions.set(pane.id, { pane, isExited: false, kill: () => { killed = true; } });
@@ -72,9 +72,15 @@ test("idle durable-client recycle keeps the old endpoint snapshot through later 
   internals.shouldUseDurableClientRefresh = () => true;
   internals.hasPaneConnections = () => false;
   try {
-    internals.recycleIdleDurableClient(pane);
+    assert.equal(internals.recycleIdleDurableClient(pane), true);
     assert.equal(killed, true);
     assert.equal(internals.sessionMachines.get(pane.id)?.host, "100.70.0.8");
+
+    killed = false;
+    internals.sessions.set(pane.id, { pane, isExited: false, kill: () => { killed = true; } });
+    internals.hasPaneConnections = () => true;
+    assert.equal(internals.recycleIdleDurableClient(pane), false);
+    assert.equal(killed, false);
 
     machine = { ...machine, host: "100.70.0.9" };
     assert.equal(
@@ -83,6 +89,61 @@ test("idle durable-client recycle keeps the old endpoint snapshot through later 
     );
     assert.equal(manager.closePane(pane.id), true);
     assert.equal(internals.sessionMachines.has(pane.id), false);
+  } finally {
+    manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ready flags only an empty raw replay after an idle durable client recycle", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-session-refresh-ready-"));
+  const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
+  const state = new StateStore([machine], path.join(dir, "state.json"));
+  const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+  const manager = new SessionManager(state, [machine]);
+  const client = socket();
+  const session = {
+    pane,
+    pid: 42,
+    isExited: false,
+    resize: () => undefined,
+  };
+  const internals = manager as unknown as {
+    recycleIdleDurableClient: (candidate: typeof pane) => boolean;
+    ensureSession: (candidate: typeof pane, cols: number, rows: number) => typeof session;
+    replayOutputFor: () => { data: string; kind: "raw" | "checkpoint" };
+    scheduleDurableClientRefresh: () => void;
+  };
+  internals.recycleIdleDurableClient = () => true;
+  internals.ensureSession = () => session;
+  internals.replayOutputFor = () => ({ data: "", kind: "raw" });
+  internals.scheduleDurableClientRefresh = () => undefined;
+  try {
+    manager.attach(pane.id, client, 80, 24);
+    const ready = await waitForMessage(client, (message) => message.type === "ready");
+    assert.equal(ready.waitForRefresh, true);
+
+    fake(client).close();
+    const checkpointClient = socket();
+    internals.replayOutputFor = () => ({ data: "checkpoint", kind: "checkpoint" });
+    manager.attach(pane.id, checkpointClient, 80, 24);
+    const checkpointReady = await waitForMessage(checkpointClient, (message) => message.type === "ready");
+    assert.equal(checkpointReady.waitForRefresh, undefined);
+
+    fake(checkpointClient).close();
+    const replayClient = socket();
+    internals.replayOutputFor = () => ({ data: "prompt", kind: "raw" });
+    manager.attach(pane.id, replayClient, 80, 24);
+    const replayReady = await waitForMessage(replayClient, (message) => message.type === "ready");
+    assert.equal(replayReady.waitForRefresh, undefined);
+
+    fake(replayClient).close();
+    const ordinaryClient = socket();
+    internals.recycleIdleDurableClient = () => false;
+    internals.replayOutputFor = () => ({ data: "", kind: "raw" });
+    manager.attach(pane.id, ordinaryClient, 80, 24);
+    const ordinaryReady = await waitForMessage(ordinaryClient, (message) => message.type === "ready");
+    assert.equal(ordinaryReady.waitForRefresh, undefined);
   } finally {
     manager.disposeAll();
     fs.rmSync(dir, { recursive: true, force: true });

@@ -49,7 +49,7 @@ export function OpenTuiMobileChrome(props: OpenTuiMobileChromeProps) {
 
   useEffect(() => {
     if (reducedMotion || (props.status !== "running" && props.serviceConnection !== "connecting")) return;
-    const timer = window.setInterval(() => setAnimationTick((tick) => (tick + 1) % runningFrames.length), 140);
+    const timer = window.setInterval(() => setAnimationTick((tick) => (tick + 1) % runningFrames.length), 280);
     return () => window.clearInterval(timer);
   }, [props.serviceConnection, props.status, reducedMotion]);
 

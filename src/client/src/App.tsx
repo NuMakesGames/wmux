@@ -25,7 +25,13 @@ import type { OpenTuiSidebarMachine, OpenTuiSidebarWorkspace } from "./OpenTuiSi
 import { OpenTuiTopbar } from "./OpenTuiTopbar";
 import { applyClientViewToState, loadActivePaneSelections, loadActiveTabSelections, markWorkspaceNotificationsReadInState, parseRouteTarget, workspaceTabPath } from "./route-state";
 import { compactMiddlePath, normalizeUserPath } from "./path-display";
-import { reconcileIncomingRevision } from "./reconcile";
+import {
+  applyHealthDelta,
+  bootstrapSatisfiesHealthDelta,
+  healthDeltaRequiresResync,
+  isIncomingRevisionNewer,
+  reconcileIncomingRevision,
+} from "./reconcile";
 import { ScreenStreamViewer } from "./ScreenStream";
 import { Toasts, useToasts } from "./Toasts";
 import { useAppRouting } from "./useAppRouting";
@@ -114,6 +120,7 @@ export function App() {
   const bootstrapRetryAttempt = useRef(0);
   const bootstrapRequestId = useRef(0);
   const loadBootstrapRef = useRef<() => Promise<void>>(async () => undefined);
+  const pendingHealthResync = useRef<Pick<BootstrapPayload, "revision" | "healthEpoch"> | null>(null);
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const mobileSidebarCloseRef = useRef<HTMLButtonElement | null>(null);
   const previousMobileSidebarCollapsed = useRef(sidebarCollapsed);
@@ -194,6 +201,11 @@ export function App() {
       const payload = await api.bootstrap();
       const routed = activateRouteTarget(payload);
       if (requestId !== bootstrapRequestId.current) return;
+      if (!bootstrapSatisfiesHealthDelta(pendingHealthResync.current, routed)) {
+        void loadBootstrapRef.current();
+        return;
+      }
+      pendingHealthResync.current = null;
       bootstrapRetryAttempt.current = 0;
       setLoadError(null);
       setAuthRequired(false);
@@ -234,7 +246,23 @@ export function App() {
   }, [loadBootstrap, store]);
 
   const { serviceConnection, mediaItems, dismissMedia, sendEventSocketMessage } = useEventStream({
-    onResync: (payload) => void refresh(payload),
+    onResync: (payload) => {
+      if (!bootstrapSatisfiesHealthDelta(pendingHealthResync.current, payload)) return;
+      pendingHealthResync.current = null;
+      void refresh(payload);
+    },
+    onHealth: (delta) => {
+      const current = store.get();
+      if (healthDeltaRequiresResync(current, delta)) {
+        const pending = pendingHealthResync.current;
+        if (!pending || isIncomingRevisionNewer(pending, delta)) {
+          pendingHealthResync.current = delta;
+          void loadBootstrapRef.current();
+        }
+        return;
+      }
+      store.update((snapshot) => applyHealthDelta(snapshot, delta) ?? null);
+    },
     onAuthRequired: () => setAuthRequired(true),
   });
 
@@ -1622,6 +1650,9 @@ export function App() {
                   <LayoutView
                     tab={view.tab}
                     viewActive={isActive}
+                    inactiveTabStreaming={settings.inactiveTabStreaming}
+                    tuiFrameRate={settings.tuiFrameRate}
+                    terminalScrollMode={settings.terminalScrollMode}
                     machines={displayMachines}
                     terminalFontSize={settings.terminalFontSize}
                     terminalScrollbackRows={persistedSettings.terminalScrollbackRows}
