@@ -1,5 +1,16 @@
 import type { Terminal } from "ghostty-web";
 
+export interface TerminalKeyModifiers {
+  key: string;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+}
+
+export const isBareShiftEnter = (event: TerminalKeyModifiers): boolean =>
+  event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey;
+
 export const configureTerminalInput = (terminal: Terminal): void => {
   const textarea = terminal.textarea;
   if (!textarea) return;
