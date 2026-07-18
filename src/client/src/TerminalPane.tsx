@@ -17,7 +17,7 @@ import {
 } from "./kitty-graphics";
 import { ensureWmuxFonts, WMUX_MONO_FONT_FAMILY } from "./fonts";
 import { ensureGhostty } from "./terminal-loader";
-import { configureTerminalInput } from "./terminal-input";
+import { configureTerminalInput, isBareShiftEnter } from "./terminal-input";
 import { isTerminalProtocolResponse } from "./terminal-protocol";
 import { OpenTuiPaneToolbar } from "./OpenTuiPaneToolbar";
 import { writeBrowserClipboard } from "./clipboard";
@@ -1019,7 +1019,27 @@ export const TerminalPane = memo(function TerminalPane({
       window.addEventListener("pageshow", pageShowListener);
       document.addEventListener("visibilitychange", visibilityChangeListener);
 
+      const forwardTerminalData = (data: string) => {
+        const terminalResponse = isTerminalProtocolResponse(data);
+        if (!terminalResponse) inputEpochRef.current += 1;
+        if (!terminalResponse) rectangularSelection?.clear();
+        if (awaitingRestart && !terminalResponse) {
+          awaitingRestart = false;
+          term.write("\r\n[wmux] restarting…\r\n");
+          socketController?.reconnect("Restarting pane");
+          return;
+        }
+        if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
+        if (term.getViewportY() > 0) term.scrollToBottom();
+        if (terminalResponse && replayingTerminalOutput) return;
+        sendInput(socketRef.current, data, terminalResponse);
+      };
+
       term.attachCustomKeyEventHandler((event) => {
+        if (isBareShiftEnter(event)) {
+          forwardTerminalData("\n");
+          return true;
+        }
         if (
           (event.ctrlKey || event.metaKey) &&
           !event.altKey &&
@@ -1065,21 +1085,7 @@ export const TerminalPane = memo(function TerminalPane({
         return true;
       });
 
-      term.onData((data) => {
-        const terminalResponse = isTerminalProtocolResponse(data);
-        if (!terminalResponse) inputEpochRef.current += 1;
-        if (!terminalResponse) rectangularSelection?.clear();
-        if (awaitingRestart && !terminalResponse) {
-          awaitingRestart = false;
-          term.write("\r\n[wmux] restarting…\r\n");
-          socketController?.reconnect("Restarting pane");
-          return;
-        }
-        if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
-        if (term.getViewportY() > 0) term.scrollToBottom();
-        if (terminalResponse && replayingTerminalOutput) return;
-        sendInput(socketRef.current, data, terminalResponse);
-      });
+      term.onData(forwardTerminalData);
       term.onResize(() => {
         rectangularSelection?.clear();
         const ws = socketRef.current;

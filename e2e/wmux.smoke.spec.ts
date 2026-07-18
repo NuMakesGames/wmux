@@ -188,6 +188,60 @@ test("pastes text after a full reload without forwarding Ctrl+V to the pane", as
   expect(paneInputs).not.toContain("\x16");
 });
 
+test("sends Shift+Enter as one Ctrl+J newline while preserving plain Enter", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "desktop keyboard coverage");
+
+  await page.addInitScript(() => {
+    const inputs: string[] = [];
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function send(data) {
+      if (typeof data === "string") {
+        try {
+          const message = JSON.parse(data) as { type?: string; data?: string; terminalResponse?: boolean };
+          if (message.type === "input" && typeof message.data === "string" && message.terminalResponse !== true) {
+            inputs.push(message.data);
+          }
+        } catch {
+          // Ignore non-JSON websocket traffic.
+        }
+      }
+      return originalSend.call(this, data);
+    };
+    (window as unknown as { __wmuxKeyboardInputs: string[] }).__wmuxKeyboardInputs = inputs;
+  });
+
+  const bootstrapResponse = await request.get("/api/bootstrap");
+  const bootstrap = await bootstrapResponse.json() as { workspaces: unknown[] };
+  if (bootstrap.workspaces.length === 0) {
+    const createResponse = await request.post("/api/workspaces", { data: { machineId: "local" } });
+    expect(createResponse.ok()).toBeTruthy();
+  }
+  await page.reload();
+
+  const activePane = page.locator(".terminal-pane.active");
+  await expect(activePane).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+  await activePane.locator(".terminal-host textarea").evaluate((textarea: HTMLTextAreaElement) => textarea.focus());
+  await page.evaluate(() => {
+    (window as unknown as { __wmuxKeyboardInputs: string[] }).__wmuxKeyboardInputs.length = 0;
+  });
+
+  await page.keyboard.press("Shift+Enter");
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxKeyboardInputs: string[] }).__wmuxKeyboardInputs,
+  )).toEqual(["\n"]);
+
+  await page.evaluate(() => {
+    (window as unknown as { __wmuxKeyboardInputs: string[] }).__wmuxKeyboardInputs.length = 0;
+  });
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxKeyboardInputs: string[] }).__wmuxKeyboardInputs,
+  )).toEqual(["\r"]);
+});
+
 test("keeps the loaded UI and recovers when a wake-up bootstrap briefly fails", async ({ page }) => {
   let failures = 0;
   let requests = 0;

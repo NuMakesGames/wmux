@@ -326,6 +326,7 @@ creation, splits, settings, diagnostics, activity, and session audit actions.
 | Workspace 1–8 / last | `Cmd/Ctrl+1–8` / `Cmd/Ctrl+9` |
 | Tab 1–8 / last | `Alt+1–8` / `Alt+9` |
 | Previous/next word | `Option/Alt+Left/Right` |
+| Insert terminal newline | `Shift+Enter` (sends `Ctrl+J` / LF) |
 | Rectangular terminal selection | `Alt/Option+drag`; use `Ctrl+Alt+drag` when a Linux window manager reserves `Alt+drag` |
 | Focus neighboring pane | `Option+Cmd+Arrow` / `Alt+Ctrl+Arrow` |
 | Latest unread notification | `Cmd/Ctrl+Shift+U` |
