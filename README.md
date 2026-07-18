@@ -263,7 +263,9 @@ Host, and Origin checks.
   containing that token. Set `WMUX_TOKEN` or `WMUX_TOKEN_PATH` to supply one.
 - Configure browser password login with
   `scripts/wmux-set-password --username you`. Login sessions last 30 days and
-  survive restarts through `~/.wmux/session-secret`.
+  survive restarts through `~/.wmux/session-secret`. Restart a running service
+  with `systemctl --user restart wmux.service` after changing credentials; the
+  helper prints this reminder after updating the credential file.
 - `WMUX_DISABLE_AUTH=1` disables token checks only for deliberately isolated
   environments; it does not make public deployment supported.
 - Use HTTPS away from loopback and treat every token as a password.
