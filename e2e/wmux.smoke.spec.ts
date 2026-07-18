@@ -9,7 +9,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("publishes standalone app metadata for direct workspace routes", async ({ page, request }) => {
-  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#050505");
+  await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#101114");
   await expect(page.locator('meta[name="mobile-web-app-capable"]')).toHaveAttribute("content", "yes");
   await expect(page.locator('meta[name="apple-mobile-web-app-capable"]')).toHaveAttribute("content", "yes");
   await expect(page.locator('meta[name="apple-mobile-web-app-status-bar-style"]')).toHaveAttribute(
@@ -273,10 +273,20 @@ test("persists a color scheme and applies it to the shared chrome palette", asyn
     await expect(page.locator("main.app-shell")).toBeVisible({ timeout: 20_000 });
     await page.locator('button[title="Settings"]').click();
     const settings = page.getByRole("dialog", { name: "Settings" });
-    await settings.getByLabel("Color scheme").selectOption("dracula");
-    await expect.poll(() => page.locator("main.app-shell").evaluate((element) =>
+    await settings.getByLabel("App color scheme").selectOption("dracula");
+    await expect.poll(() => page.locator("html").evaluate((element) =>
       element.style.getPropertyValue("--black"),
     )).toBe("#282a36");
+    await expect.poll(() => page.locator("html").evaluate((element) => ({
+      browserChrome: element.style.getPropertyValue("--wmux-browser-chrome"),
+      terminalBackground: element.style.getPropertyValue("--terminal-background"),
+      scheme: element.dataset.colorScheme,
+    }))).toEqual({
+      browserChrome: "#282a36",
+      terminalBackground: "#282a36",
+      scheme: "dracula",
+    });
+    await expect(page.locator('meta[name="theme-color"]')).toHaveAttribute("content", "#282a36");
     await settings.getByRole("button", { name: "Save" }).click();
 
     await expect.poll(async () => {
@@ -285,7 +295,7 @@ test("persists a color scheme and applies it to the shared chrome palette", asyn
     }).toBe("dracula");
     await page.reload();
     await expect(page.locator("main.app-shell")).toBeVisible({ timeout: 20_000 });
-    await expect.poll(() => page.locator("main.app-shell").evaluate((element) =>
+    await expect.poll(() => page.locator("html").evaluate((element) =>
       element.style.getPropertyValue("--black"),
     )).toBe("#282a36");
   } finally {
@@ -573,7 +583,7 @@ test("mobile boot profiles cannot tint browser safe-area chrome", async ({ page 
   });
 
   expect(bootColors).toEqual({
-    screen: "rgb(5, 5, 5)",
+    screen: "rgb(16, 17, 20)",
     bezel: "rgb(85, 204, 238)",
     padding: ["31px", "13px", "29px", "17px"],
   });

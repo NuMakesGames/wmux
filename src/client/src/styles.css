@@ -156,27 +156,29 @@
     "Arial Narrow", "Aptos Narrow", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
   --wmux-mono-font: "Fira Code", "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
-  background: #050505;
-  color: #f2eee4;
-  --black: #050505;
-  --panel: #0b0b0a;
-  --panel-2: #11100d;
-  --panel-3: #171510;
-  --line: #2f2a1d;
-  --line-bright: #b99a45;
-  --gold: #d4b45f;
-  --gold-dim: #a9944f;
-  --gold-hot: #f1d273;
-  --text: #e4ded0;
-  --ivory: #f2eee4;
-  --muted: #9b9280;
-  --faint: #5f584b;
-  --red: #be3e37;
-  --green: #45b86a;
-  --blue: #5097ff;
-  --running-soft: #061019;
-  --failed-soft: #150806;
-  --wmux-browser-chrome: #050505;
+  background: var(--black);
+  color: var(--ivory);
+  --black: #101114;
+  --panel: #17181b;
+  --panel-2: #1d1e22;
+  --panel-3: #242629;
+  --line: #34363a;
+  --line-bright: #b49d49;
+  --gold: #f4d35e;
+  --gold-dim: #ab9546;
+  --gold-hot: #f4d35e;
+  --text: #d8dee9;
+  --ivory: #d8dee9;
+  --muted: #8c9098;
+  --faint: #606369;
+  --red: #e05a50;
+  --green: #62d486;
+  --blue: #73adff;
+  --running-soft: #191f29;
+  --failed-soft: #25181a;
+  --terminal-background: #101114;
+  --terminal-foreground: #d8dee9;
+  --wmux-browser-chrome: #101114;
 }
 
 * {
@@ -2094,6 +2096,9 @@ button.active-tool {
 .mobile-open-tui .mobile-agent-surface {
   background: var(--black);
   font-family: var(--wmux-mono-font);
+  font-synthesis: none;
+  font-variant-ligatures: common-ligatures contextual;
+  font-feature-settings: "calt" 1, "liga" 1;
 }
 
 .mobile-open-tui .mobile-agent-thread {
@@ -4286,6 +4291,9 @@ button.active-tool {
     background: var(--black);
     padding: 0 8px 8px;
     font-family: var(--wmux-mono-font);
+    font-synthesis: none;
+    font-variant-ligatures: common-ligatures contextual;
+    font-feature-settings: "calt" 1, "liga" 1;
   }
 
   .mobile-open-tui-sidebar .brand {

@@ -300,8 +300,9 @@ token. wmux is not a hardened multi-user service.
 - Host labels show the wmux release and platform consistently. Update
   indicators stay hidden unless an underlying runtime or helper update is
   needed.
-- Settings persist in `~/.wmux/settings.json` and include a shared terminal and
-  canvas-chrome color scheme, terminal size, scrollback, user-facing host aliases,
+- Settings persist in `~/.wmux/settings.json` and include an app-wide color
+  scheme shared by terminal, canvas and DOM chrome, dialogs, and browser chrome;
+  terminal size, scrollback, user-facing host aliases,
   inactive-tab streaming, and terminal scroll mode. Hidden cached tabs suspend
   terminal sockets by default while preserving their mounted terminal views;
   choose live streaming to retain the previous behavior.

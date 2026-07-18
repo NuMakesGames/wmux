@@ -528,7 +528,7 @@ const buildLayout = (
   push({
     kind: "choice",
     id: "scheme",
-    label: "color scheme",
+    label: "app color scheme",
     value: terminalColorSchemes.find((scheme) => scheme.id === draft.colorScheme)?.name ?? terminalColorSchemes[0].name,
     height: 2,
   });

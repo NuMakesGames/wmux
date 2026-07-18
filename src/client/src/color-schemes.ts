@@ -35,14 +35,13 @@ type SchemeInput = {
   name: string;
   accent: string;
   terminal: Required<ITheme>;
-  chrome?: WmuxChromeColors;
 };
 
-const scheme = ({ id, name, accent, terminal, chrome }: SchemeInput): TerminalColorScheme => ({
+const scheme = ({ id, name, accent, terminal }: SchemeInput): TerminalColorScheme => ({
   id,
   name,
   terminal,
-  chrome: chrome ?? {
+  chrome: {
     black: terminal.background,
     panel: mix(terminal.background, terminal.foreground, 0.035),
     panel2: mix(terminal.background, terminal.foreground, 0.065),
@@ -70,13 +69,6 @@ export const terminalColorSchemes: readonly TerminalColorScheme[] = [
     id: "wmux",
     name: "wmux",
     accent: "#f4d35e",
-    chrome: {
-      black: "#050505", panel: "#0a0907", panel2: "#11100d", panel3: "#171510",
-      active: "#17130a", activeSoft: "#100e08", line: "#2f2a1d", lineBright: "#b99a45",
-      gold: "#f4d35e", goldDim: "#a9944f", text: "#e4ded0", muted: "#8d826f", faint: "#5f584b",
-      red: "#d94a3d", green: "#47d37c", blue: "#5097ff", agent: "#c792ea",
-      runningSoft: "#061019", failedSoft: "#150806",
-    },
     terminal: {
       background: "#101114", foreground: "#d8dee9", cursor: "#f7c95c", cursorAccent: "#101114",
       selectionBackground: "#31445f", selectionForeground: "#f2eee4",
@@ -171,33 +163,14 @@ const schemesById = new Map(terminalColorSchemes.map((candidate) => [candidate.i
 export const colorSchemeById = (id: TerminalColorSchemeId): TerminalColorScheme =>
   schemesById.get(id) ?? terminalColorSchemes[0];
 
-export const colorSchemeCssVariables = (value: TerminalColorScheme): Record<string, string> => value.id === "wmux" ? ({
-  "--black": "#050505",
-  "--panel": "#0b0b0a",
-  "--panel-2": "#11100d",
-  "--panel-3": "#171510",
-  "--line": "#2f2a1d",
-  "--line-bright": "#b99a45",
-  "--gold": "#d4b45f",
-  "--gold-dim": "#a9944f",
-  "--gold-hot": "#f1d273",
-  "--text": "#e4ded0",
-  "--ivory": "#f2eee4",
-  "--muted": "#9b9280",
-  "--faint": "#5f584b",
-  "--red": "#be3e37",
-  "--green": "#45b86a",
-  "--blue": "#5097ff",
-  "--running-soft": "#061019",
-  "--failed-soft": "#150806",
-}) : ({
+export const colorSchemeCssVariables = (value: TerminalColorScheme): Record<string, string> => ({
   "--black": value.chrome.black,
   "--panel": value.chrome.panel,
   "--panel-2": value.chrome.panel2,
   "--panel-3": value.chrome.panel3,
   "--line": value.chrome.line,
   "--line-bright": value.chrome.lineBright,
-  "--gold": value.chrome.goldDim,
+  "--gold": value.chrome.gold,
   "--gold-dim": value.chrome.goldDim,
   "--gold-hot": value.chrome.gold,
   "--text": value.chrome.text,
@@ -209,6 +182,9 @@ export const colorSchemeCssVariables = (value: TerminalColorScheme): Record<stri
   "--blue": value.chrome.blue,
   "--running-soft": value.chrome.runningSoft,
   "--failed-soft": value.chrome.failedSoft,
+  "--terminal-background": value.terminal.background,
+  "--terminal-foreground": value.terminal.foreground,
+  "--wmux-browser-chrome": value.terminal.background,
 });
 
 function mix(from: string, to: string, amount: number): string {

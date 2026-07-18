@@ -192,8 +192,10 @@ export function SettingsModal({
           <section className="settings-section">
             <h3>Appearance</h3>
             <label className="settings-row">
-              <span>Color scheme</span>
+              <span>App color scheme</span>
               <select
+                aria-label="App color scheme"
+                title="Applies to terminals, navigation, dialogs, and browser chrome"
                 value={draft.colorScheme}
                 onChange={(event) => applyDraft({
                   ...draft,

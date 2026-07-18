@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TERMINAL_COLOR_SCHEME_IDS } from "../src/shared/protocol.js";
-import { colorSchemeById, terminalColorSchemes } from "../src/client/src/color-schemes.js";
+import { colorSchemeById, colorSchemeCssVariables, terminalColorSchemes } from "../src/client/src/color-schemes.js";
 
 const requiredThemeColors = [
   "background", "foreground", "cursor", "cursorAccent", "selectionBackground", "selectionForeground",
@@ -17,6 +17,14 @@ test("color scheme catalog covers every persisted scheme id", () => {
 test("color schemes provide complete terminal and chrome palettes", () => {
   for (const scheme of terminalColorSchemes) {
     assert.equal(colorSchemeById(scheme.id), scheme);
+    assert.equal(scheme.chrome.black, scheme.terminal.background, `${scheme.id} app and terminal backgrounds`);
+    assert.equal(scheme.chrome.text, scheme.terminal.foreground, `${scheme.id} app and terminal foregrounds`);
+    const variables = colorSchemeCssVariables(scheme);
+    assert.equal(variables["--black"], scheme.terminal.background);
+    assert.equal(variables["--gold"], scheme.chrome.gold);
+    assert.equal(variables["--terminal-background"], scheme.terminal.background);
+    assert.equal(variables["--terminal-foreground"], scheme.terminal.foreground);
+    assert.equal(variables["--wmux-browser-chrome"], scheme.terminal.background);
     for (const key of requiredThemeColors) assert.match(scheme.terminal[key], /^#[0-9a-f]{6}$/i, `${scheme.id}.${key}`);
     for (const [key, value] of Object.entries(scheme.chrome)) assert.match(value, /^#[0-9a-f]{6}$/i, `${scheme.id}.${key}`);
   }

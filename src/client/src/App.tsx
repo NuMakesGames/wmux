@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Command as CommandIcon, GripVertical, Link2, LoaderCircle, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Server, Settings, TerminalSquare, X } from "lucide-react";
 import { api, UnauthorizedError } from "./api";
 import { DiagnosticsModal } from "./DiagnosticsModal";
@@ -551,9 +551,19 @@ export function App() {
   const activeStream = streams.find((stream) => stream.machineId === activeStreamMachineId);
   const canOpenStream = !mobileViewport.isMobile && Boolean(activeStream);
   const activeColorScheme = colorSchemeById(settings.colorScheme);
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    for (const [property, value] of Object.entries(colorSchemeCssVariables(activeColorScheme))) {
+      root.style.setProperty(property, value);
+    }
+    root.dataset.colorScheme = activeColorScheme.id;
+    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute(
+      "content",
+      activeColorScheme.terminal.background,
+    );
+  }, [activeColorScheme]);
   const appStyle = {
     "--wmux-sidebar-width": `${sidebarWidth}px`,
-    ...colorSchemeCssVariables(activeColorScheme),
   } as CSSProperties;
   const showMobileModeBar = mobileViewport.isMobile;
   const showMobileAgentSurface = showMobileModeBar && mobileSurfaceMode === "agent";
