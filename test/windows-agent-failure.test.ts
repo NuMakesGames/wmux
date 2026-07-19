@@ -378,47 +378,52 @@ test("a new pane cancels a legacy global drain and rolls onto a side-by-side gen
   await once(server, "listening");
   const address = server.address();
   assert.ok(address && typeof address === "object");
-  generationServer.listen(0, "127.0.0.1");
-  await once(generationServer, "listening");
-  const generationAddress = generationServer.address();
-  assert.ok(generationAddress && typeof generationAddress === "object");
-  const session = new WindowsAgentSession(
-    {
-      id: "pane_deferred",
-      machineId: "windows",
-      title: "PowerShell",
-      status: "idle",
-      createdAt: new Date(0).toISOString(),
-    },
-    {
-      id: "windows",
-      name: "Windows",
-      kind: "powershell-ssh",
-      host: "127.0.0.1",
-      sessionBackend: "agent",
-      agentUrl: `http://127.0.0.1:${address.port}`,
-    },
-    80,
-    24,
-    {},
-    async () => {
-      assert.equal(created, false, "the new generation starts before it owns the pane");
-      updateScheduled = true;
-      return generationAddress.port;
-    },
-  );
-  await session.attachReady;
-  await waitUntil(() => updateScheduled);
-  assert.equal(drainCancelled, true);
-  assert.equal(staged, true);
-  assert.equal(created, true);
-  assert.match(session.replayOutput, /existing pane\(s\) will remain on their current generation/);
-  assert.match(session.replayOutput, /Updated Windows agent generation is ready/);
-  session.detach();
-  await Promise.all([
-    new Promise<void>((resolve) => server.close(() => resolve())),
-    new Promise<void>((resolve) => generationServer.close(() => resolve())),
-  ]);
+  let session: WindowsAgentSession | undefined;
+  try {
+    session = new WindowsAgentSession(
+      {
+        id: "pane_deferred",
+        machineId: "windows",
+        title: "PowerShell",
+        status: "idle",
+        createdAt: new Date(0).toISOString(),
+      },
+      {
+        id: "windows",
+        name: "Windows",
+        kind: "powershell-ssh",
+        host: "127.0.0.1",
+        sessionBackend: "agent",
+        agentUrl: `http://127.0.0.1:${address.port}`,
+      },
+      80,
+      24,
+      {},
+      async (_machine, rolloutPort) => {
+        assert.equal(created, false, "the new generation starts before it owns the pane");
+        assert.ok(rolloutPort, "the updater selects an adjacent rollout port");
+        updateScheduled = true;
+        generationServer.listen(rolloutPort, "127.0.0.1");
+        await once(generationServer, "listening");
+        return rolloutPort;
+      },
+    );
+    await session.attachReady;
+    assert.equal(updateScheduled, true, session.replayOutput);
+    assert.equal(drainCancelled, true);
+    assert.equal(staged, true);
+    assert.equal(created, true);
+    assert.match(session.replayOutput, /existing pane\(s\) will remain on their current generation/);
+    assert.match(session.replayOutput, /Updated Windows agent generation is ready/);
+  } finally {
+    session?.detach();
+    server.closeAllConnections();
+    if (generationServer.listening) generationServer.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (generationServer.listening) {
+      await new Promise<void>((resolve) => generationServer.close(() => resolve()));
+    }
+  }
 });
 
 test("an unreachable side-by-side generation reports the required firewall range", async () => {

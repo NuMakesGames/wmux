@@ -8,6 +8,7 @@ import { test } from "node:test";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const helper = path.join(root, "scripts", "wmux-agent-run");
+const posixTest = process.platform === "win32" ? test.skip : test;
 
 const decodeResult = (stdout: string) => {
   const line = stdout.split(/\r?\n/).find((candidate) => candidate.startsWith("WMUX_AGENT_RESULT "));
@@ -15,7 +16,7 @@ const decodeResult = (stdout: string) => {
   return JSON.parse(Buffer.from(line.slice("WMUX_AGENT_RESULT ".length), "base64").toString("utf8"));
 };
 
-test("wmux-agent-run adapts OpenCode, Codex, and Claude without putting prompts in argv", () => {
+posixTest("wmux-agent-run adapts OpenCode, Codex, and Claude without putting prompts in argv", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-run-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -93,7 +94,7 @@ else:
   }
 });
 
-test("wmux-agent-run requires explicit write access for OpenCode delegation", () => {
+posixTest("wmux-agent-run requires explicit write access for OpenCode delegation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-run-readonly-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);

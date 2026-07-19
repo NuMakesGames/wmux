@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
 import re
 import socket
 import ssl
@@ -668,7 +669,7 @@ def redact_delegate_text(value: Any, secrets: list[str], limit: int = 64_000) ->
 
 def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
     prompt = read_delegate_prompt(args)
-    if not os.path.isabs(args.directory) or "\x00" in args.directory:
+    if not posixpath.isabs(args.directory) or "\x00" in args.directory:
         raise SystemExit("wmuxctl: delegation directory must be an absolute POSIX path")
     if args.runtime == "opencode" and not args.write_access:
         raise SystemExit("wmuxctl: OpenCode delegation cannot enforce read-only mode; add --write-access explicitly")

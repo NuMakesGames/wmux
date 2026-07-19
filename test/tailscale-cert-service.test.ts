@@ -9,7 +9,7 @@ const writeExecutable = (filePath: string, contents: string): void => {
   fs.writeFileSync(filePath, contents, { mode: 0o700 });
 };
 
-test("certificate renewal skips issuance and restart while the current certificate is valid", () => {
+test("certificate renewal skips issuance and restart while the current certificate is valid", { skip: process.platform === "win32" }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-cert-valid-"));
   const bin = path.join(dir, "bin");
   const log = path.join(dir, "commands.log");
@@ -41,7 +41,7 @@ test("certificate renewal skips issuance and restart while the current certifica
   }
 });
 
-test("certificate renewal issues a replacement and restarts wmux only near expiry", () => {
+test("certificate renewal issues a replacement and restarts wmux only near expiry", { skip: process.platform === "win32" }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-cert-expiring-"));
   const bin = path.join(dir, "bin");
   const log = path.join(dir, "commands.log");

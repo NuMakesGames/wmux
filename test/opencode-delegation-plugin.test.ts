@@ -11,6 +11,7 @@ import { test } from "node:test";
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hooksScript = path.join(repoRoot, "scripts", "wmux-hooks");
+const posixTest = process.platform === "win32" ? test.skip : test;
 
 const writeRuntimePackages = (configHome: string) => {
   const pluginPackage = path.join(configHome, "node_modules", "@opencode-ai", "plugin");
@@ -238,7 +239,7 @@ const withGeneratedTool = async (
   }
 };
 
-test("generated OpenCode plugin defaults wmux tools to ask without overriding explicit tool policy", async () => {
+posixTest("generated OpenCode plugin defaults wmux tools to ask without overriding explicit tool policy", async () => {
   await withGeneratedTool(async ({ plugin }) => {
     const defaults: Record<string, unknown> = {};
     await plugin.config(defaults);
@@ -256,7 +257,7 @@ test("generated OpenCode plugin defaults wmux tools to ask without overriding ex
   });
 });
 
-test("generated OpenCode delegation aborts a stalled running lifecycle request", async () => {
+posixTest("generated OpenCode delegation aborts a stalled running lifecycle request", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const abort = new AbortController();
     const started = Date.now();
@@ -281,7 +282,7 @@ test("generated OpenCode delegation aborts a stalled running lifecycle request",
   }, { holdFirstAgentEvent: true });
 });
 
-test("generated OpenCode delegation tool runs permission, pane protocol, result parsing, and lifecycle", async () => {
+posixTest("generated OpenCode delegation tool runs permission, pane protocol, result parsing, and lifecycle", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const fake = fakeWebSocket("complete");
     const originalWebSocket = globalThis.WebSocket;
@@ -367,7 +368,7 @@ test("generated OpenCode delegation tool runs permission, pane protocol, result 
   });
 });
 
-test("generated wmux_close permission-gates ownership, closes agent workspaces, and is idempotent", async () => {
+posixTest("generated wmux_close permission-gates ownership, closes agent workspaces, and is idempotent", async () => {
   await withGeneratedTool(async ({ closeTool, api }) => {
     const asks: Record<string, unknown>[] = [];
     let effectsRun = 0;
@@ -415,7 +416,7 @@ test("generated wmux_close permission-gates ownership, closes agent workspaces, 
   });
 });
 
-test("close_on_success closes only after completed lifecycle and reports the URL unavailable", async () => {
+posixTest("close_on_success closes only after completed lifecycle and reports the URL unavailable", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const fake = fakeWebSocket("complete");
     const originalWebSocket = globalThis.WebSocket;
@@ -459,7 +460,7 @@ test("close_on_success closes only after completed lifecycle and reports the URL
   });
 });
 
-test("close_on_success preserves successful output and workspace when close fails", async () => {
+posixTest("close_on_success preserves successful output and workspace when close fails", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const fake = fakeWebSocket("complete");
     const originalWebSocket = globalThis.WebSocket;
@@ -483,7 +484,7 @@ test("close_on_success preserves successful output and workspace when close fail
   }, { failDelete: true });
 });
 
-test("close_on_success does not close failed delegations", async () => {
+posixTest("close_on_success does not close failed delegations", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const fake = fakeWebSocket("failure");
     const originalWebSocket = globalThis.WebSocket;
@@ -505,7 +506,7 @@ test("close_on_success does not close failed delegations", async () => {
   });
 });
 
-test("generated OpenCode delegation aborts promptly, interrupts, posts stopped, and leaves workspace", async () => {
+posixTest("generated OpenCode delegation aborts promptly, interrupts, posts stopped, and leaves workspace", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const abort = new AbortController();
     const fake = fakeWebSocket("abort", () => setTimeout(() => abort.abort(), 10));
@@ -536,7 +537,7 @@ test("generated OpenCode delegation aborts promptly, interrupts, posts stopped, 
   });
 });
 
-test("generated OpenCode delegation posts failed when title setup fails after workspace creation", async () => {
+posixTest("generated OpenCode delegation posts failed when title setup fails after workspace creation", async () => {
   await withGeneratedTool(async ({ tool, api }) => {
     const fake = fakeWebSocket("complete");
     const originalWebSocket = globalThis.WebSocket;
