@@ -407,6 +407,9 @@ you authorize. Delegations leave their durable workspace open by default;
 event. Failed, stopped, and timed-out workspaces remain available for inspection.
 The permission-gated `wmux_close` tool accepts `workspace_id` to explicitly
 close a workspace later, but refuses anything not recorded as agent-created.
+The generated plugin defaults both `wmux_delegate` and `wmux_close` permissions
+to `ask` in memory without rewriting `opencode.json`; an explicit per-tool
+OpenCode permission of `allow`, `ask`, or `deny` takes precedence.
 Cancellation sends Ctrl-C, but a disconnected or wedged remote pane may require
 manual recovery. Restart OpenCode after installing or updating the plugin so it
 loads the generated tools.

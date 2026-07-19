@@ -32,12 +32,18 @@ const writeRuntimePackages = (configHome: string) => {
 
 type CapturedRequest = { method: string; pathname: string; body?: Record<string, unknown> };
 type FixtureWorkspace = { id: string; createdBy?: "agent" | "user"; tabs?: Array<Record<string, unknown>> };
-type ApiOptions = { failTitle?: boolean; failDelete?: boolean; workspaces?: FixtureWorkspace[] };
+type ApiOptions = {
+  failTitle?: boolean;
+  failDelete?: boolean;
+  holdFirstAgentEvent?: boolean;
+  workspaces?: FixtureWorkspace[];
+};
 
 const startApi = async (options: ApiOptions = {}) => {
   const requests: CapturedRequest[] = [];
   const workspaces = structuredClone(options.workspaces ?? []);
   let authenticated = true;
+  let heldAgentEvent = false;
   const server = http.createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
@@ -84,6 +90,10 @@ const startApi = async (options: ApiOptions = {}) => {
       if (pathname === "/api/workspaces/workspace-1/title" && options.failTitle) {
         response.statusCode = 500;
         response.end("{}");
+        return;
+      }
+      if (pathname === "/api/agent-events" && options.holdFirstAgentEvent && !heldAgentEvent) {
+        heldAgentEvent = true;
         return;
       }
       if (pathname === "/api/workspaces/workspace-1/title" || pathname === "/api/agent-events") {
@@ -202,7 +212,7 @@ const fakeWebSocket = (mode: "complete" | "failure" | "abort", onRequest?: () =>
 };
 
 const withGeneratedTool = async (
-  run: (input: { tool: any; closeTool: any; api: Awaited<ReturnType<typeof startApi>>; home: string }) => Promise<void>,
+  run: (input: { plugin: any; tool: any; closeTool: any; api: Awaited<ReturnType<typeof startApi>>; home: string }) => Promise<void>,
   apiOptions: ApiOptions = {},
 ) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-delegation-plugin-"));
@@ -217,7 +227,7 @@ const withGeneratedTool = async (
     await execFileAsync(process.execPath, ["--experimental-strip-types", "--check", pluginPath]);
     const module = await import(`${pathToFileURL(pluginPath).href}?delegation=${Date.now()}-${Math.random()}`);
     const plugin = await module.default({ client: {}, directory: repoRoot });
-    await run({ tool: plugin.tool.wmux_delegate, closeTool: plugin.tool.wmux_close, api, home });
+    await run({ plugin, tool: plugin.tool.wmux_delegate, closeTool: plugin.tool.wmux_close, api, home });
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -227,6 +237,49 @@ const withGeneratedTool = async (
     fs.rmSync(home, { recursive: true, force: true });
   }
 };
+
+test("generated OpenCode plugin defaults wmux tools to ask without overriding explicit tool policy", async () => {
+  await withGeneratedTool(async ({ plugin }) => {
+    const defaults: Record<string, unknown> = {};
+    await plugin.config(defaults);
+    assert.deepEqual(defaults.permission, { wmux_delegate: "ask", wmux_close: "ask" });
+
+    const globalAllow: Record<string, unknown> = { permission: "allow" };
+    await plugin.config(globalAllow);
+    assert.deepEqual(globalAllow.permission, { "*": "allow", wmux_delegate: "ask", wmux_close: "ask" });
+
+    const explicit: Record<string, unknown> = {
+      permission: { "*": "deny", wmux_delegate: "allow", wmux_close: "deny" },
+    };
+    await plugin.config(explicit);
+    assert.deepEqual(explicit.permission, { "*": "deny", wmux_delegate: "allow", wmux_close: "deny" });
+  });
+});
+
+test("generated OpenCode delegation aborts a stalled running lifecycle request", async () => {
+  await withGeneratedTool(async ({ tool, api }) => {
+    const abort = new AbortController();
+    const started = Date.now();
+    const pending = tool.execute(
+      { machine: "posix-1", directory: repoRoot, prompt: "lifecycle abort secret", timeout_seconds: 30 },
+      { abort: abort.signal, ask: () => () => undefined, metadata: () => undefined },
+    );
+    const deadline = Date.now() + 2_000;
+    while (!api.requests.some((request) => request.pathname === "/api/agent-events") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(api.requests.some((request) => request.pathname === "/api/agent-events"), "running lifecycle did not start");
+    abort.abort();
+    const output = await pending;
+    assert.ok(Date.now() - started < 2_000, "abort waited for the lifecycle request timeout");
+    assert.match(output, /State: stopped/);
+    assert.equal(output.includes("lifecycle abort secret"), false);
+    assert.deepEqual(
+      api.requests.filter((request) => request.pathname === "/api/agent-events").map((request) => request.body?.status),
+      ["running", "stopped"],
+    );
+  }, { holdFirstAgentEvent: true });
+});
 
 test("generated OpenCode delegation tool runs permission, pane protocol, result parsing, and lifecycle", async () => {
   await withGeneratedTool(async ({ tool, api }) => {

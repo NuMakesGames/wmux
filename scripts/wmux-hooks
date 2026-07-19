@@ -93,6 +93,7 @@ const MAX_PROMPT = 128 * 1024
 const MAX_OUTPUT = 128 * 1024
 const MAX_CHANNEL = 512 * 1024
 const INPUT_DELAY_MS = 100
+const REQUEST_TIMEOUT_MS = 10_000
 
 class DelegationTimeoutError extends Error {}
 class DelegationAbortError extends Error {}
@@ -155,17 +156,34 @@ const requestJson = async (base: string, token: string, pathname: string, init: 
     ...((init.headers as Record<string, string>) ?? {}),
   }
   if (token) headers.authorization = "Bearer " + token
-  let response: Response
+  if (init.signal?.aborted) throw new DelegationAbortError("delegation aborted")
+  const controller = new AbortController()
+  let timedOut = false
+  const forwardAbort = () => controller.abort(init.signal?.reason)
+  init.signal?.addEventListener("abort", forwardAbort, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, REQUEST_TIMEOUT_MS)
   try {
-    response = await fetch(joinUrl(base, pathname), { ...init, headers })
-  } catch {
+    const response = await fetch(joinUrl(base, pathname), { ...init, headers, signal: controller.signal })
+    let body: any
+    try { body = await response.json() } catch {
+      if (init.signal?.aborted) throw new DelegationAbortError("delegation aborted")
+      if (timedOut) throw new DelegationProtocolError("wmux request timed out")
+      throw new DelegationProtocolError("wmux returned invalid JSON")
+    }
+    if (!response.ok) throw new DelegationProtocolError("wmux request failed (HTTP " + response.status + ")")
+    return body
+  } catch (error) {
+    if (error instanceof DelegationAbortError || error instanceof DelegationProtocolError) throw error
     if (init.signal?.aborted) throw new DelegationAbortError("delegation aborted")
+    if (timedOut) throw new DelegationProtocolError("wmux request timed out")
     throw new DelegationProtocolError("wmux request failed")
+  } finally {
+    clearTimeout(timer)
+    init.signal?.removeEventListener("abort", forwardAbort)
   }
-  let body: any
-  try { body = await response.json() } catch { throw new DelegationProtocolError("wmux returned invalid JSON") }
-  if (!response.ok) throw new DelegationProtocolError("wmux request failed (HTTP " + response.status + ")")
-  return body
 }
 
 const deleteWorkspace = async (base: string, token: string, workspaceId: string, signal?: AbortSignal) => {
@@ -537,7 +555,7 @@ const delegate = tool({
     const title = cleanLine(redact(args.title, secrets), 80) || "OpenCode delegation"
     const ids = { runId, machine: args.machine, workspaceId: workspace.id, tabId: tab.id, paneId: pane.id, url: directUrl }
     let channel: PaneChannel | undefined
-    const postLifecycle = (status: string, summary: string, message = "") => requestJson(url, token, "/api/agent-events", {
+    const postLifecycle = (status: string, summary: string, message = "", signal?: AbortSignal) => requestJson(url, token, "/api/agent-events", {
       method: "POST",
       body: JSON.stringify({
         agent: "opencode",
@@ -549,6 +567,7 @@ const delegate = tool({
         tabId: tab.id,
         paneId: pane.id,
       }),
+      ...(signal ? { signal } : {}),
     })
 
     try {
@@ -558,7 +577,7 @@ const delegate = tool({
         body: JSON.stringify({ title }),
         signal: context.abort,
       })
-      await postLifecycle("running", "OpenCode delegation running")
+      await postLifecycle("running", "OpenCode delegation running", "", context.abort)
 
       const deadline = Date.now() + timeoutSeconds * 1000
       const remaining = () => {
@@ -587,7 +606,7 @@ const delegate = tool({
       const ok = exitCode === 0 && payload.ok === true
       const fallback = ok ? "Delegated task completed without text output." : "Delegated task failed with exit code " + exitCode + "."
       const detail = redact(ok ? payload.result : (payload.error || payload.result), secrets) || fallback
-      await postLifecycle(ok ? "completed" : "failed", ok ? "OpenCode delegation completed" : "OpenCode delegation failed", detail)
+      await postLifecycle(ok ? "completed" : "failed", ok ? "OpenCode delegation completed" : "OpenCode delegation failed", detail, context.abort)
       if (!ok || args.close_on_success !== true) return taskOutput(ok ? "completed" : "failed", ids, detail, ok)
       try {
         await deleteWorkspace(url, token, workspace.id, context.abort)
@@ -645,10 +664,24 @@ const text = (parts: Array<{ type: string; text?: string }>) =>
 const sessionTitle = (title: string | undefined) =>
   title && !/^New session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(title) ? title : ""
 
+const applyPermissionDefaults = (config: any) => {
+  const existing = config.permission
+  const permission: Record<string, unknown> = typeof existing === "string"
+    ? { "*": existing }
+    : existing && typeof existing === "object" && !Array.isArray(existing)
+      ? existing
+      : {}
+  for (const name of ["wmux_delegate", "wmux_close"]) {
+    if (!Object.prototype.hasOwnProperty.call(permission, name)) permission[name] = "ask"
+  }
+  config.permission = permission
+}
+
 export default (async ({ client, directory }) => {
   const active = new Map<string, { messageID: string; prompt: string; title: string; pending: Set<string> }>()
 
   return {
+    config: async (config) => applyPermissionDefaults(config),
     tool: { wmux_delegate: delegate, wmux_close: closeWorkspaceTool },
     "chat.message": async (input, output) => {
       if (delegated) return
