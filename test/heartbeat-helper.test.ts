@@ -19,8 +19,10 @@ test("heartbeat service installer locks down registration files", () => {
   assert.ok(fs.existsSync("deploy/wmux-heartbeat.timer.example"));
 });
 
-test("Windows once mode fails when its registration POST fails", () => {
+test("Windows heartbeat diagnostic is one-shot and fails when its registration POST fails", () => {
   const script = read("scripts/windows/wmux-heartbeat.ps1");
   assert.match(script, /if \(\$Failed\) \{ exit 1 \}/);
   assert.match(script, /registration token must not contain a newline/);
+  assert.doesNotMatch(script, /while \(\$true\)/);
+  assert.doesNotMatch(script, /Start-Sleep/);
 });

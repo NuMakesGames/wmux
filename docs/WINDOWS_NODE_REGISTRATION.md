@@ -229,8 +229,7 @@ Provision three owner-only files on the Windows node:
 ```
 
 The URL file contains the externally reachable wmux base URL. A restart-durable
-Windows-agent registration looks like this; use the same `agentToken` already
-configured for the local `wmux-windows-agent` service:
+Windows-agent registration descriptor looks like this:
 
 ```json
 {
@@ -238,10 +237,7 @@ configured for the local `wmux-windows-agent` service:
     "id": "windows-box",
     "name": "Windows Box",
     "kind": "powershell-ssh",
-    "user": "operator",
-    "sessionBackend": "agent",
-    "agentPort": 3481,
-    "agentToken": "replace-with-the-agent-token"
+    "user": "operator"
   },
   "ttlMs": 90000,
   "metadata": { "os": "windows" }
@@ -249,40 +245,40 @@ configured for the local `wmux-windows-agent` service:
 ```
 
 `host` may remain in an older heartbeat file for compatibility, but wmux ignores
-it and dials the validated private source address. The agent backend requires an
-explicit port and printable token. The agent token stays in the owner-only
-registry and is redacted from browser, status, registry, and helper responses.
+it and dials the validated private source address. The base agent injects
+`sessionBackend: "agent"` plus its live port and token from
+`~\.wmux\windows-agent.json` before each registration POST. This makes the
+running listener authoritative and prevents credential drift between config
+files. The token stays in the owner-only registry and is redacted from browser,
+status, registry, and helper responses.
 
-Copy `scripts/windows/wmux-heartbeat.ps1` to the node and validate one POST:
+The staged `wmux-heartbeat` command remains a one-shot diagnostic that performs
+the same port/token injection. Validate one POST with:
 
 ```powershell
 & "$env:LOCALAPPDATA\wmux\bin\wmux-heartbeat.ps1" -Once
 ```
 
 After a pane has staged the helper bundle through SSH bootstrap or the Windows
-agent, install and inspect the per-user at-logon task:
+agent, install and inspect the single per-user agent task:
 
 ```powershell
-wmux-windows-setup install-heartbeat
-wmux-windows-setup heartbeat-status
-wmux-windows-setup heartbeat-logs
+wmux-windows-setup install-agent
+wmux-windows-setup agent-status
+wmux-windows-setup agent-logs
 ```
 
-When rotating the registration token, update `~\.wmux\registration-token` and
-run `wmux-heartbeat-service restart`. Address changes are accepted for idle
-persisted panes, but any referenced pane pins the connection descriptor and
+When rotating the registration token, update `~\.wmux\registration-token`; the
+running agent reloads it on the next heartbeat. Address changes are accepted for
+idle persisted panes, but any referenced pane pins the connection descriptor and
 agent token until it is closed. A live Windows-agent pane also pins its callback
 address. Close referenced panes before changing those pinned values, then run a
-one-shot heartbeat. The task runs only after this user logs on, and it should be
-installed from that same Windows account. If Task Scheduler reports access
-denied, the installer exits nonzero without claiming success; rerun it in an
-interactive session for the account that should own the heartbeat.
+one-shot heartbeat or wait for the agent's next interval.
 
 Rotating `agentToken` is a coordinated agent update: drain/close active panes
-without forcing an agent restart, update the token in both
-`~\.wmux\heartbeat.json` and `~\.wmux\windows-agent.json`, restart the agent
-task, and only then send `wmux-heartbeat -Once`. Updating only the heartbeat
-would make wmux authenticate with a token the agent does not accept. Use the
+without forcing an agent restart, update the token in
+`~\.wmux\windows-agent.json`, and safely restart the agent. Its next heartbeat
+automatically advertises the new token. Use the
 `wmux-windows-agent-service activate-update` drain flow described below when
 the rotation is part of a staged agent update.
 
@@ -319,7 +315,7 @@ Notes:
 - `persist-path` adds `%LOCALAPPDATA%\wmux\bin` to the persistent user PATH for future non-wmux shells.
 - `install-deps` uses `winget` to install `Gyan.FFmpeg` and `Python.Python.3.12` when missing, then installs `pywinpty` with pip. It executes Python during detection so the Microsoft Store app-execution alias is not mistaken for an installed runtime.
 - `install-stream` installs and starts the per-user `wmux-stream-agent` Scheduled Task.
-- `install-agent` installs and starts the per-user `wmux-windows-agent` Scheduled Task for experimental restart-durable sessions.
+- `install-agent` installs and starts the per-user `wmux-windows-agent` Scheduled Task for experimental restart-durable sessions and in-process dynamic registration. It removes a legacy standalone `wmux-heartbeat` task during migration.
 - `configure-agent-firewall` must run from an elevated PowerShell session. It allows the configured base `agentPort` and eight adjacent rollout ports only from the exact Tailscale/RFC1918/IPv6 ULA wmux server addresses passed on the command line. For the default base port, the bounded range is `3481-3489`. `install-agent` warns when this managed rule is absent or stale.
 - `agent-firewall-status` prints the expected range and current managed-rule state as JSON. If you manage Windows Firewall separately, create an equivalent exact-source rule for the same nine-port range; opening only the base port prevents safe side-by-side updates.
 - Both Windows Scheduled Tasks start at user logon, start when available, restart after failure, have no fixed execution-time cutoff, and launch through hidden PowerShell wrappers instead of visible `cmd.exe` windows.

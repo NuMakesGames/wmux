@@ -13,9 +13,12 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlparse
+from urllib.request import Request, urlopen
 
 
 RELEASE_VERSION = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__"
@@ -39,9 +42,15 @@ JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 PROCESS_TERMINATE = 0x0001
 PROCESS_SET_QUOTA = 0x0100
 AGENT_RESTART_EXIT_CODE = 75
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
+DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 15
 
 
 class AgentDrainingError(RuntimeError):
+    pass
+
+
+class HeartbeatNotConfigured(RuntimeError):
     pass
 
 
@@ -338,6 +347,215 @@ def config_int(config: dict[str, Any], key: str, fallback: int) -> int:
         except ValueError:
             return fallback
     return fallback
+
+
+def config_bool(config: dict[str, Any], key: str, fallback: bool) -> bool:
+    value = config.get(key)
+    return value if isinstance(value, bool) else fallback
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def read_trimmed_file(path: str) -> str:
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read().strip()
+
+
+class RegistrationHeartbeat:
+    def __init__(self, agent_config: dict[str, Any], agent_config_path: str, agent_port: int):
+        self.agent_config = agent_config
+        self.agent_port = agent_port
+        configured_state_dir = config_string(agent_config, "stateDir")
+        default_state_dir = os.path.dirname(os.path.abspath(os.path.expanduser(agent_config_path)))
+        self.state_dir = os.path.abspath(
+            os.path.expanduser(
+                os.path.expandvars(os.environ.get("WMUX_STATE_DIR") or configured_state_dir or default_state_dir)
+            )
+        )
+        self.owner = config_bool(agent_config, "heartbeatOwner", True)
+        self.enabled = config_bool(agent_config, "heartbeatEnabled", True)
+        self.interval_seconds = max(
+            5,
+            config_int(agent_config, "heartbeatIntervalSeconds", DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
+        )
+        self.timeout_seconds = max(
+            1,
+            min(60, config_int(agent_config, "heartbeatTimeoutSeconds", DEFAULT_HEARTBEAT_TIMEOUT_SECONDS)),
+        )
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.status: dict[str, Any] = {
+            "owner": self.owner,
+            "enabled": self.enabled,
+            "configured": False,
+            "intervalSeconds": self.interval_seconds,
+            "lastAttemptAt": None,
+            "lastSuccessAt": None,
+            "lastFailureAt": None,
+            "consecutiveFailures": 0,
+            "lastError": None,
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return dict(self.status)
+
+    def start(self) -> None:
+        if not self.owner or not self.enabled or self.thread:
+            return
+        self.thread = threading.Thread(target=self._run, name="wmux-registration-heartbeat", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.send_once()
+            except Exception as error:
+                self._record_failure(f"registration heartbeat failed unexpectedly: {error}")
+            self.stop_event.wait(self.interval_seconds)
+
+    def _registration_request(self) -> tuple[str, str, bytes]:
+        wmux_url = os.environ.get("WMUX_URL") or read_trimmed_file(os.path.join(self.state_dir, "url"))
+        registration_token = os.environ.get("WMUX_REGISTRATION_TOKEN") or read_trimmed_file(
+            os.path.join(self.state_dir, "registration-token")
+        )
+        heartbeat_config_path = os.environ.get("WMUX_HEARTBEAT_CONFIG") or os.path.join(
+            self.state_dir, "heartbeat.json"
+        )
+        missing = []
+        if not wmux_url:
+            missing.append("url")
+        if not registration_token:
+            missing.append("registration-token")
+        if not os.path.isfile(heartbeat_config_path):
+            missing.append("heartbeat.json")
+        if missing:
+            raise HeartbeatNotConfigured(f"missing {', '.join(missing)}")
+        if "\r" in registration_token or "\n" in registration_token:
+            raise HeartbeatNotConfigured("registration token contains a newline")
+
+        with open(heartbeat_config_path, "r", encoding="utf-8") as handle:
+            registration = json.load(handle)
+        if not isinstance(registration, dict) or not isinstance(registration.get("machine"), dict):
+            raise HeartbeatNotConfigured("heartbeat.json must contain a machine object")
+
+        machine = dict(registration["machine"])
+        configured_machine = config_string(self.agent_config, "machine")
+        registered_machine = machine.get("id")
+        if configured_machine and registered_machine != configured_machine:
+            raise HeartbeatNotConfigured("heartbeat machine id does not match windows-agent.json")
+        agent_token = config_string(self.agent_config, "token") or os.environ.get("WMUX_AGENT_TOKEN", "")
+        if not agent_token:
+            raise HeartbeatNotConfigured("windows-agent.json is missing the agent token")
+
+        # The running agent is authoritative for its callback port and token.
+        # This prevents a stale heartbeat file from advertising credentials the
+        # live listener does not accept.
+        machine["sessionBackend"] = "agent"
+        machine["agentPort"] = self.agent_port
+        machine["agentToken"] = agent_token
+        registration["machine"] = machine
+        endpoint = f"{wmux_url.rstrip('/')}/api/registry/hosts"
+        body = json.dumps(registration, separators=(",", ":")).encode("utf-8")
+        return endpoint, registration_token, body
+
+    def send_once(self) -> bool:
+        if not self.enabled:
+            return False
+        attempted_at = utc_timestamp()
+        with self.lock:
+            self.status["lastAttemptAt"] = attempted_at
+        try:
+            endpoint, registration_token, body = self._registration_request()
+        except (HeartbeatNotConfigured, OSError, ValueError, json.JSONDecodeError) as error:
+            with self.lock:
+                self.status["configured"] = False
+                self.status["consecutiveFailures"] = 0
+                self.status["lastError"] = str(error)
+            return False
+
+        try:
+            request = Request(
+                endpoint,
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {registration_token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                status_code = int(getattr(response, "status", 200))
+                response.read(4096)
+            if status_code < 200 or status_code >= 300:
+                raise RuntimeError(f"registration endpoint returned HTTP {status_code}")
+        except HTTPError as error:
+            return self._record_failure(f"registration endpoint returned HTTP {error.code}")
+        except URLError as error:
+            return self._record_failure(f"registration request failed: {error.reason}")
+        except (OSError, RuntimeError, ValueError) as error:
+            return self._record_failure(str(error))
+
+        succeeded_at = utc_timestamp()
+        with self.lock:
+            recovering = bool(self.status["lastError"])
+            self.status["configured"] = True
+            self.status["lastSuccessAt"] = succeeded_at
+            self.status["consecutiveFailures"] = 0
+            self.status["lastError"] = None
+        if recovering:
+            print("wmux-windows-agent: registration heartbeat recovered", file=sys.stderr)
+        return True
+
+    def _record_failure(self, message: str) -> bool:
+        failed_at = utc_timestamp()
+        with self.lock:
+            changed = self.status["lastError"] != message
+            self.status["configured"] = True
+            self.status["lastFailureAt"] = failed_at
+            self.status["consecutiveFailures"] = int(self.status["consecutiveFailures"]) + 1
+            self.status["lastError"] = message
+        if changed:
+            print(f"wmux-windows-agent: {message}", file=sys.stderr)
+        return False
+
+
+def retire_legacy_heartbeat_task(config: dict[str, Any]) -> None:
+    if os.name != "nt":
+        return
+    task_name = os.environ.get("WMUX_HEARTBEAT_TASK") or "wmux-heartbeat"
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    for arguments in (("/End", "/TN", task_name), ("/Delete", "/F", "/TN", task_name)):
+        try:
+            subprocess.run(
+                ["schtasks.exe", *arguments],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+                creationflags=creation_flags,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    configured_helper_dir = os.path.expanduser(os.path.expandvars(config_string(config, "helperDir")))
+    if configured_helper_dir:
+        helper_dir = os.path.abspath(configured_helper_dir)
+        for name in ("wmux-heartbeat-service.ps1", "wmux-heartbeat-service.cmd", "wmux-heartbeat-task.ps1"):
+            try:
+                os.remove(os.path.join(helper_dir, name))
+            except OSError:
+                pass
 
 
 def pywinpty_available() -> bool:
@@ -957,6 +1175,7 @@ class AgentState:
         self.restart_requested = False
         self.restart_scheduled = False
         self.shutdown_callback: Callable[[], None] | None = None
+        self.registration_heartbeat: RegistrationHeartbeat | None = None
 
     def get_or_create(self, session_id: str, payload: dict[str, Any]) -> Session:
         with self.lock:
@@ -1015,6 +1234,24 @@ class AgentState:
 
     def set_shutdown_callback(self, callback: Callable[[], None]) -> None:
         self.shutdown_callback = callback
+
+    def set_registration_heartbeat(self, heartbeat: RegistrationHeartbeat) -> None:
+        self.registration_heartbeat = heartbeat
+
+    def registration_heartbeat_health(self) -> dict[str, Any]:
+        if self.registration_heartbeat:
+            return self.registration_heartbeat.snapshot()
+        return {
+            "enabled": False,
+            "owner": False,
+            "configured": False,
+            "intervalSeconds": DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+            "lastAttemptAt": None,
+            "lastSuccessAt": None,
+            "lastFailureAt": None,
+            "consecutiveFailures": 0,
+            "lastError": None,
+        }
 
     def _session_exited(self) -> None:
         self._schedule_restart_if_idle()
@@ -1081,7 +1318,7 @@ class Handler(BaseHTTPRequestHandler):
                     "version": RELEASE_VERSION,
                     "releaseVersion": RELEASE_VERSION,
                     "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": ["paste-images-v1"],
+                    "capabilities": ["paste-images-v1", "registration-heartbeat-v1"],
                     "machine": config_string(self.state.config, "machine", "windows"),
                     "pid": os.getpid(),
                     **lifecycle,
@@ -1090,6 +1327,7 @@ class Handler(BaseHTTPRequestHandler):
                     "helperBundleVersion": helper_bundle_version(self.state.config),
                     "conptyAvailable": conpty_available(),
                     "pywinptyAvailable": pywinpty_available(),
+                    "heartbeat": self.state.registration_heartbeat_health(),
                 }
             )
             return
@@ -1249,13 +1487,20 @@ def main() -> int:
         raise SystemExit(f"wmux-windows-agent: refusing to bind non-private host {host}")
     Handler.state = AgentState(config)
     server = ThreadingHTTPServer((host, port), Handler)
+    registration_heartbeat = RegistrationHeartbeat(config, args.config, int(server.server_address[1]))
+    Handler.state.set_registration_heartbeat(registration_heartbeat)
     Handler.state.set_shutdown_callback(lambda: threading.Thread(target=server.shutdown, daemon=True).start())
+    if registration_heartbeat.owner:
+        retire_legacy_heartbeat_task(config)
+    if registration_heartbeat.enabled:
+        registration_heartbeat.start()
     print(f"wmux-windows-agent: listening on http://{host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         return 0
     finally:
+        registration_heartbeat.stop()
         server.server_close()
     return AGENT_RESTART_EXIT_CODE if Handler.state.restart_requested else 0
 
