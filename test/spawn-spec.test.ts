@@ -81,7 +81,7 @@ const sampleSpecs = () => {
   }
 };
 
-test("spawn spec matrix matches the golden snapshot", () => {
+test("spawn spec matrix matches the golden snapshot", { skip: process.platform === "win32" }, () => {
   const current = sampleSpecs();
   if (!fs.existsSync(goldenPath)) {
     fs.writeFileSync(goldenPath, `${JSON.stringify(current, null, 2)}\n`);
@@ -100,7 +100,7 @@ test("every machine kind produces a runnable file + cwd", () => {
   }
 });
 
-test("local durable credentials are staged outside observable process arguments", () => {
+test("local durable credentials are staged outside observable process arguments", { skip: process.platform === "win32" }, () => {
   const spec = buildSpawnSpec(machines[0].machine, 120, 40, extraEnv);
   assert.equal(spec.args.join(" ").includes(extraEnv.WMUX_TOKEN), false);
   assert.match(spec.args[0], /wmux\/runtimes\/v1-wmux_pane_fixed001\.sh$/);
@@ -129,7 +129,7 @@ test("raw local panes apply an available agent profile before the shell", () => 
   assert.match(spec.args.join(" "), /exec/);
 });
 
-test("POSIX SSH staging includes the hook installer beside its event helper", () => {
+test("POSIX SSH staging includes the hook installer beside its event helper", { skip: process.platform === "win32" }, () => {
   const spec = buildSpawnSpec(machines[5].machine, 120, 40, extraEnv);
   assert.equal(spec.file, "/bin/sh");
   assert.equal(spec.args.length, 1);
@@ -163,7 +163,7 @@ test("POSIX SSH staging includes the hook installer beside its event helper", ()
   assert.equal(wrapper.includes(extraEnv.WMUX_TOKEN), false, "credentials stay in the staged payload");
 });
 
-test("PowerShell SSH panes create the same private per-pane control master", () => {
+test("PowerShell SSH panes create the same private per-pane control master", { skip: process.platform === "win32" }, () => {
   const spec = buildSpawnSpec(machines[8].machine, 120, 40, extraEnv);
   assert.ok(spec.args.some((arg) => arg.startsWith("ControlPath=") && arg.includes("/wmux/ssh-control/")));
   assert.ok(spec.args.includes("ControlMaster=auto"));

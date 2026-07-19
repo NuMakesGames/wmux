@@ -16,36 +16,30 @@ const machine: MachineConfig = {
   host: "win.ts.net",
 };
 
-test("packaged heartbeat task uses the full identity and verifies installation before reporting success", () => {
+test("packaged Windows agent owns heartbeat and retires the legacy task", () => {
   const bundle = buildWindowsHelperBundle(machine);
-  const helper = bundle.files.find((file) => file.name === "wmux-heartbeat-service.ps1");
-  assert.ok(helper, "bundle includes wmux-heartbeat-service.ps1");
+  assert.equal(bundle.files.some((file) => file.name === "wmux-heartbeat-service.ps1"), false);
+  const helper = bundle.files.find((file) => file.name === "wmux-windows-agent-service.ps1");
+  assert.ok(helper, "bundle includes wmux-windows-agent-service.ps1");
   const source = Buffer.from(helper.dataBase64, "base64").toString("utf8");
 
-  assert.match(source, /WindowsIdentity\]::GetCurrent\(\)\.Name/);
-  assert.match(source, /New-ScheduledTaskTrigger -AtLogOn -User \$Identity/);
-  assert.match(source, /New-ScheduledTaskPrincipal -UserId \$Identity -LogonType Interactive/);
-  assert.doesNotMatch(source, /New-ScheduledTaskPrincipal -UserId \$env:USERNAME/);
-  const identityAt = source.indexOf("$Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name");
-  const triggerAt = source.indexOf("New-ScheduledTaskTrigger -AtLogOn -User $Identity");
-  assert.ok(identityAt >= 0 && identityAt < triggerAt, "identity is resolved before constructing the trigger");
-  assert.match(
-    source,
-    /Register-ScheduledTask -TaskName \$TaskName -InputObject \$Task -Force -ErrorAction Stop/,
-  );
-  assert.equal(
-    source.match(/Start-ScheduledTask -TaskName \$TaskName -ErrorAction Stop/g)?.length,
-    2,
-    "install and restart both make task-start failures terminating",
-  );
+  assert.match(source, /function Remove-LegacyHeartbeatTask/);
+  assert.match(source, /Unregister-ScheduledTask -TaskName \$LegacyHeartbeatTaskName/);
+  assert.match(source, /CommandLine -like '\*wmux-heartbeat\*\.ps1\*'/);
+  assert.match(source, /heartbeatEnabled -NotePropertyValue \$false/);
+  const stopBlock = source.slice(source.indexOf("'stop' {"), source.indexOf("'status' {"));
+  assert.match(stopBlock, /Remove-LegacyHeartbeatTask/);
 
-  const registerAt = source.indexOf("Register-ScheduledTask -TaskName $TaskName");
-  const startAt = source.indexOf("Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop", registerAt);
-  const verifyAt = source.indexOf("Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop", startAt);
-  const installedAt = source.indexOf('Write-Output "Installed $TaskName"', verifyAt);
-  assert.ok(registerAt >= 0 && registerAt < startAt, "registration precedes task start");
-  assert.ok(startAt < verifyAt, "task start precedes verification");
-  assert.ok(verifyAt < installedAt, "verification precedes the success message");
+  const agent = bundle.files.find((file) => file.name === "wmux-windows-agent.py");
+  assert.ok(agent);
+  const agentSource = Buffer.from(agent.dataBase64, "base64").toString("utf8");
+  assert.match(agentSource, /def retire_legacy_heartbeat_task/);
+  assert.match(agentSource, /retire_legacy_heartbeat_task\(config\)/);
+  assert.match(agentSource, /wmux-heartbeat-service\.ps1/);
+
+  const setup = fs.readFileSync(path.join(repoRoot, "scripts/windows/wmux-windows-setup.ps1"), "utf8");
+  assert.doesNotMatch(setup, /'install-heartbeat' \{/);
+  assert.match(setup, /heartbeatManagedByAgent = \$true/);
 });
 
 test("Windows setup propagates helper process exit codes", () => {
@@ -62,12 +56,12 @@ test("Windows setup propagates helper process exit codes", () => {
 });
 
 test(
-  "Windows setup returns a native helper's exit code",
+  "Windows setup returns the agent helper's native exit code",
   { skip: process.platform !== "win32" },
   () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-helper-exit-"));
     try {
-      fs.writeFileSync(path.join(tempDir, "wmux-heartbeat-service.cmd"), "@echo off\r\nexit /b 23\r\n");
+      fs.writeFileSync(path.join(tempDir, "wmux-windows-agent-service.cmd"), "@echo off\r\nexit /b 23\r\n");
       const result = spawnSync(
         "powershell.exe",
         [
@@ -78,7 +72,7 @@ test(
           "Bypass",
           "-File",
           path.join(repoRoot, "scripts/windows/wmux-windows-setup.ps1"),
-          "install-heartbeat",
+          "install-agent",
         ],
         {
           encoding: "utf8",

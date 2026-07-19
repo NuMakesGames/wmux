@@ -11,6 +11,7 @@ $Wrapper = Join-Path $HelperDir 'wmux-windows-agent-task.ps1'
 $RestartTaskName = "$TaskName-update"
 $OutLog = Join-Path $LogDir 'windows-agent.out.log'
 $ErrLog = Join-Path $LogDir 'windows-agent.err.log'
+$LegacyHeartbeatTaskName = if ($env:WMUX_HEARTBEAT_TASK) { $env:WMUX_HEARTBEAT_TASK } else { 'wmux-heartbeat' }
 $Force = @($args) -contains '--force'
 $GenerationPort = 0
 for ($Index = 0; $Index -lt $args.Count - 1; $Index += 1) {
@@ -109,6 +110,37 @@ function Stop-AgentProcesses {
     }
 }
 
+function Remove-LegacyHeartbeatTask {
+  Stop-ScheduledTask -TaskName $LegacyHeartbeatTaskName -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName $LegacyHeartbeatTaskName -Confirm:$false -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.ProcessId -ne $PID -and
+      $_.CommandLine -and
+      $_.CommandLine -like '*wmux-heartbeat*.ps1*'
+    } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Write-HeartbeatConfigurationStatus {
+  $Document = if (Test-Path -LiteralPath $Config -PathType Leaf) {
+    Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+  } else {
+    [pscustomobject]@{}
+  }
+  if ($Document.PSObject.Properties.Name -contains 'heartbeatEnabled' -and $Document.heartbeatEnabled -eq $false) {
+    Write-Output 'Registration heartbeat disabled in windows-agent.json'
+    return
+  }
+  $Missing = @('url', 'registration-token', 'heartbeat.json') |
+    Where-Object { -not (Test-Path -LiteralPath (Join-Path $StateDir $_) -PathType Leaf) }
+  if ($Missing.Count -gt 0) {
+    Write-Warning "Agent installed, but registration heartbeat is waiting for: $($Missing -join ', ')"
+  } else {
+    Write-Output 'Registration heartbeat is managed by the Windows agent'
+  }
+}
+
 function Get-AgentEndpoint {
   $Document = if (Test-Path -LiteralPath $Config -PathType Leaf) {
     Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
@@ -165,8 +197,9 @@ function New-WmuxTaskSettings {
 }
 
 function New-WmuxTaskTriggers {
+  $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
   @(
-    New-ScheduledTaskTrigger -AtLogOn
+    New-ScheduledTaskTrigger -AtLogOn -User $Identity
     New-ScheduledTaskTrigger `
       -Once `
       -At (Get-Date).AddMinutes(1) `
@@ -210,6 +243,10 @@ function Start-AgentGeneration {
   }
   $Document | Add-Member -NotePropertyName port -NotePropertyValue $Port -Force
   $Document | Add-Member -NotePropertyName helperDir -NotePropertyValue $HelperDir -Force
+  # Only the base agent publishes presence. Side-by-side rollout generations
+  # must not race the same registry record from adjacent callback ports.
+  $Document | Add-Member -NotePropertyName heartbeatEnabled -NotePropertyValue $false -Force
+  $Document | Add-Member -NotePropertyName heartbeatOwner -NotePropertyValue $false -Force
   [System.IO.File]::WriteAllText(
     $GenerationConfig,
     ($Document | ConvertTo-Json -Depth 20),
@@ -358,6 +395,7 @@ switch ($ActionName) {
     Write-Output "Installed $TaskName"
     Write-Output "Logon type: $LogonType"
     Write-Output "Logs: $LogDir"
+    Write-HeartbeatConfigurationStatus
   }
   'restart' {
     Enable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
@@ -444,6 +482,7 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Write-Output "Drain cancelled; active pane sessions: $(Get-ActiveSessionCount $Drain)"
   }
   'stop' {
+    Remove-LegacyHeartbeatTask
     Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
@@ -455,6 +494,7 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Stop-AgentProcesses
   }
   'uninstall' {
+    Remove-LegacyHeartbeatTask
     Stop-ScheduledTask -TaskName $RestartTaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -469,7 +509,7 @@ Start-ScheduledTask -TaskName '$($TaskName -replace "'", "''")'
     Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Format-List *
     Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue | Format-List *
     try {
-      Invoke-AgentRequest -Method GET -Path '/health' | Select-Object version, backend, processTree, activeSessions, draining, restartWhenIdle | Format-List
+      Invoke-AgentRequest -Method GET -Path '/health' | Select-Object version, releaseVersion, protocolVersion, backend, processTree, activeSessions, draining, restartWhenIdle, heartbeat | Format-List
     } catch {
       Write-Warning "Agent health unavailable: $($_.Exception.Message)"
     }

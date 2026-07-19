@@ -26,14 +26,16 @@ test("bundle files carry correct sha256 digests and a stable version", () => {
   assert.equal(buildWindowsHelperBundle(machine).bundleVersion, bundle.bundleVersion);
 });
 
-test("bundle stages heartbeat helpers and reports them as required", () => {
+test("bundle stages the one-shot heartbeat diagnostic without a standalone service", () => {
   const bundle = buildWindowsHelperBundle(machine);
-  for (const name of ["wmux-heartbeat.ps1", "wmux-heartbeat.cmd", "wmux-heartbeat-service.ps1"]) {
+  for (const name of ["wmux-heartbeat.ps1", "wmux-heartbeat.cmd"]) {
     assert.ok(bundle.files.some((file) => file.name === name), `bundle includes ${name}`);
   }
+  assert.equal(bundle.files.some((file) => file.name === "wmux-heartbeat-service.ps1"), false);
   const healthProbe = buildWindowsHealthProbeScript("http://127.0.0.1:3478");
   assert.match(healthProbe, /wmux-heartbeat\.ps1/);
-  assert.match(healthProbe, /wmux-heartbeat-service\.ps1/);
+  assert.doesNotMatch(healthProbe, /wmux-heartbeat-service\.ps1/);
+  assert.match(healthProbe, /heartbeatManagedByAgent/);
 });
 
 test("bundle stages and runs the agent profile helper", () => {
@@ -61,6 +63,9 @@ test("Windows bootstrap wraps profile prompts only when profile loading is enabl
 
 test("Windows agent config prefers ConPTY with stdio fallback", () => {
   assert.equal(buildWindowsHelperBundle(machine).agentConfig.backend, "auto");
+  assert.equal(buildWindowsHelperBundle(machine).agentConfig.heartbeatOwner, true);
+  assert.equal(buildWindowsHelperBundle(machine).agentConfig.heartbeatEnabled, true);
+  assert.equal(buildWindowsHelperBundle(machine).agentConfig.heartbeatIntervalSeconds, 30);
 });
 
 test("clipboard helper sends bearer auth and reads staged fallback files", () => {
@@ -168,6 +173,7 @@ test("agent bundle uses the platform release and exposes protocol compatibility 
   assert.ok(content.includes(`RELEASE_VERSION = "${expectedWindowsAgentReleaseVersion()}"`));
   assert.ok(content.includes(`PROTOCOL_VERSION = ${expectedWindowsAgentProtocolVersion()}`));
   assert.ok(content.includes('"paste-images-v1"'));
+  assert.ok(content.includes('"registration-heartbeat-v1"'));
   assert.ok(content.includes("MAX_PASTE_IMAGE_BYTES = 8 * 1024 * 1024"));
   assert.ok(!content.includes("__WMUX_WINDOWS_AGENT_RELEASE_VERSION__"));
 });
@@ -189,10 +195,14 @@ test("Windows agent service drains staged updates and refuses unsafe restarts", 
   assert.ok(content.includes("$RestartTaskName"));
   assert.ok(content.includes("Register-ScheduledTask -TaskName $RestartTaskName"));
   assert.ok(content.includes("New-WmuxTaskTriggers"));
+  assert.ok(content.includes("New-ScheduledTaskTrigger -AtLogOn -User $Identity"));
   assert.ok(content.includes("RepetitionInterval (New-TimeSpan -Minutes 1)"));
   assert.ok(content.includes("-MultipleInstances IgnoreNew"));
   assert.ok(content.includes("Disable-ScheduledTask -TaskName $TaskName"));
   assert.ok(content.includes("Get-AgentGenerationTasks"));
+  assert.ok(content.includes("Remove-LegacyHeartbeatTask"));
+  assert.ok(content.includes("heartbeatEnabled -NotePropertyValue $false"));
+  assert.ok(content.includes("heartbeatOwner -NotePropertyValue $false"));
   assert.ok(!content.includes("Start-Process -FilePath $PowerShell"));
 });
 

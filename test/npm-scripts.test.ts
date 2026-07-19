@@ -11,6 +11,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json
 
 test("npm build and screenshot scripts work in Windows command shells", () => {
   assert.equal(packageJson.scripts["build:client"], "node scripts/build-client.mjs");
+  assert.equal(packageJson.scripts["check:scripts"], "node scripts/check-scripts.mjs");
   assert.equal(
     packageJson.scripts["docs:screenshots"],
     "playwright test e2e/docs-screenshots.spec.ts --project=chromium --project=mobile-chromium",

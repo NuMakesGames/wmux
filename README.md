@@ -45,7 +45,7 @@ The desktop view and both mobile surfaces show the same live Codex workspace.
 | Node.js service | Private-network boundary, bearer authentication, bounded REST uploads, event WebSocket, and canonical workspace state |
 | Session manager | One live client per pane, pinned backend snapshots, temporary image staging, bounded replay, VT checkpoints, resize ownership, and backend lifecycle |
 | Machine catalog | Merges static `wmux.config.json` machines with dynamically registered heartbeat hosts |
-| Execution backends | Local PTYs, SSH with `tmux`/`screen` and per-pane control sockets, PowerShell over SSH, and the experimental Windows agent |
+| Execution backends | Local PTYs, SSH with `tmux`/`screen` and per-pane control sockets, PowerShell over SSH, and the experimental Windows agent, which owns pane processes, replay, and dynamic-registration heartbeat |
 | Persistent state | Workspace layout, settings, persistent mobile attachments, and metadata under `~/.wmux`; expiring paste-image stages are not workspace state |
 | Optional streaming | Machine-local MediaMTX capture or a Moonlight/Sunshine gateway, requested by the browser |
 
@@ -242,13 +242,14 @@ scripts/wmux-heartbeat --once
 scripts/install-heartbeat-service.sh
 ```
 
-Windows hosts use `wmux-windows-setup install-heartbeat` after their helpers
-are staged. Run it as the Windows account that should own the logon-triggered
-task; Task Scheduler access-denied failures exit nonzero instead of reporting
-success. wmux always dials the validated heartbeat source address and removes
-agent credentials from browser/status responses. Registered panes do not
-receive the broad wmux API token, so API-posting helpers need separately
-provisioned authorization.
+Windows agent hosts send the same registration heartbeat from inside the
+`wmux-windows-agent` process. Provision the three files above, configure
+`~/.wmux/windows-agent.json`, and run `wmux-windows-setup install-agent`; there
+is no separate Windows heartbeat task. Installing the agent retires a legacy
+`wmux-heartbeat` task if one exists. wmux always dials the validated heartbeat
+source address and removes agent credentials from browser/status responses.
+Registered panes do not receive the broad wmux API token, so API-posting helpers
+need separately provisioned authorization.
 
 ## Authentication and Network Safety
 
@@ -481,6 +482,11 @@ wmux-windows-setup install-agent
 wmux-windows-setup configure-agent-firewall <wmux-server-internal-ip>
 wmux-windows-setup agent-status
 ```
+
+When `~/.wmux/url`, `registration-token`, and `heartbeat.json` are present, the
+base agent heartbeats automatically and reports its last success/failure in
+`/health`. Adjacent-port rollout generations never heartbeat, preventing two
+agent processes from racing the same registry record.
 
 Opt in from the machine's untracked config:
 

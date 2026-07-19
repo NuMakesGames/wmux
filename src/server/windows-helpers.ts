@@ -19,7 +19,6 @@ const windowsRequiredHelperNames = [
   "wmux-agent-event",
   "wmux-copy",
   "wmux-heartbeat",
-  "wmux-heartbeat-service",
   "wmux-hooks",
   "wmux-media",
   "wmux-notify",
@@ -224,7 +223,7 @@ if ((Test-Path -LiteralPath $AgentDefaultsPath) -and -not (Test-Path -LiteralPat
   }
   $DefaultAgentConfig = Get-Content -LiteralPath $AgentDefaultsPath -Raw | ConvertFrom-Json -AsHashtable
   $ChangedAgentConfig = $false
-  foreach ($Key in @('machine', 'host', 'port', 'shell', 'cwd', 'helperDir', 'maxReplayBytes', 'backend')) {
+  foreach ($Key in @('machine', 'host', 'port', 'shell', 'cwd', 'helperDir', 'maxReplayBytes', 'backend', 'heartbeatOwner', 'heartbeatEnabled', 'heartbeatIntervalSeconds')) {
     if (-not $ExistingAgentConfig.ContainsKey($Key)) {
       $ExistingAgentConfig[$Key] = $DefaultAgentConfig[$Key]
       $ChangedAgentConfig = $true
@@ -288,6 +287,8 @@ $Task = Get-ScheduledTask -TaskName 'wmux-stream-agent' -ErrorAction SilentlyCon
 $TaskInfo = if ($Task) { Get-ScheduledTaskInfo -TaskName 'wmux-stream-agent' -ErrorAction SilentlyContinue } else { $null }
 $AgentTask = Get-ScheduledTask -TaskName 'wmux-windows-agent' -ErrorAction SilentlyContinue
 $AgentTaskInfo = if ($AgentTask) { Get-ScheduledTaskInfo -TaskName 'wmux-windows-agent' -ErrorAction SilentlyContinue } else { $null }
+$LegacyHeartbeatTask = Get-ScheduledTask -TaskName 'wmux-heartbeat' -ErrorAction SilentlyContinue
+$RegistrationStateDir = Join-Path $HOME '.wmux'
 $SunshineCommand = Get-Command sunshine.exe -ErrorAction SilentlyContinue
 if (-not $SunshineCommand) {
   $SunshineCandidates = @()
@@ -354,6 +355,11 @@ try {
   agentTaskState = $(if ($AgentTask) { [string]$AgentTask.State } else { 'missing' })
   agentTaskLastRunTime = $(if ($AgentTaskInfo) { $AgentTaskInfo.LastRunTime.ToString('o') } else { $null })
   agentTaskLastTaskResult = $(if ($AgentTaskInfo) { $AgentTaskInfo.LastTaskResult } else { $null })
+  heartbeatManagedByAgent = $true
+  heartbeatConfigExists = [bool](Test-Path -LiteralPath (Join-Path $RegistrationStateDir 'heartbeat.json') -PathType Leaf)
+  heartbeatUrlExists = [bool](Test-Path -LiteralPath (Join-Path $RegistrationStateDir 'url') -PathType Leaf)
+  heartbeatRegistrationTokenExists = [bool](Test-Path -LiteralPath (Join-Path $RegistrationStateDir 'registration-token') -PathType Leaf)
+  legacyHeartbeatTaskState = $(if ($LegacyHeartbeatTask) { [string]$LegacyHeartbeatTask.State } else { 'missing' })
 } | ConvertTo-Json -Depth 8 -Compress
 `;
 
@@ -424,6 +430,9 @@ const windowsAgentConfig = (machine: MachineConfig): Record<string, unknown> => 
   helperDir: "%LOCALAPPDATA%\\wmux\\bin",
   maxReplayBytes: 2 * 1024 * 1024,
   backend: "auto",
+  heartbeatOwner: true,
+  heartbeatEnabled: true,
+  heartbeatIntervalSeconds: 30,
   // When set, the agent requires this bearer token on every request, closing
   // the unauthenticated-RCE exposure to other hosts on the tailnet.
   ...(machine.agentToken ? { token: machine.agentToken } : {}),

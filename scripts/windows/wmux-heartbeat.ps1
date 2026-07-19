@@ -1,12 +1,9 @@
 param(
   [switch]$Once,
-  [int]$IntervalSeconds = 30,
   [string]$StateDir = (Join-Path $HOME '.wmux')
 )
 
 $ErrorActionPreference = 'Stop'
-
-if ($IntervalSeconds -lt 5) { throw 'IntervalSeconds must be at least 5 seconds' }
 
 $WmuxUrl = $env:WMUX_URL
 if (-not $WmuxUrl) {
@@ -28,21 +25,30 @@ if ($Token -match "[\r\n]") { throw 'registration token must not contain a newli
 
 $ConfigFile = if ($env:WMUX_HEARTBEAT_CONFIG) { $env:WMUX_HEARTBEAT_CONFIG } else { Join-Path $StateDir 'heartbeat.json' }
 if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { throw "missing $ConfigFile" }
+$AgentConfigFile = if ($env:WMUX_WINDOWS_AGENT_CONFIG) { $env:WMUX_WINDOWS_AGENT_CONFIG } else { Join-Path $StateDir 'windows-agent.json' }
+if (-not (Test-Path -LiteralPath $AgentConfigFile -PathType Leaf)) { throw "missing $AgentConfigFile" }
 
-while ($true) {
-  $Failed = $false
-  try {
-    $Body = Get-Content -LiteralPath $ConfigFile -Raw
-    Invoke-RestMethod -Method Post -Uri "$WmuxUrl/api/registry/hosts" `
-      -Headers @{ Authorization = "Bearer $Token" } `
-      -ContentType 'application/json' -Body $Body -TimeoutSec 15 | Out-Null
-  } catch {
-    $Failed = $true
-    Write-Warning "wmux-heartbeat: $($_.Exception.Message)"
+$Failed = $false
+try {
+  $Registration = Get-Content -LiteralPath $ConfigFile -Raw | ConvertFrom-Json
+  $AgentConfig = Get-Content -LiteralPath $AgentConfigFile -Raw | ConvertFrom-Json
+  if (-not $Registration.machine) { throw 'heartbeat.json must contain a machine object' }
+  if ($AgentConfig.machine -and [string]$Registration.machine.id -ne [string]$AgentConfig.machine) {
+    throw 'heartbeat machine id does not match windows-agent.json'
   }
-  if ($Once) {
-    if ($Failed) { exit 1 }
-    exit 0
-  }
-  Start-Sleep -Seconds $IntervalSeconds
+  $AgentToken = if ($AgentConfig.token) { [string]$AgentConfig.token } elseif ($env:WMUX_AGENT_TOKEN) { $env:WMUX_AGENT_TOKEN } else { '' }
+  if (-not $AgentToken) { throw 'windows-agent.json is missing the agent token' }
+  $AgentPort = if ($AgentConfig.port) { [int]$AgentConfig.port } else { 3481 }
+  $Registration.machine | Add-Member -NotePropertyName sessionBackend -NotePropertyValue 'agent' -Force
+  $Registration.machine | Add-Member -NotePropertyName agentPort -NotePropertyValue $AgentPort -Force
+  $Registration.machine | Add-Member -NotePropertyName agentToken -NotePropertyValue $AgentToken -Force
+  $Body = $Registration | ConvertTo-Json -Depth 20 -Compress
+  Invoke-RestMethod -Method Post -Uri "$WmuxUrl/api/registry/hosts" `
+    -Headers @{ Authorization = "Bearer $Token" } `
+    -ContentType 'application/json' -Body $Body -TimeoutSec 15 | Out-Null
+} catch {
+  $Failed = $true
+  Write-Warning "wmux-heartbeat: $($_.Exception.Message)"
 }
+if ($Failed) { exit 1 }
+exit 0

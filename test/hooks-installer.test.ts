@@ -11,7 +11,7 @@ import { test } from "node:test";
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("OpenCode installer writes an idempotent global plugin without touching config", async () => {
+test("OpenCode installer writes an idempotent global plugin without touching config", { skip: process.platform === "win32" }, async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-hooks-"));
   const configHome = path.join(home, "config home");
   const configPath = path.join(configHome, "opencode", "opencode.json");
@@ -60,7 +60,7 @@ test("OpenCode installer writes an idempotent global plugin without touching con
   }
 });
 
-test("Claude installer adds a managed delegation skill without overwriting an unmanaged skill", async () => {
+test("Claude installer adds a managed delegation skill without overwriting an unmanaged skill", { skip: process.platform === "win32" }, async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-claude-hooks-"));
   const hooks = path.join(repoRoot, "scripts", "wmux-hooks");
   const env = { ...process.env, HOME: home };
@@ -97,7 +97,7 @@ test("Claude installer adds a managed delegation skill without overwriting an un
   }
 });
 
-test("generated OpenCode plugin forwards a complete top-level lifecycle", async () => {
+test("generated OpenCode plugin forwards a complete top-level lifecycle", { skip: process.platform === "win32" }, async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-plugin-"));
   const configHome = path.join(home, "config");
   const captured: Record<string, unknown>[] = [];

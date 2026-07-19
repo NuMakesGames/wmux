@@ -57,6 +57,18 @@ interface AgentOutputResponse {
   cwd?: string;
 }
 
+export interface WindowsAgentHeartbeatHealth {
+  owner?: boolean;
+  enabled?: boolean;
+  configured?: boolean;
+  intervalSeconds?: number;
+  lastAttemptAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastFailureAt?: string | null;
+  consecutiveFailures?: number;
+  lastError?: string | null;
+}
+
 export interface WindowsAgentHealth {
   ok?: boolean;
   releaseVersion?: string;
@@ -76,6 +88,7 @@ export interface WindowsAgentHealth {
   conptyAvailable?: boolean;
   pywinptyAvailable?: boolean;
   capabilities?: string[];
+  heartbeat?: WindowsAgentHeartbeatHealth;
 }
 
 export type WindowsAgentUpdateActivator = (machine: MachineConfig, port?: number) => Promise<number | void>;

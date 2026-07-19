@@ -59,9 +59,10 @@ five seconds; limits are 256 records, 32 records per observed address, and 16
 KiB of serialized metadata per record. Host files are
 `~/.wmux/url`, `~/.wmux/registration-token`, and
 `~/.wmux/heartbeat.json`. Validate with `wmux-heartbeat --once`; install the
-POSIX timer with `scripts/install-heartbeat-service.sh` or the Windows logon
-task with `wmux-windows-setup install-heartbeat`. Registration token transfer
-is always a separate manual provisioning step.
+POSIX timer with `scripts/install-heartbeat-service.sh`. On Windows, provision
+the same files and run `wmux-windows-setup install-agent`; the base agent owns
+the heartbeat and retires the legacy standalone task. Registration token
+transfer is always a separate manual provisioning step.
 
 Registered panes stage helper commands but do not receive the broad
 `WMUX_TOKEN` and do not overwrite a remote `~/.wmux/token`. Dynamic Windows
@@ -230,8 +231,6 @@ Windows helper setup commands from a fresh wmux pane:
 wmux-windows-setup validate
 wmux-windows-setup persist-path
 wmux-windows-setup install-deps
-wmux-windows-setup install-heartbeat
-wmux-windows-setup heartbeat-status
 wmux-windows-setup install-stream
 wmux-windows-setup stream-status
 wmux-windows-setup install-agent

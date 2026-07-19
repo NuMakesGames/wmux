@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const posixTest = process.platform === "win32" ? test.skip : test;
 
 const waitFor = async (predicate: () => boolean, timeoutMs: number, detail: string) => {
   const deadline = Date.now() + timeoutMs;
@@ -17,7 +18,7 @@ const waitFor = async (predicate: () => boolean, timeoutMs: number, detail: stri
   assert.fail(detail);
 };
 
-test("wmux-opencode-run uses argv/stdin and emits opaque markers", async () => {
+posixTest("wmux-opencode-run uses argv/stdin and emits opaque markers", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-run-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -50,7 +51,7 @@ test("wmux-opencode-run uses argv/stdin and emits opaque markers", async () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("wmux-opencode-run captures nested JSONL errors and enforces the 128 KiB prompt contract", () => {
+posixTest("wmux-opencode-run captures nested JSONL errors and enforces the 128 KiB prompt contract", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-error-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -78,7 +79,7 @@ test("wmux-opencode-run captures nested JSONL errors and enforces the 128 KiB pr
   }
 });
 
-test("wmux-opencode-run selects the advertised long auto-approval flag and fails closed when unsupported", () => {
+posixTest("wmux-opencode-run selects the advertised long auto-approval flag and fails closed when unsupported", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-auto-probe-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);
@@ -127,7 +128,7 @@ print(json.dumps({'type':'text','part':{'text':'done'}}))
   }
 });
 
-test("wmux-opencode-run forwards SIGTERM and reaps a resistant OpenCode child", async () => {
+posixTest("wmux-opencode-run forwards SIGTERM and reaps a resistant OpenCode child", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-opencode-sigterm-"));
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin);

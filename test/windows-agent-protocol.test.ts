@@ -41,6 +41,113 @@ test("Windows agent URLs bracket IPv6 callback addresses", () => {
   assert.equal(windowsAgentUrl(machine), "http://[fd7a:115c:a1e0::8]:3481");
 });
 
+test("Windows agent heartbeat advertises its live callback credentials", () => {
+  const source = String.raw`
+import json
+import os
+import runpy
+import tempfile
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+for name in ("WMUX_URL", "WMUX_REGISTRATION_TOKEN", "WMUX_HEARTBEAT_CONFIG", "WMUX_STATE_DIR", "WMUX_AGENT_TOKEN"):
+    os.environ.pop(name, None)
+captured = {}
+
+class FakeResponse:
+    status = 204
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self, limit):
+        return b""
+
+def fake_urlopen(request, timeout):
+    captured["url"] = request.full_url
+    captured["headers"] = dict(request.header_items())
+    captured["body"] = json.loads(request.data.decode("utf-8"))
+    captured["timeout"] = timeout
+    return FakeResponse()
+
+module["RegistrationHeartbeat"].send_once.__globals__["urlopen"] = fake_urlopen
+with tempfile.TemporaryDirectory() as state_dir:
+    config_path = os.path.join(state_dir, "windows-agent.json")
+    with open(config_path, "w", encoding="utf-8") as handle:
+        json.dump({}, handle)
+    with open(os.path.join(state_dir, "url"), "w", encoding="utf-8") as handle:
+        handle.write("https://wmux.internal.example/\n")
+    with open(os.path.join(state_dir, "registration-token"), "w", encoding="utf-8") as handle:
+        handle.write("catalog-token\n")
+    with open(os.path.join(state_dir, "heartbeat.json"), "w", encoding="utf-8") as handle:
+        json.dump({
+            "machine": {
+                "id": "winbox",
+                "name": "Windows Box",
+                "kind": "powershell-ssh",
+                "user": "operator",
+                "sessionBackend": "auto",
+                "agentPort": 9999,
+                "agentToken": "stale-agent-token",
+            },
+            "ttlMs": 90000,
+        }, handle)
+    heartbeat = module["RegistrationHeartbeat"](
+        {"machine": "winbox", "token": "live-agent-token", "heartbeatIntervalSeconds": 12},
+        config_path,
+        3481,
+    )
+    ok = heartbeat.send_once()
+    snapshot = heartbeat.snapshot()
+
+print(json.dumps({"ok": ok, "captured": captured, "snapshot": snapshot}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.captured.url, "https://wmux.internal.example/api/registry/hosts");
+  assert.equal(payload.captured.headers.Authorization, "Bearer catalog-token");
+  assert.equal(payload.captured.headers["Content-type"], "application/json");
+  assert.equal(payload.captured.timeout, 15);
+  assert.equal(payload.captured.body.machine.sessionBackend, "agent");
+  assert.equal(payload.captured.body.machine.agentPort, 3481);
+  assert.equal(payload.captured.body.machine.agentToken, "live-agent-token");
+  assert.equal(payload.snapshot.enabled, true);
+  assert.equal(payload.snapshot.configured, true);
+  assert.equal(payload.snapshot.intervalSeconds, 12);
+  assert.ok(payload.snapshot.lastSuccessAt);
+  assert.equal(payload.snapshot.lastError, null);
+  assert.equal(JSON.stringify(payload.snapshot).includes("catalog-token"), false);
+  assert.equal(JSON.stringify(payload.snapshot).includes("live-agent-token"), false);
+});
+
+test("Windows agent heartbeat stays optional until registration files are provisioned", () => {
+  const source = String.raw`
+import json
+import os
+import runpy
+import tempfile
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+for name in ("WMUX_URL", "WMUX_REGISTRATION_TOKEN", "WMUX_HEARTBEAT_CONFIG", "WMUX_STATE_DIR", "WMUX_AGENT_TOKEN"):
+    os.environ.pop(name, None)
+with tempfile.TemporaryDirectory() as state_dir:
+    config_path = os.path.join(state_dir, "windows-agent.json")
+    heartbeat = module["RegistrationHeartbeat"]({"machine": "winbox", "token": "agent-token"}, config_path, 3481)
+    ok = heartbeat.send_once()
+    snapshot = heartbeat.snapshot()
+print(json.dumps({"ok": ok, "snapshot": snapshot}))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.snapshot.enabled, true);
+  assert.equal(payload.snapshot.configured, false);
+  assert.match(payload.snapshot.lastError, /url, registration-token, heartbeat\.json/);
+  assert.equal(payload.snapshot.consecutiveFailures, 0);
+});
+
 test("Windows agent recognizes fixed terminal queries across output chunks", () => {
   const source = String.raw`
 import json
@@ -218,7 +325,7 @@ with tempfile.TemporaryDirectory() as root:
   const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
-    mode: "0o600",
+    mode: process.platform === "win32" ? "0o666" : "0o600",
     swept: true,
     kept: true,
     paneCleaned: true,
@@ -295,7 +402,7 @@ with tempfile.TemporaryDirectory() as root:
   assert.deepEqual(JSON.parse(result.stdout), {
     unauthorized: 401,
     accepted: 201,
-    capabilities: ["paste-images-v1"],
+    capabilities: ["paste-images-v1", "registration-heartbeat-v1"],
     protocol: 5,
     deleted: true,
     remains: false,
@@ -317,6 +424,7 @@ with tempfile.TemporaryDirectory() as root:
     home = os.path.join(root, "home")
     os.makedirs(home)
     os.environ["HOME"] = home
+    os.environ["USERPROFILE"] = home
     payload = {"helperBundle": {"bundleVersion": "bundle123", "files": [{
         "name": "wmux-test.ps1",
         "dataBase64": base64.b64encode(data).decode("ascii"),
@@ -344,7 +452,7 @@ with tempfile.TemporaryDirectory() as root:
     version: "bundle123",
     callbackUrl: "http://current-wmux:3478",
     callbackToken: "current-token",
-    tokenMode: "0o600",
+    tokenMode: process.platform === "win32" ? "0o666" : "0o600",
   });
 });
 
@@ -358,6 +466,7 @@ import tempfile
 module = runpy.run_path("scripts/wmux-windows-agent")
 with tempfile.TemporaryDirectory() as home:
     os.environ["HOME"] = home
+    os.environ["USERPROFILE"] = home
     module["stage_helper_bundle"]({}, {"env": {
         "WMUX_URL": "http://reattached-wmux:3478",
         "WMUX_TOKEN": "rotated-token",

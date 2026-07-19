@@ -10,6 +10,15 @@ import { test } from "node:test";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const agentEventScript = path.join(repoRoot, "scripts", "wmux-agent-event");
+const agentEventEnv = (home: string, values: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+  ...process.env,
+  HOME: home,
+  USERPROFILE: home,
+  ...values,
+});
+const runAgentEvent = (args: string[], env: NodeJS.ProcessEnv) =>
+  execFileAsync("python3", [agentEventScript, ...args], { env });
 
 const resolveHelperUrl = (env: Record<string, string>, persistedUrl?: string): string => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-event-url-"));
@@ -18,7 +27,7 @@ const resolveHelperUrl = (env: Record<string, string>, persistedUrl?: string): s
       fs.mkdirSync(path.join(home, ".wmux"));
       fs.writeFileSync(path.join(home, ".wmux", "url"), `${persistedUrl}\n`);
     }
-    const childEnv = { ...process.env, ...env, HOME: home };
+    const childEnv = agentEventEnv(home, env);
     delete childEnv.WMUX_HELPER_URL;
     delete childEnv.WMUX_PUBLIC_URL;
     delete childEnv.WMUX_URL;
@@ -57,9 +66,10 @@ test("agent event helper prefers the refreshed token file over a stale environme
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    const invoke = () => execFileAsync(path.join(repoRoot, "scripts", "wmux-agent-event"), ["--url", `http://127.0.0.1:${address.port}`, "--pane", "pane-1", "--force"], {
-      env: { ...process.env, HOME: home, WMUX_TOKEN: "stale-token" },
-    });
+    const invoke = () => runAgentEvent(
+      ["--url", `http://127.0.0.1:${address.port}`, "--pane", "pane-1", "--force"],
+      agentEventEnv(home, { WMUX_TOKEN: "stale-token" }),
+    );
     await invoke();
     fs.rmSync(path.join(home, ".wmux", "token"));
     await invoke();
@@ -109,7 +119,7 @@ test("agent event helper sends the full assistant response as structured JSON", 
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    await execFileAsync(path.join(repoRoot, "scripts", "wmux-agent-event"), [
+    await runAgentEvent([
       "--url",
       `http://127.0.0.1:${address.port}`,
       "--agent",
@@ -119,16 +129,12 @@ test("agent event helper sends the full assistant response as structured JSON", 
       "--transcript",
       transcriptPath,
       "--force",
-    ], {
-      env: {
-        ...process.env,
-        HOME: dir,
+    ], agentEventEnv(dir, {
         WMUX_TOKEN: "",
         WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
         WMUX_HELPER_URL: "http://127.0.0.1:1",
         WMUX_URL: "http://127.0.0.1:1",
-      },
-    });
+    }));
 
     assert.equal(captured?.title, "fix mobile chat");
     assert.equal(captured?.summary, "First line of the response.");
@@ -164,13 +170,9 @@ test("agent start hooks never replay the previous assistant response", async () 
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    await execFileAsync(
-      path.join(repoRoot, "scripts", "wmux-agent-event"),
+    await runAgentEvent(
       ["--url", `http://127.0.0.1:${address.port}`, "--agent", "codex", "--codex-hook", "--pane", "pane-1", "--force"],
-      {
-        env: {
-          ...process.env,
-          HOME: dir,
+      agentEventEnv(dir, {
           WMUX_TOKEN: "",
           WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
           HOOK_INPUT: JSON.stringify({
@@ -179,8 +181,7 @@ test("agent start hooks never replay the previous assistant response", async () 
             transcript_path: transcriptPath,
             last_assistant_message: "response from the prior turn",
           }),
-        },
-      },
+      }),
     );
     assert.equal(captured?.status, "running");
     assert.equal(captured?.title, "new mobile prompt");
@@ -215,11 +216,13 @@ test("OpenCode hooks report running, waiting, failed, and completed lifecycles",
       { hook_event_name: "Error", prompt: "fix OpenCode hooks" },
       { hook_event_name: "Stop", prompt: "fix OpenCode hooks", last_assistant_message: "Done." },
     ]) {
-      await execFileAsync(path.join(repoRoot, "scripts", "wmux-agent-event"), [
+      await runAgentEvent([
         "--url", `http://127.0.0.1:${address.port}`, "--agent", "opencode", "--opencode-hook", "--pane", "pane-1",
-      ], {
-        env: { ...process.env, HOME: dir, WMUX_TOKEN: "", WMUX_TOKEN_PATH: path.join(dir, "missing-token"), HOOK_INPUT: JSON.stringify(input) },
-      });
+      ], agentEventEnv(dir, {
+        WMUX_TOKEN: "",
+        WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
+        HOOK_INPUT: JSON.stringify(input),
+      }));
     }
     assert.deepEqual(captured.map(({ status, summary, message }) => ({ status, summary, message })), [
       { status: "running", summary: "opencode running", message: undefined },
@@ -239,20 +242,15 @@ test("agent harness hooks silently return without wmux pane context", async () =
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-hook-context-"));
   try {
     for (const agent of ["claude", "codex", "opencode"]) {
-      const { stdout, stderr } = await execFileAsync(
-        path.join(repoRoot, "scripts", "wmux-agent-event"),
+      const { stdout, stderr } = await runAgentEvent(
         ["--agent", agent, `--${agent}-hook`],
-        {
-          env: {
-            ...process.env,
-            HOME: dir,
+        agentEventEnv(dir, {
             WMUX_TOKEN: "",
             WMUX_TOKEN_PATH: path.join(dir, "missing-token"),
             WMUX_PANE_ID: "",
             WMUX_WORKSPACE_ID: "",
             HOOK_INPUT: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "no context" }),
-          },
-        },
+        }),
       );
       assert.equal(stdout, "");
       assert.equal(stderr, "");

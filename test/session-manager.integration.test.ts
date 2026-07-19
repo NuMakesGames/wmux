@@ -347,7 +347,7 @@ test("server recognizes terminal replies from stale browser clients", () => {
   assert.equal(isTerminalProtocolResponseInput("\x1b[A"), false);
 });
 
-test("multi-client PTY attach broadcasts output, replays, and removes cleanly", async () => {
+test("multi-client PTY attach broadcasts output, replays, and removes cleanly", { skip: process.platform === "win32" }, async () => {
   const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
   await withState(machine, async (state) => {
     const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
@@ -381,7 +381,7 @@ test("multi-client PTY attach broadcasts output, replays, and removes cleanly", 
   });
 });
 
-test("foreground activation cannot steal resize ownership without input", async () => {
+test("foreground activation cannot steal resize ownership without input", { skip: process.platform === "win32" }, async () => {
   const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
   await withState(machine, async (state) => {
     const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
@@ -419,7 +419,7 @@ test("foreground activation cannot steal resize ownership without input", async 
   });
 });
 
-test("late attach receives an authoritative checkpoint for a full-screen PTY", async () => {
+test("late attach receives an authoritative checkpoint for a full-screen PTY", { skip: process.platform === "win32" }, async () => {
   const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
   await withState(machine, async (state) => {
     const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
@@ -453,7 +453,7 @@ test("late attach receives an authoritative checkpoint for a full-screen PTY", a
 
 test(
   "tmux pane survives manager disposal and explicit close kills its durable session",
-  { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 },
+  { skip: process.platform === "win32" || spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 },
   async () => {
     const machine: MachineConfig = { id: "local", name: "Local", kind: "local", shell: "/bin/sh", sessionBackend: "tmux" };
     await withState(machine, async (state) => {

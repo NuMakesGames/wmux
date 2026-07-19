@@ -5,9 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { readAgentProfileBundle, resolveAgentProfilePath } from "../src/server/agent-profile.js";
 
 const helper = path.resolve("scripts/wmux-agent-profile");
+const profilePlatform = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux";
 const temporary: string[] = [];
 const originalProfilePath = process.env.WMUX_AGENT_PROFILE_PATH;
 
@@ -58,15 +60,15 @@ test("plan is read-only and apply preserves unmanaged text", () => {
   writeProfile(profile);
   fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
   fs.writeFileSync(path.join(home, ".codex", "AGENTS.md"), "local instruction\n");
-  const env = { ...process.env, HOME: home, WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json") };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json") };
 
-  const plan = spawnSync(helper, ["plan", "--profile", profile, "--json"], { encoding: "utf8", env });
+  const plan = spawnSync("python3", [helper, "plan", "--profile", profile, "--json"], { encoding: "utf8", env });
   assert.equal(plan.status, 0, plan.stderr);
   assert.equal(fs.readFileSync(path.join(home, ".codex", "AGENTS.md"), "utf8"), "local instruction\n");
   assert.equal(fs.existsSync(path.join(home, "state.json")), false);
   assert.equal(fs.existsSync(path.join(home, ".wmux", "logs", "agent-profile.log")), false);
 
-  const apply = spawnSync(helper, ["apply", "--profile", profile, "--json"], { encoding: "utf8", env });
+  const apply = spawnSync("python3", [helper, "apply", "--profile", profile, "--json"], { encoding: "utf8", env });
   assert.equal(apply.status, 0, apply.stderr);
   const instructions = fs.readFileSync(path.join(home, ".codex", "AGENTS.md"), "utf8");
   assert.match(instructions, /^local instruction/m);
@@ -81,12 +83,12 @@ test("apply refuses a locally changed profile-owned file", () => {
   const profile = tempDir();
   const home = tempDir();
   writeProfile(profile);
-  const env = { ...process.env, HOME: home, WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json") };
-  assert.equal(spawnSync(helper, ["apply", "--profile", profile], { env }).status, 0);
+  const env = { ...process.env, HOME: home, USERPROFILE: home, WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json") };
+  assert.equal(spawnSync("python3", [helper, "apply", "--profile", profile], { env }).status, 0);
   const skill = path.join(home, ".agents", "skills", "portable", "SKILL.md");
   fs.writeFileSync(skill, "local edit\n");
   fs.writeFileSync(path.join(profile, "skills", "portable", "SKILL.md"), "profile update\n");
-  const result = spawnSync(helper, ["apply", "--profile", profile, "--json"], { encoding: "utf8", env });
+  const result = spawnSync("python3", [helper, "apply", "--profile", profile, "--json"], { encoding: "utf8", env });
   assert.equal(result.status, 1);
   assert.match(result.stdout, /conflict/);
   assert.equal(fs.readFileSync(skill, "utf8"), "local edit\n");
@@ -100,13 +102,13 @@ test("items with missing tool prerequisites are visible and not applied", () => 
   manifest.tools = [{
     id: "definitely-missing",
     command: "wmux-test-tool-that-does-not-exist",
-    platforms: [process.platform === "darwin" ? "darwin" : "linux"],
+    platforms: [profilePlatform],
   }];
   manifest.managedText[0].requires = ["definitely-missing"];
   fs.writeFileSync(path.join(profile, "profile.json"), JSON.stringify(manifest));
-  const env = { ...process.env, HOME: home, WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json") };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json") };
 
-  const result = spawnSync(helper, ["apply", "--profile", profile, "--json"], { encoding: "utf8", env });
+  const result = spawnSync("python3", [helper, "apply", "--profile", profile, "--json"], { encoding: "utf8", env });
   assert.equal(result.status, 1, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.ok(payload.results.some((item: { action: string; detail: string }) =>
@@ -114,7 +116,7 @@ test("items with missing tool prerequisites are visible and not applied", () => 
   assert.equal(fs.existsSync(path.join(home, ".codex", "AGENTS.md")), false);
 });
 
-test("bootstrap verifies a pinned artifact before enabling dependent items", () => {
+test("bootstrap verifies a pinned artifact before enabling dependent items", { skip: process.platform === "win32" }, () => {
   const profile = tempDir();
   const home = tempDir();
   writeProfile(profile);
@@ -122,7 +124,7 @@ test("bootstrap verifies a pinned artifact before enabling dependent items", () 
   const toolBytes = Buffer.from("#!/bin/sh\necho 'fake 1.0.0'\n");
   fs.writeFileSync(artifact, toolBytes);
   const manifest = JSON.parse(fs.readFileSync(path.join(profile, "profile.json"), "utf8"));
-  const platformName = process.platform === "darwin" ? "darwin" : "linux";
+  const platformName = profilePlatform;
   const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
   manifest.tools = [{
     id: "fake",
@@ -132,7 +134,7 @@ test("bootstrap verifies a pinned artifact before enabling dependent items", () 
     platforms: [platformName],
     artifacts: {
       [`${platformName}-${architecture}`]: {
-        url: `file://${artifact}`,
+        url: pathToFileURL(artifact).href,
         sha256: crypto.createHash("sha256").update(toolBytes).digest("hex"),
         format: "raw",
       },
@@ -143,17 +145,18 @@ test("bootstrap verifies a pinned artifact before enabling dependent items", () 
   const env = {
     ...process.env,
     HOME: home,
+    USERPROFILE: home,
     WMUX_AGENT_PROFILE_ALLOW_FILE_URL: "1",
     WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json"),
   };
 
-  const bootstrap = spawnSync(helper, ["bootstrap", "--tool", "fake", "--profile", profile, "--json"], {
+  const bootstrap = spawnSync("python3", [helper, "bootstrap", "--tool", "fake", "--profile", profile, "--json"], {
     encoding: "utf8",
     env,
   });
   assert.equal(bootstrap.status, 0, bootstrap.stderr);
   assert.equal(fs.statSync(path.join(home, ".local", "bin", "fake")).mode & 0o777, 0o755);
-  const apply = spawnSync(helper, ["apply", "--profile", profile, "--json"], { encoding: "utf8", env });
+  const apply = spawnSync("python3", [helper, "apply", "--profile", profile, "--json"], { encoding: "utf8", env });
   assert.equal(apply.status, 0, apply.stderr);
   assert.match(fs.readFileSync(path.join(home, ".codex", "AGENTS.md"), "utf8"), /Prefer the robust solution/);
   const state = JSON.parse(fs.readFileSync(path.join(home, "state.json"), "utf8"));
@@ -167,7 +170,7 @@ test("bootstrap refuses an artifact whose checksum changed", () => {
   const artifact = path.join(profile, "fake-tool");
   fs.writeFileSync(artifact, "unexpected bytes");
   const manifest = JSON.parse(fs.readFileSync(path.join(profile, "profile.json"), "utf8"));
-  const platformName = process.platform === "darwin" ? "darwin" : "linux";
+  const platformName = profilePlatform;
   const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
   manifest.tools = [{
     id: "fake",
@@ -175,17 +178,18 @@ test("bootstrap refuses an artifact whose checksum changed", () => {
     installTarget: "~/.local/bin/fake",
     platforms: [platformName],
     artifacts: {
-      [`${platformName}-${architecture}`]: { url: `file://${artifact}`, sha256: "0".repeat(64), format: "raw" },
+      [`${platformName}-${architecture}`]: { url: pathToFileURL(artifact).href, sha256: "0".repeat(64), format: "raw" },
     },
   }];
   fs.writeFileSync(path.join(profile, "profile.json"), JSON.stringify(manifest));
   const env = {
     ...process.env,
     HOME: home,
+    USERPROFILE: home,
     WMUX_AGENT_PROFILE_ALLOW_FILE_URL: "1",
     WMUX_AGENT_PROFILE_STATE_PATH: path.join(home, "state.json"),
   };
-  const result = spawnSync(helper, ["bootstrap", "--tool", "fake", "--profile", profile], { encoding: "utf8", env });
+  const result = spawnSync("python3", [helper, "bootstrap", "--tool", "fake", "--profile", profile], { encoding: "utf8", env });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /artifact hash mismatch/);
   assert.equal(fs.existsSync(path.join(home, ".local", "bin", "fake")), false);
@@ -205,7 +209,7 @@ test("add-skill validates content, records provenance, and requires explicit rep
     "",
   ].join("\n"));
 
-  const added = spawnSync(helper, ["add-skill", source, "--profile", profile, "--license", "MIT", "--source-url", "https://example.com/skills.git", "--source-ref", "abc123", "--json"], { encoding: "utf8" });
+  const added = spawnSync("python3", [helper, "add-skill", source, "--profile", profile, "--license", "MIT", "--source-url", "https://example.com/skills.git", "--source-ref", "abc123", "--json"], { encoding: "utf8" });
   assert.equal(added.status, 0, added.stderr);
   assert.equal(JSON.parse(added.stdout).action, "create");
   assert.equal(fs.existsSync(path.join(profile, "skills", "sample-skill", "SKILL.md")), true);
@@ -214,12 +218,12 @@ test("add-skill validates content, records provenance, and requires explicit rep
   assert.equal(lock.skills["sample-skill"].source, "https://example.com/skills.git");
 
   fs.appendFileSync(path.join(source, "SKILL.md"), "Updated.\n");
-  const conflict = spawnSync(helper, ["add-skill", source, "--profile", profile, "--license", "MIT"], { encoding: "utf8" });
+  const conflict = spawnSync("python3", [helper, "add-skill", source, "--profile", profile, "--license", "MIT"], { encoding: "utf8" });
   assert.equal(conflict.status, 2);
   assert.match(conflict.stderr, /use --replace after review/);
   assert.doesNotMatch(fs.readFileSync(path.join(profile, "skills", "sample-skill", "SKILL.md"), "utf8"), /Updated/);
 
-  const replaced = spawnSync(helper, ["add-skill", source, "--profile", profile, "--license", "MIT", "--replace", "--json"], { encoding: "utf8" });
+  const replaced = spawnSync("python3", [helper, "add-skill", source, "--profile", profile, "--license", "MIT", "--replace", "--json"], { encoding: "utf8" });
   assert.equal(replaced.status, 0, replaced.stderr);
   assert.equal(JSON.parse(replaced.stdout).action, "update");
   assert.match(fs.readFileSync(path.join(profile, "skills", "sample-skill", "SKILL.md"), "utf8"), /Updated/);
@@ -231,7 +235,7 @@ test("add-skill rejects common secret material", () => {
   writeProfile(profile);
   fs.writeFileSync(path.join(source, "SKILL.md"), "---\nname: unsafe-skill\ndescription: Unsafe fixture.\n---\n");
   fs.writeFileSync(path.join(source, ".env"), "TOKEN=secret\n");
-  const result = spawnSync(helper, ["add-skill", source, "--profile", profile], { encoding: "utf8" });
+  const result = spawnSync("python3", [helper, "add-skill", source, "--profile", profile], { encoding: "utf8" });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /sensitive file name/);
   assert.equal(fs.existsSync(path.join(profile, "skills", "unsafe-skill")), false);
@@ -244,10 +248,11 @@ test("status remains useful when the server profile cannot be fetched", () => {
   const env = {
     ...process.env,
     HOME: home,
+    USERPROFILE: home,
     WMUX_AGENT_PROFILE_STATE_PATH: statePath,
     WMUX_URL: "http://127.0.0.1:1",
   };
-  const result = spawnSync(helper, ["status", "--json"], { encoding: "utf8", env });
+  const result = spawnSync("python3", [helper, "status", "--json"], { encoding: "utf8", env });
   assert.equal(result.status, 2);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.state.lastProfile, "offline-profile");
