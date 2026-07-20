@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { selectAttachReplay, TerminalCheckpoint } from "../src/server/terminal-checkpoint.js";
+import { terminalThemeEnvironment } from "../src/server/terminal-theme.js";
+
+test("checkpoint snapshots preserve the selected terminal defaults and ANSI palette", () => {
+  const checkpoint = new TerminalCheckpoint(12, 2, terminalThemeEnvironment("tokyo-night"));
+  try {
+    checkpoint.write("default \x1b[31mred\x1b[39;49m");
+    const snapshot = checkpoint.snapshot();
+    assert.match(snapshot, /38;2;192;202;245;48;2;26;27;38/);
+    assert.match(snapshot, /38;2;247;118;142;48;2;26;27;38/);
+    assert.doesNotMatch(snapshot, /48;2;0;0;0/);
+
+    checkpoint.reframe(12, 4);
+    assert.doesNotMatch(checkpoint.snapshot(), /48;2;0;0;0/);
+  } finally {
+    checkpoint.dispose();
+  }
+});
 
 test("terminal checkpoints round-trip an alternate-screen viewport and cursor", () => {
   const source = new TerminalCheckpoint(16, 5);

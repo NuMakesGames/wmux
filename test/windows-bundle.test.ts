@@ -148,15 +148,37 @@ test("bootstrap URL carries terminal theme metadata into PowerShell", () => {
   const url = new URL(buildWindowsPowerShellBootstrapUrl(machine, undefined, {
     WMUX_COLOR_SCHEME: "tokyo-night",
     WMUX_COLOR_MODE: "dark",
+    WMUX_TERMINAL_FOREGROUND: "#c0caf5",
+    WMUX_TERMINAL_BACKGROUND: "#1a1b26",
+    WMUX_TERMINAL_ANSI_PALETTE: "#15161e,#f7768e",
   }));
   assert.equal(url.searchParams.get("WMUX_COLOR_SCHEME"), "tokyo-night");
   assert.equal(url.searchParams.get("WMUX_COLOR_MODE"), "dark");
+  assert.equal(url.searchParams.get("WMUX_TERMINAL_FOREGROUND"), "#c0caf5");
+  assert.equal(url.searchParams.get("WMUX_TERMINAL_BACKGROUND"), "#1a1b26");
+  assert.equal(url.searchParams.get("WMUX_TERMINAL_ANSI_PALETTE"), "#15161e,#f7768e");
   const script = buildWindowsPowerShellBootstrap(machine, undefined, {
     WMUX_COLOR_SCHEME: "tokyo-night",
     WMUX_COLOR_MODE: "dark",
+    WMUX_TERMINAL_FOREGROUND: "#c0caf5",
+    WMUX_TERMINAL_BACKGROUND: "#1a1b26",
+    WMUX_TERMINAL_ANSI_PALETTE: "#15161e,#f7768e",
   });
   assert.match(script, /\$env:WMUX_COLOR_SCHEME = 'tokyo-night'/);
   assert.match(script, /\$env:WMUX_COLOR_MODE = 'dark'/);
+  assert.match(script, /wmux-console-theme\.ps1/);
+});
+
+test("Windows console theme helper applies the pane-local ConPTY color table", () => {
+  const bundle = buildWindowsHelperBundle(machine);
+  const helper = bundle.files.find((file) => file.name === "wmux-console-theme.ps1");
+  assert.ok(helper, "bundle includes wmux-console-theme.ps1");
+  const content = Buffer.from(helper.dataBase64, "base64").toString("utf8");
+  assert.match(content, /GetConsoleScreenBufferInfoEx/);
+  assert.match(content, /SetConsoleScreenBufferInfoEx/);
+  assert.match(content, /\$AnsiForWindows = @\(0, 4, 2, 6, 1, 5, 3, 7, 8, 12, 10, 14, 9, 13, 11, 15\)/);
+  assert.match(content, /\$Colors\[0\] = __wmuxColorRef \$env:WMUX_TERMINAL_BACKGROUND/);
+  assert.match(content, /\$Colors\[7\] = __wmuxColorRef \$env:WMUX_TERMINAL_FOREGROUND/);
 });
 
 test("Windows bootstrap stages the helper callback URL ahead of the public URL", () => {

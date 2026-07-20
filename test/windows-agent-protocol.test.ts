@@ -280,6 +280,31 @@ with tempfile.TemporaryDirectory() as root:
   assert.equal(result.stdout.trim(), "abc123");
 });
 
+test("Windows agent keeps its startup bundle identity after replacement files are staged", () => {
+  const source = String.raw`
+import json
+import os
+import runpy
+import tempfile
+
+module = runpy.run_path("scripts/wmux-windows-agent")
+with tempfile.TemporaryDirectory() as root:
+    version_path = os.path.join(root, "bundle-version.json")
+    with open(version_path, "w", encoding="utf-8") as handle:
+        json.dump({"bundleVersion": "running"}, handle)
+    state = module["AgentState"]({"helperDir": root})
+    with open(version_path, "w", encoding="utf-8") as handle:
+        json.dump({"bundleVersion": "staged"}, handle)
+    print(json.dumps({
+        "running": state.helper_bundle_version,
+        "files": module["helper_bundle_version"]({"helperDir": root}),
+    }))
+`;
+  const result = spawnSync("python3", ["-c", source], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { running: "running", files: "staged" });
+});
+
 test("Windows agent stages private validated paste images and sweeps only generated files", () => {
   const source = String.raw`
 import json

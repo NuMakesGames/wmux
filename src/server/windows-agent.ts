@@ -239,7 +239,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     private readonly activateUpdate: WindowsAgentUpdateActivator = activateWindowsAgentUpdate,
   ) {
     super();
-    this.checkpoint = new TerminalCheckpoint(cols, rows);
+    this.checkpoint = new TerminalCheckpoint(cols, rows, extraEnv);
     this.attachReady = new Promise((resolve) => {
       this.resolveAttachReady = resolve;
     });
@@ -402,7 +402,22 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     const releaseCurrent = actualRelease === expectedRelease;
     const protocolCurrent = actualProtocol >= expectedProtocol;
     const helpersCurrent = health.helperBundleVersion === helperBundle.bundleVersion;
-    if (!actualRelease || (releaseCurrent && protocolCurrent && helpersCurrent)) return !this.stopped;
+    const existing = sessions.some((session) => session.id === this.pane.id && session.status !== "exited");
+    const activeSessions = health.activeSessions ?? sessions.filter((session) => session.status !== "exited").length;
+    if (!actualRelease) return !this.stopped;
+    if (releaseCurrent && protocolCurrent && helpersCurrent) {
+      // A staged helper bundle used to make an old base process look current.
+      // If a current side-by-side generation already exists, keep established
+      // panes pinned to the base but send new panes to the rollout generation.
+      if (!existing && activeSessions > 0) {
+        const currentGeneration = await this.findCurrentGeneration(helperBundle);
+        if (currentGeneration !== undefined) {
+          this.routeToAgentPort(currentGeneration);
+          this.appendAndEmit(`\r\n[wmux] Current Windows agent generation is ready on port ${currentGeneration}; opening pane.\r\n`);
+        }
+      }
+      return !this.stopped;
+    }
     const actualDisplay = releaseCurrent && !protocolCurrent
       ? `${actualRelease}/protocol ${actualProtocol || "legacy"}`
       : actualRelease;
@@ -410,7 +425,6 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       ? `${expectedRelease}/protocol ${expectedProtocol}`
       : expectedRelease;
 
-    const existing = sessions.some((session) => session.id === this.pane.id && session.status !== "exited");
     if (existing) return !this.stopped;
 
     const supportsDrain =
@@ -418,7 +432,6 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       || legacyAgentSupportsDrain(actualRelease);
     if (!supportsDrain) return !this.stopped;
 
-    const activeSessions = health.activeSessions ?? sessions.filter((session) => session.status !== "exited").length;
     // A legacy update drain blocks every create request. Cancel it before
     // staging or creating this pane; the current service helper will re-arm a
     // compatibility watcher after the new session exists.
@@ -557,16 +570,16 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
     const expectedRelease = expectedWindowsAgentReleaseVersion();
     const expectedProtocol = expectedWindowsAgentProtocolVersion();
     const basePort = this.baseAgentPort();
-    for (let port = basePort + 1; port <= basePort + 8; port += 1) {
-      const health = await this.generationHealth(port);
-      if (
-        health?.ok === true
-        && (health.releaseVersion ?? health.version) === expectedRelease
-        && (health.protocolVersion ?? 0) >= expectedProtocol
-        && health.helperBundleVersion === helperBundle.bundleVersion
-      ) return port;
-    }
-    return undefined;
+    const candidates = await Promise.all(
+      Array.from({ length: 8 }, (_, offset) => basePort + offset + 1)
+        .map(async (port) => ({ port, health: await this.generationHealth(port) })),
+    );
+    return candidates.find(({ health }) =>
+      health?.ok === true
+      && (health.releaseVersion ?? health.version) === expectedRelease
+      && (health.protocolVersion ?? 0) >= expectedProtocol
+      && health.helperBundleVersion === helperBundle.bundleVersion
+    )?.port;
   }
 
   private async selectRolloutPort(): Promise<number> {

@@ -357,7 +357,10 @@ token. wmux is not a hardened multi-user service.
   `WMUX_COLOR_SCHEME` plus `WMUX_COLOR_MODE=dark|light`. Browser terminals
   answer OSC 4/10/11 palette queries from the live scheme, including after a
   settings change. Programs that render explicit RGB colors still own those
-  colors and are not recolored by the terminal palette.
+  colors and are not recolored by the terminal palette. Windows panes also
+  seed their isolated ConPTY color table from the selected scheme. The
+  server-side VT checkpoint uses that same palette, so size-aware Windows
+  replay preserves semantic default colors instead of repainting them black.
 - Pasting a PNG, JPEG, WebP, or GIF into a connected terminal stages a private
   temporary file in that pane's target filesystem and pastes its quoted native
   path. Local, POSIX SSH, PowerShell-over-SSH, and current Windows-agent panes

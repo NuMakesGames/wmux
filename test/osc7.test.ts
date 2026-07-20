@@ -71,3 +71,11 @@ test("windows-helpers serves the canonical snippet verbatim", () => {
   const canonical = fs.readFileSync(path.join(repoRoot, "scripts", "windows", "wmux-cwd-prompt.ps1"), "utf8");
   assert.equal(windowsCwdPromptSnippet(), canonical);
 });
+
+test("canonical console theme helper matches the Windows agent's embedded copy", () => {
+  const canonical = fs.readFileSync(path.join(repoRoot, "scripts", "windows", "wmux-console-theme.ps1"), "utf8");
+  const agentSource = fs.readFileSync(path.join(repoRoot, "scripts", "wmux-windows-agent"), "utf8");
+  const match = agentSource.match(/WINDOWS_CONSOLE_THEME_PS1 = r"""([\s\S]*?)"""/);
+  assert.ok(match, "scripts/wmux-windows-agent must define WINDOWS_CONSOLE_THEME_PS1");
+  assert.equal(match[1], canonical, "agent WINDOWS_CONSOLE_THEME_PS1 drifted from scripts/windows/wmux-console-theme.ps1");
+});

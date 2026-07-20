@@ -306,7 +306,9 @@ test("a new pane cancels a legacy global drain and rolls onto a side-by-side gen
   let drainCancelled = false;
   let staged = false;
   let created = false;
+  let currentCreated = false;
   let updateScheduled = false;
+  let baseAppearsCurrent = false;
   const generationServer = http.createServer((request, response) => {
     const path = request.url ?? "";
     response.setHeader("content-type", "application/json");
@@ -320,12 +322,13 @@ test("a new pane cancels a legacy global drain and rolls onto a side-by-side gen
       }));
       return;
     }
-    if (request.method === "POST" && path === "/sessions/pane_deferred") {
-      created = true;
-      response.end(JSON.stringify({ id: "pane_deferred", pid: 456, base: 0, cursor: 0 }));
+    if (request.method === "POST" && (path === "/sessions/pane_deferred" || path === "/sessions/pane_current")) {
+      if (path.endsWith("pane_deferred")) created = true;
+      else currentCreated = true;
+      response.end(JSON.stringify({ id: path.split("/")[2], pid: 456, base: 0, cursor: 0 }));
       return;
     }
-    if (request.method === "GET" && path.startsWith("/sessions/pane_deferred/output")) {
+    if (request.method === "GET" && /^\/sessions\/pane_(deferred|current)\/output/.test(path)) {
       response.end(JSON.stringify({ base: 0, cursor: 0, dataBase64: "", exited: false }));
       return;
     }
@@ -337,8 +340,9 @@ test("a new pane cancels a legacy global drain and rolls onto a side-by-side gen
     if (request.method === "GET" && path === "/health") {
       response.end(JSON.stringify({
         ok: true,
-        version: "0.7",
-        releaseVersion: "0.7",
+        version: baseAppearsCurrent ? expectedWindowsAgentReleaseVersion() : "0.7",
+        releaseVersion: baseAppearsCurrent ? expectedWindowsAgentReleaseVersion() : "0.7",
+        protocolVersion: baseAppearsCurrent ? expectedWindowsAgentProtocolVersion() : undefined,
         helperBundleVersion,
         activeSessions: 1,
         draining,
@@ -381,6 +385,7 @@ test("a new pane cancels a legacy global drain and rolls onto a side-by-side gen
   const address = server.address();
   assert.ok(address && typeof address === "object");
   let session: WindowsAgentSession | undefined;
+  let currentSession: WindowsAgentSession | undefined;
   try {
     session = new WindowsAgentSession(
       {
@@ -417,8 +422,39 @@ test("a new pane cancels a legacy global drain and rolls onto a side-by-side gen
     assert.equal(created, true);
     assert.match(session.replayOutput, /existing pane\(s\) will remain on their current generation/);
     assert.match(session.replayOutput, /Updated Windows agent generation is ready/);
+
+    // Models the legacy behavior where staging shared files made the still-old
+    // base process report the new release/protocol/bundle identity.
+    baseAppearsCurrent = true;
+    currentSession = new WindowsAgentSession(
+      {
+        id: "pane_current",
+        machineId: "windows",
+        title: "PowerShell",
+        status: "idle",
+        createdAt: new Date(0).toISOString(),
+      },
+      {
+        id: "windows",
+        name: "Windows",
+        kind: "powershell-ssh",
+        host: "127.0.0.1",
+        sessionBackend: "agent",
+        agentUrl: `http://127.0.0.1:${address.port}`,
+      },
+      80,
+      24,
+      {},
+      async () => {
+        throw new Error("a current rollout generation must be reused");
+      },
+    );
+    await currentSession.attachReady;
+    assert.equal(currentCreated, true, currentSession.replayOutput);
+    assert.match(currentSession.replayOutput, /Current Windows agent generation is ready/);
   } finally {
     session?.detach();
+    currentSession?.detach();
     server.closeAllConnections();
     if (generationServer.listening) generationServer.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

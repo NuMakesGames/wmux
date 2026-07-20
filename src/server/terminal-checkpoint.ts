@@ -14,6 +14,13 @@ const excludedPrivateModes = new Set([7, 25, 47, 1047, 1049, 2026]);
 const privateModePattern = /\x1b\[\?([0-9;]+)([hl])/g;
 const modeCarryLimit = 96;
 
+interface CheckpointThemeConfig {
+  fgColor?: number;
+  bgColor?: number;
+  cursorColor?: number;
+  palette?: number[];
+}
+
 let sharedGhostty: Ghostty | null | undefined;
 
 const loadGhostty = (): Ghostty | undefined => {
@@ -48,10 +55,12 @@ export class TerminalCheckpoint {
   private terminal?: GhosttyTerminal;
   private privateModes = new Map<number, boolean>();
   private modeCarry = "";
+  private readonly themeConfig?: CheckpointThemeConfig;
 
-  constructor(cols: number, rows: number) {
+  constructor(cols: number, rows: number, themeEnvironment: Record<string, string> = {}) {
+    this.themeConfig = checkpointThemeConfig(themeEnvironment);
     try {
-      this.terminal = loadGhostty()?.createTerminal(normalizeCols(cols), normalizeRows(rows));
+      this.terminal = loadGhostty()?.createTerminal(normalizeCols(cols), normalizeRows(rows), this.themeConfig);
     } catch (error) {
       console.warn(`wmux: terminal checkpoint initialization failed: ${formatError(error)}`);
     }
@@ -99,7 +108,7 @@ export class TerminalCheckpoint {
     const snapshot = this.snapshot();
     if (!snapshot || !this.terminal) return;
     try {
-      const next = loadGhostty()?.createTerminal(normalizeCols(cols), normalizeRows(rows));
+      const next = loadGhostty()?.createTerminal(normalizeCols(cols), normalizeRows(rows), this.themeConfig);
       if (!next) return;
       this.terminal.free();
       this.terminal = next;
@@ -244,4 +253,23 @@ const cursorStyleSequence = (style: string, blinking: boolean): string => {
 
 const normalizeCols = (value: number): number => Math.max(2, Math.floor(value || 80));
 const normalizeRows = (value: number): number => Math.max(1, Math.floor(value || 24));
+const parseHexColor = (value: string | undefined): number | undefined => {
+  if (!value || !/^#[0-9a-f]{6}$/i.test(value)) return undefined;
+  return Number.parseInt(value.slice(1), 16);
+};
+
+const checkpointThemeConfig = (environment: Record<string, string>): CheckpointThemeConfig | undefined => {
+  const fgColor = parseHexColor(environment.WMUX_TERMINAL_FOREGROUND);
+  const bgColor = parseHexColor(environment.WMUX_TERMINAL_BACKGROUND);
+  const rawPalette = environment.WMUX_TERMINAL_ANSI_PALETTE?.split(",") ?? [];
+  const palette = rawPalette.length === 16 ? rawPalette.map(parseHexColor) : [];
+  if (palette.some((color) => color === undefined)) palette.length = 0;
+  if (fgColor === undefined && bgColor === undefined && palette.length === 0) return undefined;
+  return {
+    ...(fgColor === undefined ? {} : { fgColor, cursorColor: fgColor }),
+    ...(bgColor === undefined ? {} : { bgColor }),
+    ...(palette.length === 0 ? {} : { palette: palette as number[] }),
+  };
+};
+
 const formatError = (error: unknown): string => error instanceof Error ? error.message : String(error);

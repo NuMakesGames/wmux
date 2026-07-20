@@ -39,7 +39,7 @@ export class PtySession extends EventEmitter<PtyEvents> {
     super();
     const spec = buildSpawnSpec(machine, cols, rows, extraEnv);
     this.title = spec.title;
-    this.checkpoint = new TerminalCheckpoint(cols, rows);
+    this.checkpoint = new TerminalCheckpoint(cols, rows, extraEnv);
     const trackProcessTitle = spec.trackProcessTitle ?? true;
     this.pty = spawn(spec.file, spec.args, {
       name: "xterm-256color",

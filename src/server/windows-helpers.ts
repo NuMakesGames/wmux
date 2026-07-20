@@ -15,10 +15,14 @@ const windowsBootstrapEnvKeys = new Set([
   "WMUX_PANE_ID",
   "WMUX_COLOR_SCHEME",
   "WMUX_COLOR_MODE",
+  "WMUX_TERMINAL_FOREGROUND",
+  "WMUX_TERMINAL_BACKGROUND",
+  "WMUX_TERMINAL_ANSI_PALETTE",
   "KITTY_WINDOW_ID",
 ]);
 const windowsRequiredHelperNames = [
   "wmux-agent-event",
+  "wmux-console-theme",
   "wmux-copy",
   "wmux-heartbeat",
   "wmux-hooks",
@@ -248,6 +252,10 @@ function global:__wmuxNormalizeStartCwd([string]$PathValue) {
 }
 
 ${windowsCwdPromptSnippet()}
+$ConsoleThemeHelper = Join-Path $HelperDir 'wmux-console-theme.ps1'
+if (Test-Path -LiteralPath $ConsoleThemeHelper -PathType Leaf) {
+  & $ConsoleThemeHelper
+}
 $AgentProfileHelper = Join-Path $HelperDir 'wmux-agent-profile.cmd'
 if (Test-Path -LiteralPath $AgentProfileHelper -PathType Leaf) {
   & $AgentProfileHelper apply --quiet
