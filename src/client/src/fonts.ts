@@ -3,6 +3,7 @@ import { DEFAULT_TERMINAL_FONT_FAMILY } from "./types";
 
 export const WMUX_MONO_FONT_FAMILY = DEFAULT_TERMINAL_FONT_FAMILY;
 const BUNDLED_MESLO_FONT_FAMILY = "MesloLGM Nerd Font";
+const FONT_LOAD_TIMEOUT_MS = 1800;
 
 export const WMUX_FONT_FEATURE_SETTINGS = '"calt" 1, "liga" 1';
 
@@ -35,7 +36,7 @@ export const ensureWmuxFonts = async (preferred?: string, fontSize = 14): Promis
         document.fonts.load(`600 ${fontSize}px ${family}`),
         document.fonts.load(`700 ${fontSize}px ${family}`),
       ]).then(() => undefined).catch(() => undefined),
-      timeout(1800),
+      timeout(FONT_LOAD_TIMEOUT_MS),
     ]);
     requestedFontLoads.set(key, requested);
   }
@@ -44,17 +45,19 @@ export const ensureWmuxFonts = async (preferred?: string, fontSize = 14): Promis
 
 const loadBundledMesloFonts = async (): Promise<void> => {
   if (!("fonts" in document)) return;
-  try {
-    const [regular, bold] = await Promise.all([
-      document.fonts.load(`400 14px "${BUNDLED_MESLO_FONT_FAMILY}"`),
-      document.fonts.load(`700 14px "${BUNDLED_MESLO_FONT_FAMILY}"`),
-    ]);
-    if (regular.length === 0 || bold.length === 0) {
+  const ready = Promise.all([
+    document.fonts.load(`400 14px "${BUNDLED_MESLO_FONT_FAMILY}"`),
+    document.fonts.load(`700 14px "${BUNDLED_MESLO_FONT_FAMILY}"`),
+    document.fonts.load(`italic 400 14px "${BUNDLED_MESLO_FONT_FAMILY}"`),
+    document.fonts.load(`italic 700 14px "${BUNDLED_MESLO_FONT_FAMILY}"`),
+  ]).then((faces) => {
+    if (faces.some((face) => face.length === 0)) {
       console.warn("wmux: bundled MesloLGM Nerd Font faces were not registered; using the terminal fallback stack");
     }
-  } catch (error) {
+  }).catch((error: unknown) => {
     console.warn("wmux: bundled MesloLGM Nerd Font failed to load; using the terminal fallback stack", error);
-  }
+  });
+  await Promise.race([ready, timeout(FONT_LOAD_TIMEOUT_MS)]);
 };
 
 const loadWmuxFonts = async (): Promise<void> => {
@@ -66,7 +69,7 @@ const loadWmuxFonts = async (): Promise<void> => {
     fonts.load(`700 12px "Fira Code"`),
     fonts.ready,
   ]).then(() => undefined);
-  await Promise.race([ready, timeout(1800)]);
+  await Promise.race([ready, timeout(FONT_LOAD_TIMEOUT_MS)]);
 };
 
 const timeout = (ms: number): Promise<void> =>

@@ -256,6 +256,7 @@ export const TerminalPane = memo(function TerminalPane({
     let windowBlurListener: (() => void) | undefined;
     let pageShowListener: (() => void) | undefined;
     let visibilityChangeListener: (() => void) | undefined;
+    let fontLoadingDoneListener: (() => void) | undefined;
     let rectangularSelection: RectangularSelection | undefined;
     let contextMenuSelection = "";
     let pendingCursorPlacement: { sequence: string; x: number; y: number } | null = null;
@@ -915,6 +916,21 @@ export const TerminalPane = memo(function TerminalPane({
       fitAddonRef.current = fitAddon;
       fitAddon.fit();
       refreshMetrics(term);
+      if ("fonts" in document) {
+        fontLoadingDoneListener = () => {
+          if (cancelled || terminalRef.current !== term || !term.renderer) return;
+          const family = term.options.fontFamily;
+          // FontFaceSet completion does not invalidate an existing canvas.
+          // A whitespace-only option transition forces Ghostty to remeasure
+          // and redraw synchronously without changing the CSS family stack.
+          term.options.fontFamily = `${family} `;
+          term.options.fontFamily = family;
+          fitAddon?.fit();
+          refreshMetrics(term);
+        };
+        document.fonts.addEventListener("loadingdone", fontLoadingDoneListener);
+        void document.fonts.ready.then(() => fontLoadingDoneListener?.());
+      }
       scrollDisposable = term.onScroll((position) => setViewportY(position));
       renderDisposable = term.onRender(() => {
         refreshMetrics(term);
@@ -1248,6 +1264,9 @@ export const TerminalPane = memo(function TerminalPane({
       if (windowBlurListener) window.removeEventListener("blur", windowBlurListener);
       if (pageShowListener) window.removeEventListener("pageshow", pageShowListener);
       if (visibilityChangeListener) document.removeEventListener("visibilitychange", visibilityChangeListener);
+      if (fontLoadingDoneListener && "fonts" in document) {
+        document.fonts.removeEventListener("loadingdone", fontLoadingDoneListener);
+      }
       if (terminalHostShell && touchPointerDownListener) terminalHostShell.removeEventListener("pointerdown", touchPointerDownListener);
       if (terminalHostShell && touchPointerMoveListener) terminalHostShell.removeEventListener("pointermove", touchPointerMoveListener);
       if (terminalHostShell && touchPointerUpListener) terminalHostShell.removeEventListener("pointerup", touchPointerUpListener);

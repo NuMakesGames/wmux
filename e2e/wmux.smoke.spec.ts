@@ -62,17 +62,47 @@ test("uses a configured shortcut while preserving defaults for omitted actions",
 
 test("registers and loads the bundled Meslo terminal font", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "desktop Chromium font coverage");
-  const result = await page.evaluate(async () => {
-    const loaded = await document.fonts.load('400 14px "MesloLGM Nerd Font"');
+  await page.route("**/api/bootstrap", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    await route.fulfill({ response, json: { ...payload, terminalFontFamily: '"MesloLGM Nerd Font"' } });
+  });
+  await page.reload();
+  await expect(page.locator(".terminal-pane.active")).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+
+  const result = await page.evaluate(() => {
     const faces = [...document.fonts]
       .filter((face) => face.family === "MesloLGM Nerd Font")
       .map((face) => ({ style: face.style, weight: face.weight, status: face.status }));
-    return { loadedCount: loaded.length, faces };
+    return { faces };
   });
 
-  expect(result.loadedCount).toBe(1);
-  expect(result.faces).toContainEqual({ style: "normal", weight: "400", status: "loaded" });
+  expect(result.faces).toEqual(expect.arrayContaining([
+    { style: "normal", weight: "400", status: "loaded" },
+    { style: "normal", weight: "700", status: "loaded" },
+    { style: "italic", weight: "400", status: "loaded" },
+    { style: "italic", weight: "700", status: "loaded" },
+  ]));
   expect(result.faces).toHaveLength(4);
+});
+
+test("does not block terminal startup on slow bundled fonts", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "desktop Chromium font coverage");
+  await page.route("**/fonts/meslo-v3.4.0/**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    await route.continue();
+  });
+  await page.route("**/api/bootstrap", async (route) => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    await route.fulfill({ response, json: { ...payload, terminalFontFamily: '"MesloLGM Nerd Font"' } });
+  });
+
+  await page.reload();
+  await expect(page.locator("main.app-shell")).toBeVisible({ timeout: 20_000 });
+  const startedAt = Date.now();
+  await expect(page.locator(".terminal-pane.active")).toHaveClass(/terminal-ready/, { timeout: 3_500 });
+  expect(Date.now() - startedAt).toBeLessThan(3_500);
 });
 
 test("creates a workspace through the command palette and preserves its direct link", async ({ page, request }) => {
