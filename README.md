@@ -353,6 +353,11 @@ token. wmux is not a hardened multi-user service.
   inactive-tab streaming, and terminal scroll mode. Hidden cached tabs suspend
   terminal sockets by default while preserving their mounted terminal views;
   choose live streaming to retain the previous behavior.
+- New local, SSH, and Windows panes receive the selected scheme as
+  `WMUX_COLOR_SCHEME` plus `WMUX_COLOR_MODE=dark|light`. Browser terminals
+  answer OSC 4/10/11 palette queries from the live scheme, including after a
+  settings change. Programs that render explicit RGB colors still own those
+  colors and are not recolored by the terminal palette.
 - Pasting a PNG, JPEG, WebP, or GIF into a connected terminal stages a private
   temporary file in that pane's target filesystem and pastes its quoted native
   path. Local, POSIX SSH, PowerShell-over-SSH, and current Windows-agent panes

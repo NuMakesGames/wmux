@@ -346,8 +346,39 @@ test("server recognizes terminal replies from stale browser clients", () => {
   assert.equal(isTerminalProtocolResponseInput("\x1b[12;40R"), true);
   assert.equal(isTerminalProtocolResponseInput("\x1bP>|libghostty 0.1.0-dev\x1b\\"), true);
   assert.equal(isTerminalProtocolResponseInput("\x1b[>1;0;0c\x1bP>|libghostty 0.1.0-dev\x1b\\"), true);
+  assert.equal(isTerminalProtocolResponseInput("\x1b]10;rgb:c0c0/caca/f5f5\x1b\\"), true);
+  assert.equal(isTerminalProtocolResponseInput("\x1b]4;1;rgb:f7f7/7676/8e8e\x07"), true);
   assert.equal(isTerminalProtocolResponseInput("\x1bP>|other-terminal 1.0\x1b\\"), false);
   assert.equal(isTerminalProtocolResponseInput("\x1b[A"), false);
+});
+
+test("new sessions receive the current terminal theme environment", { skip: process.platform === "win32" }, async () => {
+  const machine: MachineConfig = {
+    id: "local",
+    name: "Local",
+    kind: "local",
+    command: ["/bin/sh", "-c", "printf '%s|%s' \"$WMUX_COLOR_SCHEME\" \"$WMUX_COLOR_MODE\"; sleep 0.1"],
+  };
+  await withState(machine, async (state) => {
+    const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+    const manager = new SessionManager(
+      state,
+      [machine],
+      "",
+      undefined,
+      undefined,
+      undefined,
+      () => ({ WMUX_COLOR_SCHEME: "tokyo-night", WMUX_COLOR_MODE: "dark" }),
+    );
+    const client = socket();
+    try {
+      manager.attach(pane.id, client, 80, 24);
+      const output = await waitForMessage(client, (message) => message.type === "output" && message.data.includes("tokyo-night|dark"));
+      assert.match(output.data, /tokyo-night\|dark/);
+    } finally {
+      manager.disposeAll();
+    }
+  });
 });
 
 test("multi-client PTY attach broadcasts output, replays, and removes cleanly", { skip: process.platform === "win32" }, async () => {

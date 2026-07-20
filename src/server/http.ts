@@ -1427,6 +1427,8 @@ const windowsBootstrapEnvKeys = [
   "WMUX_TAB_ID",
   "WMUX_TAB_TITLE",
   "WMUX_PANE_ID",
+  "WMUX_COLOR_SCHEME",
+  "WMUX_COLOR_MODE",
   "KITTY_WINDOW_ID",
 ];
 

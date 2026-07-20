@@ -10,6 +10,7 @@ import { createHttpServer } from "./http.js";
 import { resolveHelperUrl } from "./helper-url.js";
 import { parseTrustedProxyAddresses } from "./proxy-address.js";
 import { SettingsStore } from "./settings.js";
+import { terminalThemeEnvironment } from "./terminal-theme.js";
 import { SessionManager } from "./session-manager.js";
 import { StateStore } from "./state.js";
 
@@ -87,6 +88,8 @@ const main = async (): Promise<void> => {
     auth.token,
     (machineId) => hostRegistry.bootstrapToken(machineId),
     () => hostRegistry.sweep(),
+    undefined,
+    () => terminalThemeEnvironment(settings.snapshot().colorScheme),
   );
   sessionManagerRef = sessionManager;
   const server = await createHttpServer(host, state, currentMachines, sessionManager, settings, {

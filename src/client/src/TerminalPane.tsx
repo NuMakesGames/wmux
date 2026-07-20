@@ -24,6 +24,7 @@ import { writeBrowserClipboard } from "./clipboard";
 import { api } from "./api";
 import { canApplyStagedPasteImage, imagesFromClipboard, quoteStagedImagePath } from "./clipboard-images";
 import { Osc52Parser } from "./terminal-osc52";
+import { OscColorQueryParser } from "./terminal-color-queries";
 import { RectangularSelection } from "./terminal-rectangular-selection";
 import { useColorScheme } from "./color-scheme-context";
 import { PaneSocketController } from "./pane-socket";
@@ -136,6 +137,7 @@ export const TerminalPane = memo(function TerminalPane({
   onDismissMedia,
 }: Props) {
   const colorScheme = useColorScheme();
+  const colorSchemeRef = useRef(colorScheme);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -178,6 +180,10 @@ export const TerminalPane = memo(function TerminalPane({
   const [rectangleVersion, setRectangleVersion] = useState(0);
   const visibleMediaItems = [...kittyMediaItems, ...mediaItems];
   const visibleInlineItems = viewportY < 1 ? kittyInlineItems.filter((item) => item.data) : [];
+
+  useEffect(() => {
+    colorSchemeRef.current = colorScheme;
+  }, [colorScheme]);
 
   useEffect(() => {
     onActivateRef.current = onActivate;
@@ -267,6 +273,7 @@ export const TerminalPane = memo(function TerminalPane({
     // deleting it, so a keypress here re-attaches (and re-spawns) on demand
     // rather than looping against a down host.
     let awaitingRestart = false;
+    const colorQueryParser = new OscColorQueryParser();
     kittyParserRef.current = new KittyGraphicsParser();
     kittyPlaceholderStripRef.current.pendingPlaceholderMarks = false;
     kittyImageCacheRef.current.clear();
@@ -566,8 +573,13 @@ export const TerminalPane = memo(function TerminalPane({
       );
     };
     const handleOutput = (term: Terminal, data: string) => {
+      const colorQueries = colorQueryParser.push(data, colorSchemeRef.current.terminal);
+      if (!replayingTerminalOutput) {
+        for (const response of colorQueries.responses) sendInput(socketRef.current, response, true);
+      }
       const osc52 = osc52ParserRef.current.push(data);
-      if (osc52.text.includes("\x07")) onBell();
+      const bellCount = osc52.text.split("\x07").length - 1;
+      if (bellCount > colorQueries.bellTerminators) onBell();
       if (!replayingTerminalOutput) {
         for (const write of osc52.writes) {
           const request = nextOsc52Request(write.text);
@@ -640,6 +652,7 @@ export const TerminalPane = memo(function TerminalPane({
       resetSynchronizedOutput(synchronizedOutputRef.current);
       outputCarryRef.current = "";
       osc52ParserRef.current.reset();
+      colorQueryParser.reset();
       kittyParserRef.current = new KittyGraphicsParser();
       kittyPlaceholderStripRef.current.pendingPlaceholderMarks = false;
       wmuxControlCarryRef.current = "";
@@ -652,6 +665,7 @@ export const TerminalPane = memo(function TerminalPane({
     const finishReplay = () => {
       replayingTerminalOutput = false;
       osc52ParserRef.current.reset();
+      colorQueryParser.reset();
     };
 
     const startReplayDrain = (term: Terminal, replay: string) => {

@@ -144,6 +144,21 @@ test("bootstrap URL omits credentials when neither token path is available", () 
   assert.equal(url.searchParams.has("token"), false);
 });
 
+test("bootstrap URL carries terminal theme metadata into PowerShell", () => {
+  const url = new URL(buildWindowsPowerShellBootstrapUrl(machine, undefined, {
+    WMUX_COLOR_SCHEME: "tokyo-night",
+    WMUX_COLOR_MODE: "dark",
+  }));
+  assert.equal(url.searchParams.get("WMUX_COLOR_SCHEME"), "tokyo-night");
+  assert.equal(url.searchParams.get("WMUX_COLOR_MODE"), "dark");
+  const script = buildWindowsPowerShellBootstrap(machine, undefined, {
+    WMUX_COLOR_SCHEME: "tokyo-night",
+    WMUX_COLOR_MODE: "dark",
+  });
+  assert.match(script, /\$env:WMUX_COLOR_SCHEME = 'tokyo-night'/);
+  assert.match(script, /\$env:WMUX_COLOR_MODE = 'dark'/);
+});
+
 test("Windows bootstrap stages the helper callback URL ahead of the public URL", () => {
   const saved = { ...process.env };
   try {

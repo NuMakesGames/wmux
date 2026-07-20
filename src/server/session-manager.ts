@@ -104,6 +104,7 @@ export class SessionManager {
     private readonly bootstrapTokenForMachine: (machineId: string) => string | undefined = () => undefined,
     private readonly onPaneReferencesChanged: () => void = () => undefined,
     private readonly pasteImages: PasteImageStager = new PasteImageStaging(),
+    private readonly terminalEnvironment: () => Record<string, string> = () => ({}),
   ) {
     this.currentMachines = typeof machines === "function" ? machines : () => machines;
   }
@@ -343,6 +344,7 @@ export class SessionManager {
     const streamHost = process.env.WMUX_STREAM_HOST ?? process.env.WMUX_HOST ?? "127.0.0.1";
     const streamPath = streamPathForMachine(machine.id);
     const sessionEnv = {
+      ...this.terminalEnvironment(),
       WMUX_URL: resolveHelperUrl(`http://${process.env.WMUX_HOST ?? "127.0.0.1"}:${process.env.WMUX_PORT ?? "3478"}`),
       WMUX_WORKSPACE_ID: context?.workspace.id ?? "",
       WMUX_WORKSPACE_NAME: context?.workspace.name ?? "",

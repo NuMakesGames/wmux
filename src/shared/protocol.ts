@@ -18,6 +18,16 @@ export const TERMINAL_COLOR_SCHEME_IDS = [
   "tokyo-night",
 ] as const;
 export type TerminalColorSchemeId = (typeof TERMINAL_COLOR_SCHEME_IDS)[number];
+export type TerminalColorMode = "dark" | "light";
+export const TERMINAL_COLOR_SCHEME_MODES: Record<TerminalColorSchemeId, TerminalColorMode> = {
+  wmux: "dark",
+  "catppuccin-mocha": "dark",
+  dracula: "dark",
+  nord: "dark",
+  "solarized-dark": "dark",
+  "gruvbox-dark": "dark",
+  "tokyo-night": "dark",
+};
 export type InactiveTabStreaming = "suspend" | "live";
 export type TuiFrameRate = 15 | 30 | 60;
 export type TerminalScrollMode = "batched" | "immediate";
