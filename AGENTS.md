@@ -12,6 +12,14 @@ wmux is a browser terminal multiplexer for one user's Tailscale or internal netw
 
 This is intentionally not a multi-tenant SaaS app. Bearer authentication is defense-in-depth on top of the required private-network boundary and bind/Host/Origin checks; it does not make a public-Internet deployment supported.
 
+## Git Workflow
+
+- Use a focused topic branch and pull request for changes by default. Push the branch, open a PR with a concise summary and verification notes, and keep unrelated work out of it.
+- Run checks proportionate to the change before opening the PR; use `npm run check` for changes that affect runtime behavior or cross project boundaries.
+- Keep incomplete work in a draft PR. Before merging, incorporate current base-branch changes and confirm required checks are green.
+- Do not push directly to `main` unless the user explicitly requests a direct push or authorizes an urgent operational hotfix. Follow the hotfix with the same verification and durable documentation expected of a normal PR.
+- Do not merge a PR merely because it is green. Merge only when the user requests it or the task explicitly includes merging.
+
 ## Commands
 
 - `npm install` installs dependencies.
