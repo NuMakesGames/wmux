@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -56,6 +56,14 @@ print(json.dumps(module.prepare_windows_command(
   assert.match(completed.stdout, /codex\.ps1/);
   assert.match(completed.stdout, /false/);
 });
+
+const waitFor = async (predicate: () => boolean, message: string, timeout = 3000) => {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(message);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
 
 posixTest("wmux-agent-run adapts OpenCode, Codex, and Claude without putting prompts in argv", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-run-"));
@@ -209,6 +217,252 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
     assert.deepEqual(captured.schema.properties.outcome.enum, ["completed", "blocked", "failed"]);
     assert.equal(captured.argv.includes(prompt), false);
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui validates a prompt-free request and execs in the requested directory", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-"));
+  const bin = path.join(dir, "bin");
+  const capture = path.join(dir, "capture.json");
+  fs.mkdirSync(bin);
+  const executable = path.join(bin, "codex");
+  fs.writeFileSync(executable, `#!/usr/bin/env python3
+import json,os,sys
+json.dump({'argv':sys.argv[1:],'cwd':os.getcwd(),'interactive':os.environ.get('WMUX_INTERACTIVE_TUI')},open(os.environ['CAPTURE_PATH'],'w'))
+print('interactive ready')
+`);
+  fs.chmodSync(executable, 0o755);
+  try {
+    const request = { runId: "tui-1", runtime: "codex", directory: dir, model: "model-x" };
+    const completed = spawnSync(helper, ["tui", "tui-1"], {
+      input: `${Buffer.from(JSON.stringify(request)).toString("base64")}\nWMUX_AGENT_TUI_ACK tui-1\nWMUX_AGENT_TUI_RELEASE tui-1\n`, encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CAPTURE_PATH: capture },
+    });
+    assert.equal(completed.status, 0, completed.stderr);
+    assert.match(completed.stdout, /WMUX_AGENT_TUI_READY tui-1/);
+    assert.match(completed.stdout, /WMUX_AGENT_TUI_LAUNCH tui-1/);
+    assert.match(completed.stdout, /WMUX_AGENT_TUI_EXIT tui-1 0/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), { argv: ["--model", "model-x"], cwd: dir, interactive: "1" });
+    assert.equal(completed.stdout.includes("prompt"), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui rejects mismatched ids, forbidden or unknown fields, invalid options, and unavailable runtimes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-invalid-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  try {
+    const cases = [
+      [{ runId: "other", runtime: "codex", directory: dir }, "runId does not match"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, prompt: "secret" }, "must not contain prompt"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, unattended: false }, "forbidden key: unattended"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, writeAccess: false }, "forbidden key: writeAccess"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, title: "not transported" }, "forbidden key: title"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, surprise: true }, "forbidden key: surprise"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, agent: "build" }, "only valid for opencode"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, model: 7 }, "invalid model"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir, model: "x".repeat(513) }, "invalid model"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: "/" + "x".repeat(4097) }, "invalid directory"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: `${dir}/missing` }, "directory does not exist"],
+      [{ runId: "tui-invalid", runtime: "codex", directory: dir }, "executable not found"],
+    ] as const;
+    for (const [request, message] of cases) {
+      const completed = spawnSync(helper, ["tui", "tui-invalid"], {
+        input: `${Buffer.from(JSON.stringify(request)).toString("base64")}\n`, encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+      assert.notEqual(completed.status, 0);
+      assert.match(String(decodeResult(completed.stdout).error), new RegExp(message));
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui preserves runtime-specific argv and exact cwd", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-runtimes-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const fake = `#!/usr/bin/env python3
+import json,os,sys
+json.dump({'argv':sys.argv[1:],'cwd':os.getcwd()},open(os.environ['CAPTURE_PATH'],'w'))
+`;
+  for (const runtime of ["opencode", "codex", "claude"]) {
+    const executable = path.join(bin, runtime);
+    fs.writeFileSync(executable, fake);
+    fs.chmodSync(executable, 0o755);
+  }
+  const cases = [
+    ["opencode", { agent: "review", model: "model-o" }, ["--agent", "review", "--model", "model-o"]],
+    ["codex", { model: "model-c" }, ["--model", "model-c"]],
+    ["claude", {}, []],
+  ] as const;
+  try {
+    for (const [runtime, extra, argv] of cases) {
+      const capture = path.join(dir, `${runtime}.json`);
+      const request = { runId: `tui-${runtime}`, runtime, directory: dir, ...extra };
+      const completed = spawnSync(helper, ["tui", `tui-${runtime}`], {
+        input: `${Buffer.from(JSON.stringify(request)).toString("base64")}\nWMUX_AGENT_TUI_ACK tui-${runtime}\nWMUX_AGENT_TUI_RELEASE tui-${runtime}\n`, encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CAPTURE_PATH: capture },
+      });
+      assert.equal(completed.status, 0, completed.stderr);
+      assert.deepEqual(JSON.parse(fs.readFileSync(capture, "utf8")), { argv, cwd: dir });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui resolves relative PATH entries before changing directory", () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-path-"));
+  const originalBin = path.join(rootDir, "relative-bin");
+  const requested = path.join(rootDir, "requested");
+  const replacementBin = path.join(requested, "relative-bin");
+  const capture = path.join(rootDir, "capture.txt");
+  fs.mkdirSync(originalBin);
+  fs.mkdirSync(replacementBin, { recursive: true });
+  fs.writeFileSync(path.join(originalBin, "codex"), `#!/bin/sh\nprintf original > "$CAPTURE_PATH"\n`);
+  fs.writeFileSync(path.join(replacementBin, "codex"), `#!/bin/sh\nprintf replacement > "$CAPTURE_PATH"\n`);
+  fs.chmodSync(path.join(originalBin, "codex"), 0o755);
+  fs.chmodSync(path.join(replacementBin, "codex"), 0o755);
+  try {
+    const request = { runId: "tui-relative", runtime: "codex", directory: requested };
+    const completed = spawnSync(helper, ["tui", "tui-relative"], {
+      cwd: rootDir,
+      input: `${Buffer.from(JSON.stringify(request)).toString("base64")}\nWMUX_AGENT_TUI_ACK tui-relative\nWMUX_AGENT_TUI_RELEASE tui-relative\n`,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `relative-bin:${process.env.PATH}`, CAPTURE_PATH: capture },
+    });
+    assert.equal(completed.status, 0, completed.stderr);
+    assert.equal(fs.readFileSync(capture, "utf8"), "original");
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui requires the exact ACK before starting the child", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-ack-"));
+  const bin = path.join(dir, "bin");
+  const capture = path.join(dir, "started");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "codex"), `#!/bin/sh\nprintf started > "$CAPTURE_PATH"\n`);
+  fs.chmodSync(path.join(bin, "codex"), 0o755);
+  const child = spawn(helper, ["tui", "tui-ack"], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CAPTURE_PATH: capture },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
+  try {
+    const request = { runId: "tui-ack", runtime: "codex", directory: dir };
+    child.stdin.write(`${Buffer.from(JSON.stringify(request)).toString("base64")}\n`);
+    await waitFor(() => stdout.includes("WMUX_AGENT_TUI_LAUNCH tui-ack"), "launch marker was not emitted");
+    assert.equal(fs.existsSync(capture), false, "child started before controller ACK");
+    child.stdin.write("WMUX_AGENT_TUI_ACK tui-ack\n");
+    await waitFor(() => stdout.includes("WMUX_AGENT_TUI_EXIT tui-ack 0"), "exit marker was not emitted");
+    assert.equal(fs.readFileSync(capture, "utf8"), "started");
+    assert.equal(child.exitCode, null, "helper returned to the shell instead of quarantining");
+    child.stdin.end("WMUX_AGENT_TUI_RELEASE tui-ack\n");
+    assert.equal(await closed, 0);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui rejects a wrong ACK and quarantines following shell input", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-wrong-ack-"));
+  const bin = path.join(dir, "bin");
+  const childStarted = path.join(dir, "child-started");
+  const shellExecuted = path.join(dir, "shell-executed");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "codex"), `#!/bin/sh\nprintf started > "$CAPTURE_PATH"\n`);
+  fs.chmodSync(path.join(bin, "codex"), 0o755);
+  const child = spawn(helper, ["tui", "tui-wrong"], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CAPTURE_PATH: childStarted },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
+  try {
+    const request = { runId: "tui-wrong", runtime: "codex", directory: dir };
+    child.stdin.write(`${Buffer.from(JSON.stringify(request)).toString("base64")}\n`);
+    await waitFor(() => stdout.includes("WMUX_AGENT_TUI_LAUNCH tui-wrong"), "launch marker was not emitted");
+    child.stdin.write(`WMUX_AGENT_TUI_ACK other\ntouch ${shellExecuted}\n`);
+    await waitFor(() => stdout.includes("WMUX_AGENT_DONE tui-wrong 2"), "wrong ACK failure was not emitted");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(fs.existsSync(childStarted), false);
+    assert.equal(fs.existsSync(shellExecuted), false);
+    assert.equal(child.exitCode, null, "wrong ACK returned to the invoking shell");
+    child.stdin.end("WMUX_AGENT_TUI_RELEASE tui-wrong\n");
+    assert.equal(await closed, 2);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui emits an exact exit marker and quarantines racing prompt text", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-exit-"));
+  const bin = path.join(dir, "bin");
+  const shellExecuted = path.join(dir, "shell-executed");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nexit 7\n");
+  fs.chmodSync(path.join(bin, "codex"), 0o755);
+  const child = spawn(helper, ["tui", "tui-exit"], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
+  try {
+    const request = { runId: "tui-exit", runtime: "codex", directory: dir };
+    child.stdin.write(`${Buffer.from(JSON.stringify(request)).toString("base64")}\nWMUX_AGENT_TUI_ACK tui-exit\n`);
+    await waitFor(() => stdout.includes("WMUX_AGENT_TUI_EXIT tui-exit 7"), "exact exit marker was not emitted");
+    child.stdin.write(`touch ${shellExecuted}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(fs.existsSync(shellExecuted), false);
+    assert.equal(child.exitCode, null, "helper returned to the invoking shell after child exit");
+    child.stdin.end("WMUX_AGENT_TUI_RELEASE tui-exit\n");
+    assert.equal(await closed, 7);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+posixTest("wmux-agent-run tui forwards termination to the complete child process group", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-tui-signal-"));
+  const bin = path.join(dir, "bin");
+  const pidPath = path.join(dir, "child.pid");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "codex"), `#!/bin/sh\nprintf '%s' "$$" > "$PID_PATH"\nsleep 30\n`);
+  fs.chmodSync(path.join(bin, "codex"), 0o755);
+  const child = spawn(helper, ["tui", "tui-signal"], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PID_PATH: pidPath },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
+  try {
+    const request = { runId: "tui-signal", runtime: "codex", directory: dir };
+    child.stdin.write(`${Buffer.from(JSON.stringify(request)).toString("base64")}\nWMUX_AGENT_TUI_ACK tui-signal\n`);
+    await waitFor(() => fs.existsSync(pidPath), "supervised child did not start");
+    child.kill("SIGTERM");
+    await waitFor(() => stdout.includes("WMUX_AGENT_TUI_EXIT tui-signal 143"), "forwarded termination did not emit exit marker");
+    const runtimePid = Number(fs.readFileSync(pidPath, "utf8"));
+    assert.throws(() => process.kill(runtimePid, 0), /ESRCH/);
+    child.stdin.end("WMUX_AGENT_TUI_RELEASE tui-signal\n");
+    assert.equal(await closed, 143);
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

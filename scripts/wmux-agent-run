@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one delegated agent request supplied as a Base64 JSON line."""
+"""Run a delegated request, or supervise an interactive TUI, from Base64 JSON."""
 import base64
 import json
 import os
@@ -56,12 +56,12 @@ def fail(run_id, message, code=2):
     return code
 
 
-def request_from_stdin():
+def request_from_stdin(marker="WMUX_AGENT_READY"):
     tty_state = None
     if sys.stdin.isatty() and os.name == "nt":
         import msvcrt
 
-        print("WMUX_AGENT_READY", flush=True)
+        print(marker, flush=True)
         while True:
             characters = []
             while True:
@@ -88,13 +88,13 @@ def request_from_stdin():
         quiet[3] &= ~termios.ECHO
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, quiet)
         try:
-            print("WMUX_AGENT_READY", flush=True)
+            print(marker, flush=True)
             line = sys.stdin.buffer.readline(MAX_LINE + 1)
         finally:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tty_state)
             print(flush=True)
     else:
-        print("WMUX_AGENT_READY", flush=True)
+        print(marker, flush=True)
         line = sys.stdin.buffer.readline(MAX_LINE + 1)
     if len(line) > MAX_LINE:
         raise ValueError("request is too large")
@@ -107,7 +107,7 @@ def request_from_stdin():
     return request
 
 
-def validate(request):
+def validate(request, tui=False):
     run_id, prompt, directory = (request.get(key) for key in ("runId", "prompt", "directory"))
     runtime = request.get("runtime") or os.environ.get("WMUX_AGENT_RUNTIME_DEFAULT")
     valid_id = isinstance(run_id, str) and 0 < len(run_id) <= 128 and all(
@@ -117,9 +117,11 @@ def validate(request):
         raise ValueError("invalid runId")
     if runtime not in RUNTIMES:
         raise ValueError("runtime must be opencode, codex, or claude")
-    if not isinstance(prompt, str) or not prompt or len(prompt.encode()) > MAX_PROMPT:
+    if not tui and (not isinstance(prompt, str) or not prompt or len(prompt.encode()) > MAX_PROMPT):
         raise ValueError("invalid prompt")
     if not isinstance(directory, str) or len(directory) > 4096 or "\x00" in directory:
+        raise ValueError("invalid directory")
+    if tui and not directory.startswith("/"):
         raise ValueError("invalid directory")
     directory = os.path.abspath(os.path.expanduser(directory))
     if not os.path.isdir(directory):
@@ -138,7 +140,70 @@ def validate(request):
         raise ValueError("resultFormat must be outcome-v1")
     if result_format and runtime != "codex":
         raise ValueError("structured outcomes currently require the Codex runtime")
+    if tui:
+        if "prompt" in request:
+            raise ValueError("interactive request must not contain prompt")
+        allowed = {"runId", "runtime", "directory", "model", "agent"}
+        unknown = sorted(set(request) - allowed)
+        if unknown:
+            raise ValueError("interactive request contains forbidden key: %s" % unknown[0])
+        if "agent" in request and runtime != "opencode":
+            raise ValueError("interactive agent is only valid for opencode")
     return run_id, runtime, prompt, directory
+
+
+def tui_command_for(request, runtime):
+    executable = shutil.which(runtime)
+    if not executable:
+        raise FileNotFoundError("%s executable not found" % runtime)
+    # PATH may contain relative entries. Pin what was selected before changing
+    # cwd so a repository-local executable cannot replace it at launch time.
+    executable = os.path.realpath(os.path.abspath(executable))
+    if not os.path.isabs(executable):
+        raise ValueError("%s executable did not resolve to an absolute path" % runtime)
+    model = request.get("model")
+    argv = [executable]
+    if runtime == "opencode" and request.get("agent"):
+        argv.extend(["--agent", request["agent"]])
+    if model:
+        argv.extend(["--model", model])
+    return argv
+
+
+def tui_main(expected_run_id):
+    run_id = expected_run_id or "unknown"
+    try:
+        request = request_from_stdin("WMUX_AGENT_TUI_READY %s" % run_id)
+        candidate = request.get("runId")
+        if not expected_run_id and isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", candidate):
+            run_id = candidate
+        request_run_id, runtime, _prompt, directory = validate(request, tui=True)
+        if expected_run_id and request_run_id != expected_run_id:
+            raise ValueError("runId does not match TUI launch marker")
+        run_id = request_run_id
+        argv = tui_command_for(request, runtime)
+    except FileNotFoundError as error:
+        return fail(run_id, str(error), 127)
+    except (OSError, ValueError) as error:
+        return fail(run_id, str(error))
+
+    ack = "WMUX_AGENT_TUI_ACK %s" % run_id
+    try:
+        received = control_line("WMUX_AGENT_TUI_LAUNCH %s" % run_id)
+        if received != ack:
+            code = fail(run_id, "invalid interactive controller acknowledgement")
+            quarantine_tui(run_id)
+            return code
+        env = os.environ.copy()
+        env["WMUX_INTERACTIVE_TUI"] = "1"
+        code = supervise_tui(argv, directory, env)
+    except OSError as error:
+        code = fail(run_id, str(error), 127)
+        quarantine_tui(run_id)
+        return code
+    print("WMUX_AGENT_TUI_EXIT %s %d" % (run_id, code), flush=True)
+    quarantine_tui(run_id)
+    return code
 
 
 class ForwardedSignal(Exception):
@@ -192,6 +257,129 @@ def stop_process_group(child, signum, grace=TERMINATION_GRACE):
             pass
     if child.poll() is None:
         child.wait()
+
+
+def control_line(marker):
+    tty_state = None
+    if sys.stdin.isatty():
+        import termios
+
+        tty_state = termios.tcgetattr(sys.stdin.fileno())
+        quiet = termios.tcgetattr(sys.stdin.fileno())
+        quiet[3] &= ~termios.ECHO
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, quiet)
+    try:
+        print(marker, flush=True)
+        line = sys.stdin.buffer.readline(MAX_LINE + 1)
+    finally:
+        if tty_state is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tty_state)
+    if len(line) > MAX_LINE:
+        return ""
+    return line.rstrip(b"\r\n").decode("ascii", errors="replace")
+
+
+def supervise_tui(argv, directory, env):
+    child = None
+    previous_handlers = {}
+    tty_fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+    parent_pgrp = os.getpgrp()
+    tty_state = None
+    previous_sigttou = None
+    termination_signals = {signal.SIGTERM, signal.SIGHUP}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, termination_signals)
+    mask_restored = False
+
+    def forward_signal(signum, _frame):
+        raise ForwardedSignal(signum)
+
+    def prepare_child():
+        os.setpgrp()
+        for signum in termination_signals:
+            signal.signal(signum, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+    try:
+        if tty_fd is not None:
+            import termios
+
+            tty_state = termios.tcgetattr(tty_fd)
+        for signum in termination_signals:
+            previous_handlers[signum] = signal.signal(signum, forward_signal)
+        child = subprocess.Popen(
+            argv,
+            cwd=directory,
+            env=env,
+            preexec_fn=prepare_child,
+        )
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        mask_restored = True
+        if tty_fd is not None:
+            previous_sigttou = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+            try:
+                os.tcsetpgrp(tty_fd, child.pid)
+            except OSError:
+                if child.poll() is None:
+                    raise
+        code = child.wait()
+        return 128 - code if code < 0 else code
+    except KeyboardInterrupt:
+        stop_process_group(child, signal.SIGINT)
+        return 130
+    except ForwardedSignal as forwarded:
+        stop_process_group(child, forwarded.signum)
+        return 128 + forwarded.signum
+    except OSError:
+        stop_process_group(child, signal.SIGKILL, 0)
+        raise
+    finally:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
+        if not mask_restored:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        if tty_fd is not None:
+            try:
+                os.tcsetpgrp(tty_fd, parent_pgrp)
+            except OSError:
+                pass
+            if tty_state is not None:
+                import termios
+
+                termios.tcsetattr(tty_fd, termios.TCSADRAIN, tty_state)
+            if previous_sigttou is not None:
+                signal.signal(signal.SIGTTOU, previous_sigttou)
+
+
+def quarantine_tui(run_id):
+    release = ("WMUX_AGENT_TUI_RELEASE %s" % run_id).encode("ascii")
+    tty_state = None
+    if sys.stdin.isatty():
+        import termios
+
+        tty_state = termios.tcgetattr(sys.stdin.fileno())
+        quiet = termios.tcgetattr(sys.stdin.fileno())
+        quiet[3] &= ~termios.ECHO
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, quiet)
+    try:
+        print(
+            "Interactive runtime exited; press Ctrl-C to return to the shell "
+            "or enter WMUX_AGENT_TUI_RELEASE %s." % run_id,
+            flush=True,
+        )
+        while True:
+            try:
+                line = sys.stdin.buffer.readline(MAX_LINE + 1)
+            except KeyboardInterrupt:
+                return
+            if not line:
+                time.sleep(0.1)
+                continue
+            if len(line) <= MAX_LINE and line.rstrip(b"\r\n") == release:
+                return
+    finally:
+        if tty_state is not None:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tty_state)
+            print(flush=True)
 
 
 def advertised_option(output, option):
@@ -361,6 +549,13 @@ def parse_structured_outcome(value):
 
 
 def main():
+    if len(sys.argv) in {2, 3} and sys.argv[1] == "tui":
+        expected = sys.argv[2] if len(sys.argv) == 3 else ""
+        if expected and not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", expected):
+            return fail("unknown", "invalid TUI runId")
+        return tui_main(expected)
+    if len(sys.argv) != 1:
+        return fail("unknown", "usage: wmux-agent-run [tui RUN_ID]")
     run_id = "unknown"
     schema_path = None
     try:
