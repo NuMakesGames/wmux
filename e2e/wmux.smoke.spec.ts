@@ -331,6 +331,15 @@ test("predicts bounded shell input locally and expires it without authoritative 
     await expect.poll(() => activePane.locator(".terminal-input-prediction-cursor")
       .evaluate((element: HTMLElement) => element.style.left)).toBe(predictedXLeft);
     await expect(activePane.locator(".terminal-input-prediction-layer")).toBeEmpty({ timeout: 1_000 });
+
+    await page.keyboard.press("Control+K");
+    const palette = page.getByRole("dialog", { name: "Command palette" });
+    await palette.getByPlaceholder("Search commands, workspaces, tabs, hosts").fill("Open diagnostics");
+    await palette.getByPlaceholder("Search commands, workspaces, tabs, hosts").press("Enter");
+    const diagnostics = page.getByRole("dialog", { name: "wmux diagnostics" });
+    await expect(diagnostics).toBeVisible();
+    await expect(diagnostics.locator(".latency-row", { hasText: "Predicted paint" }).locator("span").nth(1)).not.toHaveText("0");
+    await expect(diagnostics.locator(".latency-row", { hasText: "Shell canvas" }).locator("span").nth(1)).not.toHaveText("0");
   } finally {
     const removed = await request.delete(`/api/workspaces/${payload.workspace.id}`);
     expect(removed.ok()).toBeTruthy();

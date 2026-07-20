@@ -32,6 +32,11 @@ import {
   predictedTerminalInput,
   type PredictedTerminalInput,
 } from "./terminal-input-prediction";
+import {
+  classifyTerminalLatencyInput,
+  normalizeDomEventTimestamp,
+  terminalLatency,
+} from "./terminal-latency";
 import { useColorScheme } from "./color-scheme-context";
 import { PaneSocketController } from "./pane-socket";
 import { compileKeybindings, eventMatchesAction, type CompiledKeybindingMap } from "../../shared/keybindings";
@@ -265,6 +270,7 @@ export const TerminalPane = memo(function TerminalPane({
     let mouseGestureEndListener: (() => void) | undefined;
     let contextMenuListener: ((event: MouseEvent) => void) | undefined;
     let copyListener: ((event: ClipboardEvent) => void) | undefined;
+    let latencyKeyDownListener: ((event: KeyboardEvent) => void) | undefined;
     let pasteKeyListener: ((event: KeyboardEvent) => void) | undefined;
     let pasteListener: ((event: ClipboardEvent) => void) | undefined;
     let windowFocusListener: (() => void) | undefined;
@@ -293,6 +299,7 @@ export const TerminalPane = memo(function TerminalPane({
     let predictedInputs: PredictedTerminalInput[] = [];
     let predictionArmed = false;
     let predictionProbe: { sequence: number; text: string } | undefined;
+    let pendingLatencyKeyEvent: { eventAt: number; observedAt: number } | undefined;
     let replayChunks: string[] = [];
     let replayBufferedOutput: string[] = [];
     let replayDrainTimer: number | undefined;
@@ -616,6 +623,7 @@ export const TerminalPane = memo(function TerminalPane({
 
     const writeTerminalTextNow = (term: Terminal, text: string) => {
       if (!text) return;
+      terminalLatency.recordWrite(pane.id, performance.now());
       clearPredictionLayer();
       const placeholderCells: KittyPlaceholderCell[] = [];
       writeTerminalOutput(
@@ -942,6 +950,7 @@ export const TerminalPane = memo(function TerminalPane({
             else revealTerminal();
           }
           if (message.type === "output") {
+            terminalLatency.recordOutput(pane.id, message.inputSequence, message.data.length, performance.now());
             observePredictionEcho(message.inputSequence, message.data);
             acknowledgePredictions(message.inputSequence);
             if (replayDraining()) replayBufferedOutput.push(message.data);
@@ -1061,6 +1070,7 @@ export const TerminalPane = memo(function TerminalPane({
       refreshMetrics(term);
       scrollDisposable = term.onScroll((position) => setViewportY(position));
       renderDisposable = term.onRender(() => {
+        terminalLatency.recordRender(pane.id, performance.now());
         refreshMetrics(term);
         if (rectangularSelection?.overlay) setRectangleVersion((version) => version + 1);
       });
@@ -1279,6 +1289,19 @@ export const TerminalPane = memo(function TerminalPane({
         let sequence: number | undefined;
         if (!terminalResponse) {
           sequence = ++nextInputSequence;
+          const handledAt = performance.now();
+          const inputAt = pendingLatencyKeyEvent && handledAt - pendingLatencyKeyEvent.observedAt <= 250
+            ? pendingLatencyKeyEvent.eventAt
+            : handledAt;
+          pendingLatencyKeyEvent = undefined;
+          terminalLatency.recordInput(
+            pane.id,
+            sequence,
+            classifyTerminalLatencyInput(data),
+            alternateScreenState.active ? "alternate" : "normal",
+            inputAt,
+            handledAt,
+          );
           lastInteractiveInputAt = Date.now();
           const prediction = predictedTerminalInput(sequence, data);
           const canPredict = connectedRef.current
@@ -1293,6 +1316,8 @@ export const TerminalPane = memo(function TerminalPane({
           ) {
             predictedInputs.push(prediction);
             renderPredictions(term);
+            terminalLatency.recordPredictionMutation(pane.id, sequence, performance.now());
+            requestAnimationFrame((timestamp) => terminalLatency.recordPredictionPaint(pane.id, sequence!, timestamp));
             schedulePredictionExpiry();
           } else {
             clearPredictions();
@@ -1361,6 +1386,14 @@ export const TerminalPane = memo(function TerminalPane({
       });
 
       term.onData(forwardTerminalData);
+      latencyKeyDownListener = (event) => {
+        const observedAt = performance.now();
+        pendingLatencyKeyEvent = {
+          eventAt: normalizeDomEventTimestamp(event.timeStamp, observedAt, performance.timeOrigin),
+          observedAt,
+        };
+      };
+      term.element?.addEventListener("keydown", latencyKeyDownListener, { capture: true });
       term.onResize(() => {
         rectangularSelection?.clear();
         clearPredictions();
@@ -1415,6 +1448,7 @@ export const TerminalPane = memo(function TerminalPane({
       if (mouseGestureEndListener) document.removeEventListener("mouseup", mouseGestureEndListener);
       if (contextMenuListener) terminalRef.current?.element?.removeEventListener("contextmenu", contextMenuListener, { capture: true });
       if (copyListener) terminalRef.current?.element?.removeEventListener("copy", copyListener, { capture: true });
+      if (latencyKeyDownListener) terminalRef.current?.element?.removeEventListener("keydown", latencyKeyDownListener, { capture: true });
       if (pasteKeyListener) terminalRef.current?.element?.removeEventListener("keydown", pasteKeyListener, { capture: true });
       if (pasteListener) terminalRef.current?.element?.removeEventListener("paste", pasteListener, { capture: true });
       if (windowFocusListener) window.removeEventListener("focus", windowFocusListener);
@@ -1426,6 +1460,7 @@ export const TerminalPane = memo(function TerminalPane({
       if (terminalHostShell && touchPointerUpListener) terminalHostShell.removeEventListener("pointerup", touchPointerUpListener);
       if (terminalHostShell && touchPointerCancelListener) terminalHostShell.removeEventListener("pointercancel", touchPointerCancelListener);
       resetSynchronizedOutput(synchronizedOutputRef.current);
+      terminalLatency.abandonPane(pane.id, performance.now());
       fitAddon?.dispose();
       terminalRef.current?.dispose();
       socketRef.current = null;

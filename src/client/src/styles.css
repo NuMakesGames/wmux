@@ -947,7 +947,7 @@ button.active-tool {
 
 .diagnostics-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(980px, 100%);
   max-height: min(720px, calc(var(--wmux-viewport-height, 100vh) - 40px));
   overflow: hidden;
@@ -955,6 +955,11 @@ button.active-tool {
   border-radius: 4px;
   background: var(--black);
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+.diagnostics-content {
+  min-height: 0;
+  overflow: auto;
 }
 
 .diagnostics-header,
@@ -1035,6 +1040,73 @@ button.active-tool {
 .diagnostics-loading { padding: 18px; color: var(--muted); }
 .diagnostics-error { color: var(--red); }
 
+.latency-diagnostics {
+  border-bottom: 1px solid var(--line-hot);
+  background: color-mix(in srgb, var(--panel) 62%, var(--black));
+}
+
+.latency-diagnostics-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 6px;
+}
+
+.latency-diagnostics-header h3 {
+  margin: 1px 0 0;
+  color: var(--ivory);
+  font-size: 14px;
+}
+
+.latency-diagnostics-note {
+  margin: 0;
+  padding: 0 14px 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.latency-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  border-block: 1px solid var(--line);
+  padding: 7px 14px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.latency-summary strong { color: var(--ivory); }
+
+.latency-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 42px repeat(3, minmax(64px, 0.55fr));
+  gap: 8px;
+  min-height: 31px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding: 5px 14px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.latency-row > span:first-child {
+  overflow: hidden;
+  color: var(--ivory);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.latency-columns {
+  color: var(--gold-dim);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.latency-columns > span:first-child { color: var(--gold-dim); }
+
 @media (max-width: 700px) {
   .diagnostics-backdrop { padding: 8px; }
   .diagnostics-summary { grid-template-columns: auto minmax(0, 1fr); }
@@ -1042,6 +1114,8 @@ button.active-tool {
   .diagnostics-row { grid-template-columns: minmax(110px, 1fr) minmax(100px, 1fr) minmax(120px, 1fr); }
   .diagnostics-row > span:nth-child(2),
   .diagnostics-row > span:nth-child(4) { display: none; }
+  .latency-row { grid-template-columns: minmax(120px, 1fr) 32px repeat(2, minmax(55px, 0.6fr)); }
+  .latency-row > span:last-child { display: none; }
 }
 
 .stream-link {
