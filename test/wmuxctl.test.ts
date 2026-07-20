@@ -77,6 +77,41 @@ test("wmuxctl output and wait read authenticated pane replay", async () => {
   }
 });
 
+test("wmuxctl wait strips terminal character-set escapes around a shell prompt", async () => {
+  const replay = "\u001b(Bwmux@host:~ $\u001b(B";
+  const server = http.createServer();
+  server.on("upgrade", (request, socket) => {
+    const key = request.headers["sec-websocket-key"];
+    assert.equal(typeof key, "string");
+    const accept = crypto.createHash("sha1").update(`${key}${websocketGuid}`).digest("base64");
+    socket.write([
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${accept}`,
+      "",
+      "",
+    ].join("\r\n"));
+    socket.end(websocketFrame({ type: "ready", paneId: "pane_prompt", replay, outputOnly: true }));
+  });
+
+  const url = await listen(server);
+  try {
+    const waited = await cli(url, [
+      "wait",
+      "pane_prompt",
+      "--pattern",
+      "(?m)^.*(?:[$#%❯])\\s*$",
+      "--timeout",
+      "2",
+    ]);
+    const result = JSON.parse(waited.stdout);
+    assert.equal(result.matched, "wmux@host:~ $");
+  } finally {
+    await close(server);
+  }
+});
+
 test("WMUX_URL overrides a stale saved URL", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "wmuxctl-home-"));
   fs.mkdirSync(path.join(home, ".wmux"));

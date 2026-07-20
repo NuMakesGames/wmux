@@ -260,7 +260,7 @@ export class SessionManager {
 
     const sendReady = () => {
       if (socket.readyState !== socket.OPEN || !this.outputWatchers.get(paneId)?.has(socket)) return;
-      const replay = this.replayOutputFor(pane, session);
+      const replay = this.outputReplayFor(session);
       this.send(socket, {
         type: "ready",
         paneId,
@@ -536,6 +536,16 @@ export class SessionManager {
   private replayOutputFor(pane: PaneState, session: ManagedSession): AttachReplay {
     if (this.shouldUseDurableClientRefresh(pane)) return { data: "", kind: "raw" };
     return session.attachReplay ?? {
+      data: session.replayOutput,
+      kind: "raw",
+    };
+  }
+
+  private outputReplayFor(session: ManagedSession): AttachReplay {
+    // Output-only clients cannot perform the browser's durable-client refresh,
+    // and textual automation must not receive a screen-shaped checkpoint that
+    // can destroy line boundaries used for readiness and completion markers.
+    return {
       data: session.replayOutput,
       kind: "raw",
     };
