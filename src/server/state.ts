@@ -518,7 +518,17 @@ export class StateStore extends EventEmitter {
     const summary = cleanDescriptor(input.summary ?? input.body ?? "", "");
     const delegationMessage = cleanDelegationMessage(input.message ?? "");
     const message = cleanAgentMessage(delegationMessage);
-    const runId = cleanDelegationRunId(input.runId);
+    const suppliedRunId = cleanDelegationRunId(input.runId);
+    const latestAgentEvent = this.state.agentEvents.find(
+      (candidate) => candidate.paneId === target.pane.id && candidate.agent === agent,
+    );
+    const runId = suppliedRunId || (
+      ACTIVE_AGENT_STATUSES.has(status)
+      && latestAgentEvent
+      && ACTIVE_AGENT_STATUSES.has(latestAgentEvent.status)
+        ? cleanDelegationRunId(latestAgentEvent.runId)
+        : ""
+    );
     const createdAt = now();
     if (ACTIVE_AGENT_STATUSES.has(status)) {
       this.markLatestAgentInterrupted(target.pane.id, agent, createdAt, runId);
