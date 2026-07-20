@@ -26,6 +26,12 @@ import { canApplyStagedPasteImage, imagesFromClipboard, quoteStagedImagePath } f
 import { Osc52Parser } from "./terminal-osc52";
 import { OscColorQueryParser } from "./terminal-color-queries";
 import { RectangularSelection } from "./terminal-rectangular-selection";
+import {
+  isBoundedPredictionEcho,
+  layoutPredictedTerminalInput,
+  predictedTerminalInput,
+  type PredictedTerminalInput,
+} from "./terminal-input-prediction";
 import { useColorScheme } from "./color-scheme-context";
 import { PaneSocketController } from "./pane-socket";
 import { compileKeybindings, eventMatchesAction, type CompiledKeybindingMap } from "../../shared/keybindings";
@@ -144,6 +150,7 @@ export const TerminalPane = memo(function TerminalPane({
   const colorSchemeRef = useRef(colorScheme);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalHostShellRef = useRef<HTMLDivElement | null>(null);
+  const predictionLayerRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const rectangularSelectionRef = useRef<RectangularSelection | null>(null);
@@ -153,6 +160,7 @@ export const TerminalPane = memo(function TerminalPane({
   const suspendSocketRef = useRef(inactiveTabStreaming === "suspend" && !tabVisible);
   const discardPendingOutputRef = useRef<(() => void) | null>(null);
   const tuiFrameRateRef = useRef(tuiFrameRate);
+  const terminalFontSizeRef = useRef(terminalFontSize);
   const terminalScrollModeRef = useRef(terminalScrollMode);
   const keybindingsRef = useRef<CompiledKeybindingMap>(compileKeybindings(keybindings));
   const appleKeybindingsRef = useRef(appleKeybindings);
@@ -272,12 +280,19 @@ export const TerminalPane = memo(function TerminalPane({
     let selectionRestoreTimer: number | undefined;
     let removeContextCopyBridgeDismissListeners: (() => void) | undefined;
     let terminalOutputTimer: number | undefined;
+    let predictionExpiryTimer: number | undefined;
+    let predictionProbeTimer: number | undefined;
     let osc52PendingTimer: number | undefined;
     let viewportFitFrame: number | undefined;
     let viewportFitTimer: number | undefined;
     let queuedTerminalOutput = "";
     const alternateScreenState = createAlternateScreenState();
     let lastTerminalOutputAt = 0;
+    let lastInteractiveInputAt = Number.NEGATIVE_INFINITY;
+    let nextInputSequence = 0;
+    let predictedInputs: PredictedTerminalInput[] = [];
+    let predictionArmed = false;
+    let predictionProbe: { sequence: number; text: string } | undefined;
     let replayChunks: string[] = [];
     let replayBufferedOutput: string[] = [];
     let replayDrainTimer: number | undefined;
@@ -319,6 +334,104 @@ export const TerminalPane = memo(function TerminalPane({
       setTerminalMetrics((previous) =>
         previous.width === metrics.width && previous.height === metrics.height ? previous : metrics,
       );
+    };
+
+    const clearPredictionLayer = () => {
+      predictionLayerRef.current?.replaceChildren();
+    };
+
+    const clearPredictions = () => {
+      predictedInputs = [];
+      if (predictionExpiryTimer !== undefined) window.clearTimeout(predictionExpiryTimer);
+      predictionExpiryTimer = undefined;
+      clearPredictionLayer();
+    };
+
+    const clearPredictionProbe = () => {
+      predictionProbe = undefined;
+      if (predictionProbeTimer !== undefined) window.clearTimeout(predictionProbeTimer);
+      predictionProbeTimer = undefined;
+    };
+
+    const disarmPrediction = () => {
+      predictionArmed = false;
+      clearPredictionProbe();
+      clearPredictions();
+    };
+
+    const probePredictionEcho = (prediction: PredictedTerminalInput) => {
+      if (prediction.kind !== "insert" || predictionProbe) return;
+      predictionProbe = { sequence: prediction.sequence, text: prediction.text };
+      predictionProbeTimer = window.setTimeout(clearPredictionProbe, 500);
+    };
+
+    const observePredictionEcho = (sequence: number | undefined, data: string) => {
+      if (!predictionProbe || sequence === undefined || sequence < predictionProbe.sequence) return;
+      if (!isBoundedPredictionEcho(data, predictionProbe.text)) return;
+      predictionArmed = true;
+      clearPredictionProbe();
+    };
+
+    const schedulePredictionExpiry = () => {
+      if (predictionExpiryTimer !== undefined) window.clearTimeout(predictionExpiryTimer);
+      predictionExpiryTimer = window.setTimeout(clearPredictions, 1000);
+    };
+
+    const renderPredictions = (term: Terminal) => {
+      const layer = predictionLayerRef.current;
+      const metrics = readCellMetrics(term);
+      const cursor = term.wasmTerm?.getCursor();
+      if (
+        !layer
+        || !metrics
+        || !cursor
+        || alternateScreenState.active
+        || replayingTerminalOutput
+        || term.getViewportY() > 0
+      ) {
+        disarmPrediction();
+        return;
+      }
+      const layout = layoutPredictedTerminalInput(cursor, safeCols(term.cols), safeRows(term.rows), predictedInputs);
+      if (!layout) {
+        disarmPrediction();
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      layer.style.fontSize = `${terminalFontSizeRef.current}px`;
+      const addCell = (col: number, row: number, text: string, className: string) => {
+        const cell = document.createElement("span");
+        cell.className = className;
+        cell.textContent = text;
+        cell.style.left = `${col * metrics.width}px`;
+        cell.style.top = `${row * metrics.height}px`;
+        cell.style.width = `${metrics.width}px`;
+        cell.style.height = `${metrics.height}px`;
+        cell.style.lineHeight = `${metrics.height}px`;
+        fragment.append(cell);
+      };
+      addCell(
+        layout.authoritativeCursor.col,
+        layout.authoritativeCursor.row,
+        "",
+        "terminal-input-prediction-cell",
+      );
+      for (const cell of layout.cells) {
+        addCell(cell.col, cell.row, cell.text, "terminal-input-prediction-cell");
+      }
+      addCell(layout.cursor.col, layout.cursor.row, "", "terminal-input-prediction-cursor");
+      layer.replaceChildren(fragment);
+    };
+
+    const acknowledgePredictions = (sequence: number | undefined) => {
+      if (sequence === undefined || predictedInputs.length === 0) return;
+      predictedInputs = predictedInputs.filter((prediction) => prediction.sequence > sequence);
+      if (predictedInputs.length === 0) {
+        clearPredictions();
+      } else {
+        schedulePredictionExpiry();
+      }
     };
 
     const copyRectangularSelection = (term: Terminal, selection: string): void => {
@@ -503,6 +616,7 @@ export const TerminalPane = memo(function TerminalPane({
 
     const writeTerminalTextNow = (term: Terminal, text: string) => {
       if (!text) return;
+      clearPredictionLayer();
       const placeholderCells: KittyPlaceholderCell[] = [];
       writeTerminalOutput(
         term,
@@ -520,6 +634,7 @@ export const TerminalPane = memo(function TerminalPane({
         },
       );
       recordKittyPlaceholderCells(placeholderCells);
+      if (predictedInputs.length > 0) renderPredictions(term);
     };
 
     const flushQueuedTerminalText = (term: Terminal) => {
@@ -539,8 +654,18 @@ export const TerminalPane = memo(function TerminalPane({
       // Let the first full-screen frame after an idle prompt appear promptly;
       // sustained redraw remains capped at the configured cadence.
       const now = Date.now();
-      const delay = terminalOutputDelay(alternateScreenState.active, tuiFrameRateRef.current, lastTerminalOutputAt, now);
+      const delay = terminalOutputDelay(
+        alternateScreenState.active,
+        tuiFrameRateRef.current,
+        lastTerminalOutputAt,
+        now,
+        lastInteractiveInputAt,
+      );
       lastTerminalOutputAt = now;
+      if (delay === 0) {
+        flushQueuedTerminalText(term);
+        return;
+      }
       terminalOutputTimer = window.setTimeout(() => flushQueuedTerminalText(term), delay);
     };
 
@@ -672,6 +797,8 @@ export const TerminalPane = memo(function TerminalPane({
       queuedTerminalOutput = "";
       resetAlternateScreenState(alternateScreenState);
       lastTerminalOutputAt = 0;
+      lastInteractiveInputAt = Number.NEGATIVE_INFINITY;
+      disarmPrediction();
       resetReplayDrain();
       resetSynchronizedOutput(synchronizedOutputRef.current);
       outputCarryRef.current = "";
@@ -788,7 +915,10 @@ export const TerminalPane = memo(function TerminalPane({
           connectedRef.current = nextConnected;
           setConnected(nextConnected);
           setConnectionIssue(issue);
-          if (!nextConnected) setStartupLabel(issue || "Connecting to terminal…");
+          if (!nextConnected) {
+            disarmPrediction();
+            setStartupLabel(issue || "Connecting to terminal…");
+          }
         },
         onOpen: (socket) => {
           sendResizeMessage(socket, activeRef.current ? "activate" : "resize", term, foreground());
@@ -812,6 +942,8 @@ export const TerminalPane = memo(function TerminalPane({
             else revealTerminal();
           }
           if (message.type === "output") {
+            observePredictionEcho(message.inputSequence, message.data);
+            acknowledgePredictions(message.inputSequence);
             if (replayDraining()) replayBufferedOutput.push(message.data);
             else handleOutput(term, message.data);
             durableRefreshRevealGate?.noteOutput();
@@ -1144,10 +1276,37 @@ export const TerminalPane = memo(function TerminalPane({
           socketController?.reconnect("Restarting pane");
           return;
         }
-        if (inputMayLeaveShellPrompt(data)) shellCursorPlacementRef.current = false;
+        let sequence: number | undefined;
+        if (!terminalResponse) {
+          sequence = ++nextInputSequence;
+          lastInteractiveInputAt = Date.now();
+          const prediction = predictedTerminalInput(sequence, data);
+          const canPredict = connectedRef.current
+            && activeRef.current
+            && !alternateScreenState.active
+            && !replayingTerminalOutput
+            && term.getViewportY() <= 0;
+          if (
+            prediction
+            && predictionArmed
+            && canPredict
+          ) {
+            predictedInputs.push(prediction);
+            renderPredictions(term);
+            schedulePredictionExpiry();
+          } else {
+            clearPredictions();
+            if (prediction && canPredict) probePredictionEcho(prediction);
+            else disarmPrediction();
+          }
+        }
+        if (inputMayLeaveShellPrompt(data)) {
+          shellCursorPlacementRef.current = false;
+          disarmPrediction();
+        }
         if (term.getViewportY() > 0) term.scrollToBottom();
         if (terminalResponse && replayingTerminalOutput) return;
-        sendInput(socketRef.current, data, terminalResponse);
+        sendInput(socketRef.current, data, terminalResponse, sequence);
       };
 
       term.attachCustomKeyEventHandler((event) => {
@@ -1173,14 +1332,12 @@ export const TerminalPane = memo(function TerminalPane({
         }
         if (eventMatchesAction(event, keybindingsRef.current, "terminal.wordPrevious", appleKeybindingsRef.current)) {
           rectangularSelection?.clear();
-          inputEpochRef.current += 1;
-          sendInput(socketRef.current, "\x1bb");
+          forwardTerminalData("\x1bb");
           return true;
         }
         if (eventMatchesAction(event, keybindingsRef.current, "terminal.wordNext", appleKeybindingsRef.current)) {
           rectangularSelection?.clear();
-          inputEpochRef.current += 1;
-          sendInput(socketRef.current, "\x1bf");
+          forwardTerminalData("\x1bf");
           return true;
         }
         return false;
@@ -1206,6 +1363,7 @@ export const TerminalPane = memo(function TerminalPane({
       term.onData(forwardTerminalData);
       term.onResize(() => {
         rectangularSelection?.clear();
+        clearPredictions();
         const ws = socketRef.current;
         if (ws?.readyState === WebSocket.OPEN) {
           sendResizeMessage(ws, "resize", term, foreground());
@@ -1237,6 +1395,9 @@ export const TerminalPane = memo(function TerminalPane({
       renderDisposable?.dispose();
       bufferDisposable?.dispose();
       if (terminalOutputTimer !== undefined) window.clearTimeout(terminalOutputTimer);
+      if (predictionExpiryTimer !== undefined) window.clearTimeout(predictionExpiryTimer);
+      if (predictionProbeTimer !== undefined) window.clearTimeout(predictionProbeTimer);
+      clearPredictionLayer();
       if (osc52PendingTimer !== undefined) window.clearTimeout(osc52PendingTimer);
       if (viewportFitFrame !== undefined) window.cancelAnimationFrame(viewportFitFrame);
       if (viewportFitTimer !== undefined) window.clearTimeout(viewportFitTimer);
@@ -1288,6 +1449,7 @@ export const TerminalPane = memo(function TerminalPane({
 
   useEffect(() => {
     const term = terminalRef.current;
+    terminalFontSizeRef.current = terminalFontSize;
     if (!term?.renderer) return;
     term.renderer.setFontSize(terminalFontSize);
     requestAnimationFrame(() => {
@@ -1373,6 +1535,7 @@ export const TerminalPane = memo(function TerminalPane({
         }}
       >
         <div ref={containerRef} className="terminal-host" />
+        <div ref={predictionLayerRef} className="terminal-input-prediction-layer" aria-hidden="true" />
         {!terminalReady ? (
           <div className="terminal-startup-status" role="status" aria-live="polite">
             <span className="terminal-startup-spinner" aria-hidden="true" />

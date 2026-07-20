@@ -288,6 +288,55 @@ test("copies tmux default-selection OSC 52 requests to the browser clipboard", a
   await expect(page.getByRole("button", { name: "Copy terminal request" })).toBeHidden();
 });
 
+test("predicts bounded shell input locally and expires it without authoritative echo", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "desktop terminal prediction coverage");
+
+  await page.routeWebSocket(/\/ws\/panes\//, (browserSocket) => {
+    const serverSocket = browserSocket.connectToServer();
+    browserSocket.onMessage((message) => serverSocket.send(message));
+    serverSocket.onMessage((message) => {
+      let delay = 0;
+      try {
+        const parsed = JSON.parse(String(message)) as { type?: string };
+        if (parsed.type === "output") delay = 250;
+      } catch {
+        // Forward non-JSON frames without delay.
+      }
+      setTimeout(() => browserSocket.send(message), delay);
+    });
+  });
+
+  const created = await request.post("/api/workspaces", { data: { machineId: "local" } });
+  expect(created.ok()).toBeTruthy();
+  const payload = await created.json() as {
+    workspace: { id: string; activeTabId: string };
+  };
+  try {
+    await page.goto(`/workspaces/${payload.workspace.id}/tabs/${payload.workspace.activeTabId}`);
+    const activePane = page.locator(".terminal-pane.active");
+    await expect(activePane).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+    const textarea = activePane.locator(".terminal-host textarea");
+    await textarea.evaluate((element: HTMLTextAreaElement) => element.focus());
+    await page.keyboard.type("a");
+    await page.waitForTimeout(350);
+
+    await page.keyboard.type("x");
+    const predictedX = activePane.locator(".terminal-input-prediction-cell", { hasText: "x" });
+    await expect(predictedX).toBeVisible();
+    const predictedXLeft = await predictedX.evaluate((element: HTMLElement) => element.style.left);
+    await page.keyboard.press("Backspace");
+    await expect.poll(() => activePane.locator(".terminal-input-prediction-cursor")
+      .evaluate((element: HTMLElement) => element.style.left)).toBe(predictedXLeft);
+    await expect(activePane.locator(".terminal-input-prediction-layer")).toBeEmpty({ timeout: 1_000 });
+  } finally {
+    const removed = await request.delete(`/api/workspaces/${payload.workspace.id}`);
+    expect(removed.ok()).toBeTruthy();
+  }
+});
+
 test("sends Shift+Enter as one Ctrl+J newline while preserving plain Enter", async ({
   page,
   request,
