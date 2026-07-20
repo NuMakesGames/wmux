@@ -358,7 +358,13 @@ def describe_workspace(
     }
 
 
-ANSI_ESCAPE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")
+ANSI_ESCAPE = re.compile(
+    r"\x1b(?:"
+    r"\][^\x07]*(?:\x07|\x1b\\)"
+    r"|\[[0-?]*[ -/]*[@-~]"
+    r"|[ -/]*[0-~]"
+    r")"
+)
 
 
 def clean_terminal_text(value: str) -> str:
