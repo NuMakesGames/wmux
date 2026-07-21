@@ -15,6 +15,7 @@ import {
 import { WMUX_MONO_FONT_FAMILY } from "./fonts";
 import { loadMachineTargetPickerExpanded, persistMachineTargetPickerExpanded } from "./machine-target";
 import { compactMiddlePath } from "./path-display";
+import { formatSessionReference } from "./session-reference";
 import type { MachineVersionStatus, WorkspaceReorderPosition } from "./types";
 import { useOpenTuiTheme, type OpenTuiTheme } from "./color-scheme-context";
 
@@ -31,6 +32,7 @@ export interface OpenTuiSidebarWorkspace {
   agentCreated?: boolean;
   agentName?: string;
   agentStatus?: "running" | "waiting" | "completed" | "failed" | "updated";
+  sessionId?: string;
   versionStatus?: MachineVersionStatus;
   versionLabel?: string;
   versionDetail?: string;
@@ -489,6 +491,7 @@ const drawSidebarGrid = (
         [
           workspace.agentCreated ? `${workspace.title} (agent-created)` : workspace.title,
           workspace.versionDetail,
+          formatSessionReference(workspace.sessionId),
         ].filter(Boolean).join(" / "),
         { type: "workspace", workspaceId: workspace.id, tabId: workspace.tabId },
       );
