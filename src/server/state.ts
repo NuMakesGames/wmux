@@ -307,7 +307,8 @@ export class StateStore extends EventEmitter {
   ): SurfaceTab {
     const { workspace, tab } = this.requireTab(tabId);
     const sourcePane = tab.panes.find((pane) => pane.id === paneId);
-    const targetMachineId = machineId ?? sourcePane?.machineId ?? workspace.machineId;
+    if (!sourcePane) throw new Error("pane not found");
+    const targetMachineId = machineId ?? sourcePane.machineId;
     if (ids) {
       const existing = tab.panes.find((pane) => pane.id === ids.paneId);
       if (existing) {

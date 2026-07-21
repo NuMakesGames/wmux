@@ -190,6 +190,12 @@ test("client-generated creation ids are idempotent and collision-safe", () => {
     assert.equal(store.snapshot().revision, splitRevision);
 
     assert.throws(
+      () => store.splitPane(tab.id, "pane_missing", "vertical", "local", "/tmp"),
+      /pane not found/,
+    );
+    assert.equal(store.snapshot().revision, splitRevision);
+
+    assert.throws(
       () => store.createWorkspace("local", undefined, "user", { ...workspaceIds, tabId: `tab_${"1".repeat(32)}` }),
       StateIdConflictError,
     );

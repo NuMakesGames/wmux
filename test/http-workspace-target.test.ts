@@ -120,6 +120,36 @@ test("workspace creation rejects malformed or conflicting client ids", async () 
   });
 });
 
+test("split creation rejects a pane outside the target tab without mutating state", async () => {
+  const machines: MachineConfig[] = [{ id: "local", name: "Local", kind: "local" }];
+  await withServer(machines, async (baseUrl) => {
+    const first = await postWorkspace(baseUrl, { machineId: "local" });
+    const firstPayload = await first.json() as {
+      workspace: { activeTabId: string; tabs: Array<{ panes: Array<{ id: string }> }> };
+    };
+    const second = await postWorkspace(baseUrl, { machineId: "local" });
+    const secondPayload = await second.json() as {
+      workspace: { tabs: Array<{ panes: Array<{ id: string }> }> };
+      state: { revision: number };
+    };
+
+    const response = await fetch(`${baseUrl}/api/tabs/${firstPayload.workspace.activeTabId}/split`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        paneId: secondPayload.workspace.tabs[0].panes[0].id,
+        direction: "vertical",
+      }),
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "pane_not_found" });
+
+    const current = await fetch(`${baseUrl}/api/bootstrap`);
+    const currentPayload = await current.json() as { revision: number };
+    assert.equal(currentPayload.revision, secondPayload.state.revision);
+  });
+});
+
 test("workspace creation reports when no machine target exists", async () => {
   await withServer([], async (baseUrl) => {
     const response = await postWorkspace(baseUrl);

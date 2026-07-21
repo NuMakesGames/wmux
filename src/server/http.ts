@@ -978,11 +978,13 @@ export const createHttpServer = (
           return;
         }
         const snapshot = state.snapshot();
-        const sourcePane = snapshot.workspaces
+        const targetTab = snapshot.workspaces
           .flatMap((workspace) => workspace.tabs)
-          .flatMap((tab) => tab.panes)
-          .find((pane) => pane.id === body.paneId);
-        const machineId = resolveMachineId(machines, body.machineId, sourcePane?.machineId);
+          .find((tab) => tab.id === split[1]);
+        if (!targetTab) throw new HttpError(404, "tab_not_found");
+        const sourcePane = targetTab.panes.find((pane) => pane.id === body.paneId);
+        if (!sourcePane) throw new HttpError(404, "pane_not_found");
+        const machineId = resolveMachineId(machines, body.machineId, sourcePane.machineId);
         const clientIds = parseClientCreationIds(body.clientIds, { paneId: "pane" }) as SplitCreationIds | undefined;
         const tab = state.splitPane(
           split[1],
