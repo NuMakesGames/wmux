@@ -19,6 +19,7 @@ import { ensureWmuxFonts, terminalFontFamilyStack } from "./fonts";
 import { ensureGhostty } from "./terminal-loader";
 import { configureTerminalInput } from "./terminal-input";
 import {
+  canApplyMobileClipboardRead,
   mobileTerminalArrowSequence,
   mobileTerminalKeySequences,
   oneShotControlSequence,
@@ -26,6 +27,7 @@ import {
 } from "./mobile-terminal-keys";
 import { isTerminalProtocolResponse } from "../../shared/terminal-protocol";
 import { OpenTuiPaneToolbar } from "./OpenTuiPaneToolbar";
+import { MobilePasteDialog } from "./MobilePasteDialog";
 import { writeBrowserClipboard } from "./clipboard";
 import { api } from "./api";
 import { canApplyStagedPasteImage, imagesFromClipboard, quoteStagedImagePath } from "./clipboard-images";
@@ -212,6 +214,8 @@ export const TerminalPane = memo(function TerminalPane({
   const [terminalReady, setTerminalReady] = useState(false);
   const [rectangleVersion, setRectangleVersion] = useState(0);
   const [mobileControlArmed, setMobileControlArmed] = useState(false);
+  const [mobilePasteFallback, setMobilePasteFallback] = useState<string | null>(null);
+  const [mobilePasteReading, setMobilePasteReading] = useState(false);
   const visibleMediaItems = [...kittyMediaItems, ...mediaItems];
   const visibleInlineItems = viewportY < 1 ? kittyInlineItems.filter((item) => item.data) : [];
 
@@ -1666,6 +1670,48 @@ export const TerminalPane = memo(function TerminalPane({
   const sendMobileTerminalArrow = (arrow: MobileTerminalArrow) => {
     sendMobileTerminalKey(mobileTerminalArrowSequence(arrow, terminalRef.current?.getMode(1) ?? false));
   };
+  const pasteMobileText = (text: string) => {
+    const term = terminalRef.current;
+    if (!term || !text) return;
+    mobileControlArmedRef.current = false;
+    setMobileControlArmed(false);
+    if (term.getViewportY() > 0) term.scrollToBottom();
+    rectangularSelectionRef.current?.clear();
+    term.clearSelection();
+    term.paste(text);
+    term.focus();
+  };
+  const pasteMobileClipboard = async () => {
+    if (mobilePasteReading) return;
+    mobileControlArmedRef.current = false;
+    setMobileControlArmed(false);
+    if (!navigator.clipboard?.readText) {
+      setMobilePasteFallback("Direct clipboard access is unavailable in this browser.");
+      return;
+    }
+    const term = terminalRef.current;
+    if (!term) return;
+    const captured = { paneId: pane.id, inputEpoch: ++inputEpochRef.current };
+    const targetIsCurrent = () => canApplyMobileClipboardRead(captured, {
+      paneId: pane.id,
+      inputEpoch: inputEpochRef.current,
+      mounted: terminalRef.current === term && Boolean(containerRef.current?.isConnected),
+      active: activeRef.current,
+      visible: document.visibilityState === "visible",
+      connected: connectedRef.current && socketRef.current?.readyState === WebSocket.OPEN,
+    });
+    setMobilePasteReading(true);
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!targetIsCurrent()) return;
+      if (text) pasteMobileText(text);
+      else setMobilePasteFallback("The browser returned an empty clipboard.");
+    } catch {
+      if (targetIsCurrent()) setMobilePasteFallback("The browser blocked direct clipboard access.");
+    } finally {
+      setMobilePasteReading(false);
+    }
+  };
 
   return (
     <section
@@ -1756,6 +1802,16 @@ export const TerminalPane = memo(function TerminalPane({
         ) : null}
       </div>
       <div className="mobile-terminal-keys" role="toolbar" aria-label="Terminal keys">
+        <button
+          type="button"
+          aria-label="Paste clipboard"
+          aria-busy={mobilePasteReading}
+          disabled={mobilePasteReading}
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => void pasteMobileClipboard()}
+        >
+          Paste
+        </button>
         <button type="button" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalKey(mobileTerminalKeySequences.escape)}>Esc</button>
         <button type="button" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalKey(mobileTerminalKeySequences.tab)}>Tab</button>
         <button
@@ -1777,6 +1833,16 @@ export const TerminalPane = memo(function TerminalPane({
         <button type="button" aria-label="Arrow up" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalArrow("up")}>↑</button>
         <button type="button" aria-label="Arrow right" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalArrow("right")}>→</button>
       </div>
+      {mobilePasteFallback ? (
+        <MobilePasteDialog
+          reason={mobilePasteFallback}
+          onCancel={() => setMobilePasteFallback(null)}
+          onInsert={(text) => {
+            setMobilePasteFallback(null);
+            pasteMobileText(text);
+          }}
+        />
+      ) : null}
       {visibleMediaItems.length > 0 ? (
         <div className="media-shelf">
           {visibleMediaItems.slice(0, 3).map((item) => (

@@ -973,12 +973,30 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
   });
   await page.addInitScript(() => {
     const sent: string[] = [];
+    const mobileClipboard = { text: "", blocked: false };
     const originalSend = WebSocket.prototype.send;
     WebSocket.prototype.send = function send(data) {
       if (typeof data === "string") sent.push(data);
       return originalSend.call(this, data);
     };
-    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages = sent;
+    const testWindow = window as unknown as {
+      __wmuxMobileSocketMessages: string[];
+      __wmuxMobileClipboard: typeof mobileClipboard;
+    };
+    testWindow.__wmuxMobileSocketMessages = sent;
+    testWindow.__wmuxMobileClipboard = mobileClipboard;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        readText: async () => {
+          if (mobileClipboard.blocked) throw new DOMException("Clipboard read blocked", "NotAllowedError");
+          return mobileClipboard.text;
+        },
+        writeText: async (text: string) => {
+          mobileClipboard.text = text;
+        },
+      },
+    });
   });
   await page.reload();
 
@@ -1050,6 +1068,42 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
     return { width: Math.round(rect.width), height: Math.round(rect.height) };
   }));
   expect(keySizes.every(({ width, height }) => width >= 44 && height >= 44)).toBe(true);
+  const directPaste = "wmux-mobile-direct-paste";
+  await page.evaluate((text) => {
+    const clipboard = (window as unknown as {
+      __wmuxMobileClipboard: { text: string; blocked: boolean };
+    }).__wmuxMobileClipboard;
+    clipboard.text = text;
+    clipboard.blocked = false;
+  }, directPaste);
+  await terminalKeys.getByRole("button", { name: "Paste clipboard" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages.join(""),
+  )).toContain(directPaste);
+
+  await page.evaluate(() => {
+    const clipboard = (window as unknown as {
+      __wmuxMobileClipboard: { text: string; blocked: boolean };
+    }).__wmuxMobileClipboard;
+    clipboard.blocked = true;
+  });
+  await terminalKeys.getByRole("button", { name: "Paste clipboard" }).click();
+  const pasteDialog = page.getByRole("dialog", { name: "Paste into terminal" });
+  await expect(pasteDialog).toBeVisible();
+  await expect(pasteDialog).toContainText("blocked direct clipboard access");
+  const manualPaste = "wmux-mobile-manual-paste";
+  await pasteDialog.getByRole("textbox", { name: "Text to paste into terminal" }).fill(manualPaste);
+  const pasteActions = await pasteDialog.getByRole("button").evaluateAll((buttons) => buttons.map((button) => {
+    const rect = button.getBoundingClientRect();
+    return { width: Math.round(rect.width), height: Math.round(rect.height) };
+  }));
+  expect(pasteActions.every(({ width, height }) => width >= 44 && height >= 44)).toBe(true);
+  await pasteDialog.getByRole("button", { name: "Insert text" }).click();
+  await expect(pasteDialog).toBeHidden();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages.join(""),
+  )).toContain(manualPaste);
+
   await terminalKeys.getByRole("button", { name: "Esc" }).click();
   await terminalKeys.getByRole("button", { name: "Ctrl" }).click();
   await expect(terminalKeys.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "true");
