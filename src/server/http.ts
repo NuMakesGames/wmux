@@ -53,6 +53,7 @@ import type {
 import { buildWindowsHelperBundle, buildWindowsPowerShellBootstrap } from "./windows-helpers.js";
 import {
   StateIdConflictError,
+  WorkspaceDepthError,
   type SplitCreationIds,
   type StateStore,
   type TabCreationIds,
@@ -266,6 +267,7 @@ export const createHttpServer = (
     const snapshot = state.snapshot();
     return {
       revision: snapshot.revision,
+      workspaceTreeRevision: snapshot.workspaceTreeRevision,
       healthEpoch,
       machines: currentMachineStatuses(),
       workspaces: snapshot.workspaces,
@@ -663,6 +665,7 @@ export const createHttpServer = (
           tuiFrameRate?: WmuxSettings["tuiFrameRate"];
           terminalScrollMode?: WmuxSettings["terminalScrollMode"];
           machineAliases?: Record<string, string>;
+          collapsedWorkspaceIds?: string[];
         };
         settings.update({
           terminalFontSize: body.terminalFontSize,
@@ -672,6 +675,7 @@ export const createHttpServer = (
           tuiFrameRate: body.tuiFrameRate,
           terminalScrollMode: body.terminalScrollMode,
           machineAliases: body.machineAliases,
+          collapsedWorkspaceIds: body.collapsedWorkspaceIds,
         });
         sendJson(response, 200, { settings: settings.snapshot(), state: currentPayload() });
         return;
@@ -681,9 +685,21 @@ export const createHttpServer = (
         const body = (await readBody(request)) as {
           machineId?: string;
           sourcePaneId?: string;
+          parentPaneId?: string;
           createdBy?: "user" | "agent";
+          parentWorkspaceId?: unknown;
           clientIds?: unknown;
         };
+        if (body.parentWorkspaceId !== undefined) {
+          sendJson(response, 400, { error: "parent_workspace_id_not_accepted" }); return;
+        }
+        if (body.parentPaneId !== undefined && body.createdBy !== "agent") {
+          sendJson(response, 400, { error: "parent_pane_requires_agent" }); return;
+        }
+        const parentPane = body.parentPaneId ? state.findPane(body.parentPaneId) ?? undefined : undefined;
+        if (body.parentPaneId && (!parentPane || parentPane.status === "exited")) {
+          sendJson(response, 422, { error: "parent_pane_unavailable" }); return;
+        }
         const machineId = resolveMachineId(machines, body.machineId);
         const clientIds = parseClientCreationIds(body.clientIds, {
           workspaceId: "ws",
@@ -691,12 +707,20 @@ export const createHttpServer = (
           paneId: "pane",
         }) as WorkspaceCreationIds | undefined;
         const sourcePane = body.sourcePaneId ? state.findPane(body.sourcePaneId) ?? undefined : undefined;
-        const workspace = state.createWorkspace(
-          machineId,
-          await cwdForSourcePane(state, machines, sourcePane, machineId),
-          body.createdBy === "agent" ? "agent" : "user",
-          clientIds,
-        );
+        const cwdPane = sourcePane ?? parentPane;
+        let workspace;
+        try {
+          workspace = state.createWorkspace(
+            machineId,
+            await cwdForSourcePane(state, machines, cwdPane, machineId),
+            body.createdBy === "agent" ? "agent" : "user",
+            parentPane ? state.findPaneContext(parentPane.id)?.workspace.id : undefined,
+            clientIds,
+          );
+        } catch (error) {
+          if (error instanceof WorkspaceDepthError) { sendJson(response, 422, { error: error.code }); return; }
+          throw error;
+        }
         sendJson(response, 201, { workspace, state: currentPayload() });
         return;
       }
@@ -706,23 +730,27 @@ export const createHttpServer = (
           workspaceId?: unknown;
           targetWorkspaceId?: unknown;
           position?: unknown;
+          workspaceTreeRevision?: unknown;
         };
         if (
           typeof body.workspaceId !== "string" ||
-          typeof body.targetWorkspaceId !== "string" ||
-          (body.position !== "before" && body.position !== "after")
+          (body.position !== "out-of" && typeof body.targetWorkspaceId !== "string") ||
+          (body.position === "out-of" && body.targetWorkspaceId !== undefined && typeof body.targetWorkspaceId !== "string") ||
+          (body.position !== "before" && body.position !== "after" && body.position !== "into" && body.position !== "out-of") ||
+          !Number.isInteger(body.workspaceTreeRevision)
         ) {
           sendJson(response, 400, { error: "invalid_workspace_reorder" });
           return;
         }
-        const reordered = state.reorderWorkspace(
+        const reordered = state.reorderWorkspaceResult(
           body.workspaceId,
-          body.targetWorkspaceId,
+          typeof body.targetWorkspaceId === "string" ? body.targetWorkspaceId : undefined,
           body.position as WorkspaceReorderPosition,
+          body.workspaceTreeRevision as number,
         );
-        if (!reordered) {
-          sendJson(response, 404, { error: "workspace_not_found" });
-          return;
+        if (!reordered.ok) {
+          const status = reordered.status === "conflict" ? 409 : reordered.status === "not_found" ? 404 : 422;
+          sendJson(response, status, { error: `workspace_${reordered.status}`, state: currentPayload() }); return;
         }
         sendJson(response, 200, { state: currentPayload() });
         return;

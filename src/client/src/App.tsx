@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Activity, Bell, BellRing, CheckCheck, CirclePlus, Command as CommandIcon, GripVertical, Link2, LoaderCircle, MessageSquare, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Server, Settings, TerminalSquare, X } from "lucide-react";
-import { api, UnauthorizedError } from "./api";
+import { Activity, Bell, BellRing, CheckCheck, ChevronDown, ChevronRight, CirclePlus, Command as CommandIcon, GripVertical, Link2, LoaderCircle, MessageSquare, MoreHorizontal, PanelLeft, PanelLeftClose, PanelLeftOpen, Plus, ScreenShare, Server, Settings, TerminalSquare, X } from "lucide-react";
+import { api, modalSettingsUpdate, UnauthorizedError, WorkspaceReorderConflictError } from "./api";
 import { DiagnosticsModal } from "./DiagnosticsModal";
 import { ActivityPanel, buildActivityItems } from "./ActivityPanel";
 import { CommandPalette, type PaletteCommand } from "./CommandPalette";
@@ -46,6 +46,17 @@ import { summarizeWorkspaceVersion } from "./workspace-version";
 import { useMobileViewportState } from "./mobile-viewport";
 import { loadMachineTargetId, persistMachineTargetId, resolveMachineTargetId } from "./machine-target";
 import { workspacePresentationDescriptor, workspacePresentationMachineId } from "./workspace-presentation";
+import { WorkspaceMoveDialog } from "./WorkspaceMoveDialog";
+import {
+  deriveWorkspaceTree,
+  expandWorkspaceAncestors,
+  pruneCollapsedWorkspaceIds,
+  rebaseCollapsedWorkspaceIds,
+  sameWorkspaceIds,
+  workspacePointerMovePosition,
+  type WorkspaceActivityAggregate,
+  type WorkspaceMoveIntent,
+} from "./workspace-tree";
 import { DEFAULT_TERMINAL_FONT_FAMILY } from "./types";
 import {
   applyOptimisticCreations,
@@ -95,7 +106,7 @@ interface PendingAction {
 
 interface WorkspaceDropPreview {
   workspaceId: string;
-  targetWorkspaceId: string;
+  targetWorkspaceId?: string;
   position: WorkspaceReorderPosition;
 }
 
@@ -124,6 +135,7 @@ export function App() {
   const [previewSettings, setPreviewSettings] = useState<WmuxSettings | null>(null);
   const [workspaceHostFilter, setWorkspaceHostFilter] = useState("all");
   const [workspaceDropPreview, setWorkspaceDropPreview] = useState<WorkspaceDropPreview | null>(null);
+  const [moveWorkspace, setMoveWorkspace] = useState<{ workspaceId: string; returnFocus: HTMLElement | null } | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [streamOpen, setStreamOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -138,6 +150,9 @@ export function App() {
   const [pendingPaneLabels, setPendingPaneLabels] = useState<Map<string, string>>(() => new Map());
   const optimisticCreations = useRef(new Map<string, OptimisticCreation>());
   const pendingActionKeys = useRef(new Set<string>());
+  const collapseWriteQueue = useRef<Promise<void>>(Promise.resolve());
+  const collapseWriteVersion = useRef(0);
+  const desiredCollapsedWorkspaceIds = useRef<string[] | null>(null);
   const draggedWorkspaceId = useRef<string | null>(null);
   const workspaceDropPreviewRef = useRef<WorkspaceDropPreview | null>(null);
   const terminalFocusToken = useRef(0);
@@ -152,7 +167,10 @@ export function App() {
   const finishBoot = useCallback(() => setBootComplete(true), []);
 
   const rebaseIncomingState = useCallback((payload: BootstrapPayload): BootstrapPayload =>
-    applyOptimisticCreations(payload, optimisticCreations.current.values()), []);
+    rebaseCollapsedWorkspaceIds(
+      applyOptimisticCreations(payload, optimisticCreations.current.values()),
+      desiredCollapsedWorkspaceIds.current,
+    ), []);
 
   const beginOptimisticCreation = useCallback((creation: OptimisticCreation, label: string) => {
     optimisticCreations.current.set(creation.key, creation);
@@ -383,21 +401,33 @@ export function App() {
     }
   }, [activeTabKey]);
 
-  const visibleWorkspaces = useMemo(
-    () =>
-      state?.workspaces.filter(
-        (workspace) => workspaceHostFilter === "all" || workspace.machineId === workspaceHostFilter,
-      ) ?? [],
-    [state, workspaceHostFilter],
-  );
+  const workspaceActivity = useMemo(() => {
+    const activity = new Map<string, WorkspaceActivityAggregate>();
+    for (const workspace of state?.workspaces ?? []) {
+      const agent = latestAgentByWorkspaceId.get(workspace.id);
+      activity.set(workspace.id, {
+        unreadCount: unreadByWorkspaceId.get(workspace.id) ?? 0,
+        bell: bellByWorkspaceId.has(workspace.id),
+        agentStatus: agent ? agentStatusClass(agent.status) : undefined,
+      });
+    }
+    return activity;
+  }, [bellByWorkspaceId, latestAgentByWorkspaceId, state?.workspaces, unreadByWorkspaceId]);
+  const workspaceTree = useMemo(() => deriveWorkspaceTree({
+    workspaces: state?.workspaces ?? [],
+    activeWorkspaceId: activeWorkspace?.id,
+    hostFilter: workspaceHostFilter,
+    collapsedWorkspaceIds: persistedSettings.collapsedWorkspaceIds,
+    activityByWorkspaceId: workspaceActivity,
+  }), [activeWorkspace?.id, persistedSettings.collapsedWorkspaceIds, state?.workspaces, workspaceActivity, workspaceHostFilter]);
   const openTuiWorkspaces = useMemo<OpenTuiSidebarWorkspace[]>(
     () =>
-      visibleWorkspaces.flatMap((workspace) => {
+      workspaceTree.rows.flatMap((treeRow) => {
+        const workspace = treeRow.workspace;
         const presentationMachineId = workspacePresentationMachineId(workspace);
         const machine = machineFor(displayMachines, presentationMachineId);
         const sourceMachine = machineFor(machines, presentationMachineId);
         const affinityMachine = machineFor(machines, workspace.machineId);
-        const unreadCount = unreadByWorkspaceId.get(workspace.id) ?? 0;
         const latestUnread = latestUnreadByWorkspaceId.get(workspace.id);
         const latestAgent = latestAgentByWorkspaceId.get(workspace.id);
         const latestAgentName = latestAgent ? workspaceAgentName(latestAgent) : undefined;
@@ -432,14 +462,21 @@ export function App() {
             cwd,
             reachable: Boolean(machine?.reachable),
             active: workspace.id === activeWorkspace?.id,
-            unreadCount,
+            unreadCount: treeRow.ownActivity.unreadCount,
             agentCreated: workspace.createdBy === "agent",
             agentName: latestAgentName,
             agentStatus: latestAgent ? agentStatusClass(latestAgent.status) : undefined,
             versionStatus: version?.status,
             versionLabel: version?.label,
             versionDetail: version?.detail,
-            bell: bellByWorkspaceId.has(workspace.id),
+            bell: treeRow.ownActivity.bell,
+            depth: treeRow.depth,
+            hasChildren: treeRow.hasChildren,
+            expanded: treeRow.effectiveExpanded,
+            hiddenUnreadCount: treeRow.hiddenActivity.unreadCount,
+            hiddenBell: treeRow.hiddenActivity.bell,
+            hiddenAgentStatus: treeRow.hiddenActivity.agentStatus,
+            canOutdent: Boolean(treeRow.parentId),
           },
         ];
       }),
@@ -451,7 +488,7 @@ export function App() {
       latestUnreadByWorkspaceId,
       machines,
       unreadByWorkspaceId,
-      visibleWorkspaces,
+      workspaceTree.rows,
     ],
   );
   const openTuiMachines = useMemo<OpenTuiSidebarMachine[]>(
@@ -538,6 +575,48 @@ export function App() {
     rebaseIncomingState,
   });
 
+  const persistCollapsedWorkspaceIds = useCallback((collapsedWorkspaceIds: string[]): Promise<void> => {
+    const version = ++collapseWriteVersion.current;
+    desiredCollapsedWorkspaceIds.current = collapsedWorkspaceIds;
+    store.update((current) => current ? { ...current, settings: { ...current.settings, collapsedWorkspaceIds } } : current);
+    const request = collapseWriteQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        const response = await api.updateCollapsedWorkspaceIds(collapsedWorkspaceIds);
+        if (version === collapseWriteVersion.current) {
+          desiredCollapsedWorkspaceIds.current = null;
+          await refresh(response.state);
+        }
+      })
+      .catch((error) => {
+        if (version === collapseWriteVersion.current) {
+          desiredCollapsedWorkspaceIds.current = null;
+          pushToast(`Workspace collapse sync failed: ${describeActionError(error)}`);
+          void loadBootstrapRef.current();
+        }
+      });
+    collapseWriteQueue.current = request;
+    return request;
+  }, [pushToast, refresh, store]);
+
+  const toggleWorkspaceCollapsed = useCallback((workspaceId: string) => {
+    const current = store.get();
+    if (!current) return;
+    const currentIds = desiredCollapsedWorkspaceIds.current ?? current.settings.collapsedWorkspaceIds;
+    const nextIds = currentIds.includes(workspaceId)
+      ? currentIds.filter((id) => id !== workspaceId)
+      : [...currentIds, workspaceId];
+    void persistCollapsedWorkspaceIds(nextIds);
+  }, [persistCollapsedWorkspaceIds, store]);
+
+  useEffect(() => {
+    if (!state) return;
+    if (desiredCollapsedWorkspaceIds.current) return;
+    let desired = pruneCollapsedWorkspaceIds(state.workspaces, state.settings.collapsedWorkspaceIds);
+    if (activeWorkspace) desired = expandWorkspaceAncestors(state.workspaces, desired, activeWorkspace.id);
+    if (!sameWorkspaceIds(desired, state.settings.collapsedWorkspaceIds)) void persistCollapsedWorkspaceIds(desired);
+  }, [activeWorkspace?.id, persistCollapsedWorkspaceIds, state?.settings.collapsedWorkspaceIds, state?.workspaces]);
+
   const activeWorkspaceUnreadCount = activeWorkspace ? unreadByWorkspaceId.get(activeWorkspace.id) ?? 0 : 0;
   useEffect(() => {
     if (!activeWorkspace || activeWorkspaceUnreadCount === 0) return;
@@ -550,7 +629,7 @@ export function App() {
 
   const updateSettings = async (nextSettings: WmuxSettings) => {
     await runPending("settings:save", "Saving settings...", async () => {
-      const response = await api.updateSettings(nextSettings);
+      const response = await api.updateSettings(modalSettingsUpdate(nextSettings));
       setPreviewSettings(null);
       await refresh(response.state);
       setSettingsOpen(false);
@@ -806,12 +885,23 @@ export function App() {
   });
 
   const reorderWorkspace = guard(
-    (workspaceId: string, _targetWorkspaceId: string, _position: WorkspaceReorderPosition) => `workspace:${workspaceId}:reorder`,
+    (workspaceId: string, _targetWorkspaceId: string | undefined, _position: WorkspaceReorderPosition) => `workspace:${workspaceId}:reorder`,
     "Reordering workspace...",
-    async (workspaceId: string, targetWorkspaceId: string, position: WorkspaceReorderPosition) => {
+    async (workspaceId: string, targetWorkspaceId: string | undefined, position: WorkspaceReorderPosition) => {
       if (workspaceId === targetWorkspaceId) return;
-      const response = await api.reorderWorkspace(workspaceId, targetWorkspaceId, position);
-      await refresh(response.state);
+      const current = store.get();
+      if (!current || workspaceTree.movesDisabled) return;
+      try {
+        const response = await api.reorderWorkspace(workspaceId, targetWorkspaceId, position, current.workspaceTreeRevision);
+        await refresh(response.state);
+      } catch (error) {
+        if (error instanceof WorkspaceReorderConflictError) {
+          await refresh(error.state);
+          pushToast("Workspace tree changed; move canceled.");
+          return;
+        }
+        throw error;
+      }
     },
   );
 
@@ -1288,6 +1378,11 @@ export function App() {
           onCreateWorkspace={() => createWorkspace(targetMachineId)}
           onActivateWorkspace={activateWorkspaceFromChrome}
           onReorderWorkspace={reorderWorkspace}
+          onToggleWorkspace={toggleWorkspaceCollapsed}
+          movesDisabled={workspaceTree.movesDisabled}
+          allWorkspaces={state.workspaces}
+          hostFilter={workspaceHostFilter}
+          onHostFilterChange={setWorkspaceHostFilter}
         />
       ) : (
       <aside
@@ -1338,14 +1433,15 @@ export function App() {
             ))}
           </select>
         </div>
-        <nav className="workspace-list">
-            {visibleWorkspaces.length === 0 ? <div className="workspace-empty">No workspaces</div> : null}
-            {visibleWorkspaces.map((workspace) => {
+        <nav className="workspace-list" role="tree" aria-label="Workspace tree">
+            {workspaceTree.rows.length === 0 ? <div className="workspace-empty">No workspaces</div> : null}
+            {workspaceTree.rows.map((treeRow) => {
+              const workspace = treeRow.workspace;
               const presentationMachineId = workspacePresentationMachineId(workspace);
               const machine = machineFor(displayMachines, presentationMachineId);
               const sourceMachine = machineFor(machines, presentationMachineId);
               const affinityMachine = machineFor(machines, workspace.machineId);
-              const unreadCount = unreadByWorkspaceId.get(workspace.id) ?? 0;
+              const unreadCount = treeRow.ownActivity.unreadCount + treeRow.hiddenActivity.unreadCount;
               const latestUnread = latestUnreadByWorkspaceId.get(workspace.id);
               const latestAgent = latestAgentByWorkspaceId.get(workspace.id);
               const latestAgentName = latestAgent ? workspaceAgentName(latestAgent) : undefined;
@@ -1383,7 +1479,7 @@ export function App() {
                 cwd,
               ].filter(Boolean).join(" / ");
               const latestAgentStatus = latestAgent ? agentStatusClass(latestAgent.status) : "";
-              const hasBell = bellByWorkspaceId.has(workspace.id);
+              const hasBell = treeRow.ownActivity.bell || treeRow.hiddenActivity.bell;
               const workspaceStateClass = latestAgentStatus || (machine?.reachable ? "reachable" : "offline");
               const workspaceStateTitle = latestAgent
                 ? `${latestAgent.agent} ${latestAgent.status}`
@@ -1391,11 +1487,29 @@ export function App() {
                   ? "Host reachable"
                   : "Host offline";
               return (
-              <a
+              <div
                 key={workspace.id}
+                className="workspace-tree-row"
+                role="none"
+                style={{ "--workspace-tree-depth": treeRow.depth } as CSSProperties}
+              >
+              {treeRow.hasChildren ? (
+                <button
+                  type="button"
+                  className="workspace-disclosure"
+                  aria-label={`${treeRow.effectiveExpanded ? "Collapse" : "Expand"} ${workspace.name}`}
+                  onClick={() => toggleWorkspaceCollapsed(workspace.id)}
+                >
+                  {treeRow.effectiveExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+              ) : <span className="workspace-disclosure-spacer" aria-hidden="true" />}
+              <a
                 href={workspaceTabPath(workspace.id, tab.id)}
-                title={`${tooltip} / Drag to reorder`}
-                draggable
+                title={`${tooltip}${workspaceTree.movesDisabled ? "" : " / Drag to reorder"}`}
+                draggable={!workspaceTree.movesDisabled}
+                role="treeitem"
+                aria-level={treeRow.depth + 1}
+                aria-expanded={treeRow.hasChildren ? treeRow.effectiveExpanded : undefined}
                 aria-current={workspace.id === activeWorkspace?.id ? "page" : undefined}
                 className={`workspace-item ${workspace.id === activeWorkspace?.id ? "active" : ""} ${
                   machine?.reachable ? "" : "disabled"
@@ -1408,6 +1522,10 @@ export function App() {
                 }`}
                 onClick={(event) => activateWorkspaceLink(event, workspace.id, tab.id, { focusTerminal: true })}
                 onDragStart={(event) => {
+                  if (workspaceTree.movesDisabled) {
+                    event.preventDefault();
+                    return;
+                  }
                   draggedWorkspaceId.current = workspace.id;
                   workspaceDropPreviewRef.current = null;
                   event.dataTransfer.effectAllowed = "move";
@@ -1415,6 +1533,7 @@ export function App() {
                   setWorkspaceDropPreview(null);
                 }}
                 onDragOver={(event) => {
+                  if (workspaceTree.movesDisabled) return;
                   const sourceWorkspaceId = draggedWorkspaceId.current;
                   if (!sourceWorkspaceId || sourceWorkspaceId === workspace.id) {
                     workspaceDropPreviewRef.current = null;
@@ -1424,7 +1543,7 @@ export function App() {
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "move";
                   const rect = event.currentTarget.getBoundingClientRect();
-                  const position: WorkspaceReorderPosition = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                  const position = workspacePointerMovePosition((event.clientY - rect.top) / rect.height);
                   workspaceDropPreviewRef.current = { workspaceId: sourceWorkspaceId, targetWorkspaceId: workspace.id, position };
                   setWorkspaceDropPreview((current) =>
                     current?.workspaceId === sourceWorkspaceId &&
@@ -1466,7 +1585,16 @@ export function App() {
                       </span>
                     ) : null}
                   </span>
-                  {unreadCount > 0 ? <span className="badge workspace-badge">{unreadCount}</span> : null}
+                  {unreadCount > 0 ? <span className="badge workspace-badge">{unreadCount}{treeRow.hiddenActivity.unreadCount ? "*" : ""}</span> : null}
+                  {treeRow.hiddenActivity.agentStatus ? (
+                    <span
+                      className={`workspace-hidden-branch-status ${treeRow.hiddenActivity.agentStatus}`}
+                      title={`Hidden descendant agent status: ${treeRow.hiddenActivity.agentStatus}`}
+                      aria-label={`Hidden descendant agent status: ${treeRow.hiddenActivity.agentStatus}`}
+                    >
+                      ↳ {treeRow.hiddenActivity.agentStatus}
+                    </span>
+                  ) : null}
                   <span className="workspace-meta">
                     {showDescriptor ? <span className="workspace-descriptor">{visibleDescriptor}</span> : null}
                     <span className="workspace-host">{hostContext}</span>
@@ -1479,6 +1607,18 @@ export function App() {
                     </span>
                   ) : null}
                 </a>
+                {!workspaceTree.movesDisabled ? (
+                  <button
+                    type="button"
+                    className="workspace-move-button"
+                    title={`Move ${workspace.name}`}
+                    aria-label={`Move ${workspace.name}`}
+                    onClick={(event) => setMoveWorkspace({ workspaceId: workspace.id, returnFocus: event.currentTarget })}
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                ) : null}
+              </div>
               );
             })}
             {mobileViewport.isMobile && activeWorkspace ? (
@@ -1557,6 +1697,15 @@ export function App() {
             </div>
           ))}
         </div>
+        {moveWorkspace ? (
+          <WorkspaceMoveDialog
+            workspaceId={moveWorkspace.workspaceId}
+            workspaces={state.workspaces}
+            returnFocus={moveWorkspace.returnFocus}
+            onClose={() => setMoveWorkspace(null)}
+            onMove={(intent: WorkspaceMoveIntent) => reorderWorkspace(intent.workspaceId, intent.targetWorkspaceId, intent.position)}
+          />
+        ) : null}
       </aside>
       )}
       <div
