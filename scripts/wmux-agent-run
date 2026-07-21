@@ -290,12 +290,9 @@ def command_for(request, runtime, directory, env, schema_path=None):
     return argv, directory
 
 
-def wrap_windows_batch_command(argv, platform=None, comspec=None):
+def requires_windows_shell(argv, platform=None):
     platform = os.name if platform is None else platform
-    if platform != "nt" or os.path.splitext(argv[0])[1].lower() not in {".bat", ".cmd"}:
-        return argv
-    shell = comspec or os.environ.get("COMSPEC") or "cmd.exe"
-    return [shell, "/d", "/s", "/c", subprocess.list2cmdline(argv)]
+    return platform == "nt" and os.path.splitext(argv[0])[1].lower() in {".bat", ".cmd"}
 
 
 def nested_text(value):
@@ -365,7 +362,7 @@ def main():
             if os.name != "nt":
                 os.chmod(schema_path, 0o600)
         argv, cwd = command_for(request, runtime, directory, env, schema_path)
-        argv = wrap_windows_batch_command(argv)
+        use_shell = requires_windows_shell(argv)
     except FileNotFoundError as error:
         if schema_path:
             try:
@@ -406,6 +403,7 @@ def main():
             encoding="utf-8",
             errors="replace",
             env=env,
+            shell=use_shell,
             start_new_session=os.name != "nt",
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
