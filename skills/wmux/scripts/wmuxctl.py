@@ -25,7 +25,7 @@ from typing import Any
 DEFAULT_URL = "http://127.0.0.1:3478"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 TERMINAL_DELEGATION_STATES = frozenset(
-    {"completed", "failed", "error", "cancelled", "stopped", "timed_out", "interrupted"}
+    {"completed", "blocked", "failed", "error", "cancelled", "stopped", "timed_out", "interrupted"}
 )
 
 
@@ -702,7 +702,7 @@ def wait_for_delegation_result(
     timeout: float,
     cols: int,
     rows: int,
-) -> tuple[bool, Any, int, bool, float]:
+) -> tuple[bool, Any, int, bool, float, str]:
     started = time.monotonic()
     done_pattern = re.compile(rf"(?m)^WMUX_AGENT_DONE {re.escape(run_id)} -?\d+$")
     last_replay_error = ""
@@ -729,8 +729,11 @@ def wait_for_delegation_result(
                 else:
                     ok = exit_code == 0 and payload.get("ok") is True
                     detail = payload.get("result") if ok else payload.get("error") or payload.get("result")
-                    return ok, detail, exit_code, False, time.monotonic() - started
-        except SystemExit as error:
+                    outcome = payload.get("outcome")
+                    if outcome not in {"completed", "blocked", "failed"}:
+                        outcome = "completed" if ok else "failed"
+                    return ok, detail, exit_code, False, time.monotonic() - started, outcome
+        except (SystemExit, OSError) as error:
             last_replay_error = str(error)
 
         try:
@@ -743,7 +746,7 @@ def wait_for_delegation_result(
             if durable_state in TERMINAL_DELEGATION_STATES:
                 ok = durable_state == "completed"
                 detail = durable.get("result") if ok else durable.get("error") or durable.get("summary")
-                return ok, detail, 0 if ok else 1, True, time.monotonic() - started
+                return ok, detail, 0 if ok else 1, True, time.monotonic() - started, durable_state
 
         remaining = timeout - (time.monotonic() - started)
         if remaining > 0:
@@ -752,16 +755,26 @@ def wait_for_delegation_result(
 
 def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
     prompt = read_delegate_prompt(args)
-    if not posixpath.isabs(args.directory) or "\x00" in args.directory:
-        raise SystemExit("wmuxctl: delegation directory must be an absolute POSIX path")
     if args.runtime == "opencode" and not args.write_access:
         raise SystemExit("wmuxctl: OpenCode delegation cannot enforce read-only mode; add --write-access explicitly")
     bootstrap = client.bootstrap()
     machine = next((item for item in bootstrap.get("machines", []) if item.get("id") == args.machine), None)
     if not machine or machine.get("reachable") is not True:
         raise SystemExit(f"wmuxctl: machine is not reachable: {args.machine}")
-    if machine.get("kind") not in {"local", "ssh"} or machine.get("platform") not in {"linux", "mac"}:
-        raise SystemExit("wmuxctl: delegated agent runs require a POSIX local or SSH target")
+    is_posix = machine.get("kind") in {"local", "ssh"} and machine.get("platform") in {"linux", "mac"}
+    is_windows = machine.get("kind") == "powershell-ssh" and machine.get("platform") == "windows"
+    if not is_posix and not is_windows:
+        raise SystemExit("wmuxctl: delegated agent runs require a POSIX local/SSH or Windows PowerShell SSH target")
+    if is_posix and (not posixpath.isabs(args.directory) or "\x00" in args.directory):
+        raise SystemExit("wmuxctl: delegation directory must be an absolute POSIX path")
+    if is_windows and not (
+        re.fullmatch(r"[A-Za-z]:[\\/].+", args.directory) or re.fullmatch(r"~[\\/].+", args.directory)
+    ):
+        raise SystemExit("wmuxctl: Windows delegation directory must be drive-absolute or home-relative")
+    if is_windows and args.runtime != "codex":
+        raise SystemExit("wmuxctl: Windows delegation currently supports the Codex runtime")
+    if args.structured_outcome and args.runtime != "codex":
+        raise SystemExit("wmuxctl: structured outcomes currently require the Codex runtime")
 
     title = args.title or f"{args.runtime.capitalize()} delegation"
     workspace, _state = client.create_workspace(args.machine)
@@ -789,13 +802,17 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
             "writeAccess": args.write_access,
             "title": title,
         }
+        if args.sandbox:
+            request["sandboxMode"] = args.sandbox
+        if args.structured_outcome:
+            request["resultFormat"] = "outcome-v1"
         if args.model:
             request["model"] = args.model
         if args.runtime == "opencode" and args.opencode_agent:
             request["agent"] = args.opencode_agent
         encoded = base64.b64encode(json.dumps(request, separators=(",", ":")).encode()).decode()
         submit_line(client, info["paneId"], encoded, True, args.cols, args.rows)
-        ok, detail_source, exit_code, recovered, elapsed = wait_for_delegation_result(
+        ok, detail_source, exit_code, recovered, elapsed, outcome = wait_for_delegation_result(
             client,
             info["paneId"],
             run_id,
@@ -816,11 +833,14 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
             "runId": run_id,
             "runtime": args.runtime,
             "state": status,
+            "outcome": outcome,
             "elapsedSeconds": round(elapsed, 3),
             "result": detail if ok else "",
             "error": "" if ok else detail,
             "closed": False,
         })
+        if outcome == "blocked":
+            info["state"] = "blocked"
         if ok and args.close_on_success:
             try:
                 info["closed"] = bool(client.close_workspace(info["workspaceId"]).get("removed"))
@@ -1060,13 +1080,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     delegate = subparsers.add_parser("delegate", help="run a visible one-shot OpenCode, Codex, or Claude task")
     delegate.add_argument("runtime", choices=("opencode", "codex", "claude"), help="agent CLI to run in the target pane")
-    delegate.add_argument("machine", help="reachable POSIX machine id")
+    delegate.add_argument("machine", help="reachable POSIX or Windows machine id")
     delegate.add_argument("--directory", required=True, help="absolute target working directory")
     delegate.add_argument("--prompt-file", default="", help="UTF-8 prompt file; use - or omit with piped stdin")
     delegate.add_argument("--title", default="", help="workspace and lifecycle title")
     delegate.add_argument("--model", default="", help="optional runtime-specific model")
     delegate.add_argument("--opencode-agent", default="", help="optional OpenCode agent name")
     delegate.add_argument("--write-access", action="store_true", help="allow repository edits; otherwise use read-only/plan mode")
+    delegate.add_argument(
+        "--sandbox", choices=("read-only", "workspace-write", "danger-full-access"), default="",
+        help="explicit Codex sandbox mode; defaults from --write-access",
+    )
+    delegate.add_argument(
+        "--structured-outcome", action="store_true",
+        help="require Codex to return completed, blocked, or failed with a summary",
+    )
     delegate.add_argument("--unattended", action="store_true", help="disable agent approval prompts; dangerous on trusted targets only")
     delegate.add_argument("--close-on-success", action="store_true", help="close the workspace only after success")
     delegate.add_argument("--timeout", type=float, default=900, help="delegated task timeout in seconds")

@@ -119,3 +119,55 @@ posixTest("wmux-agent-run requires explicit write access for OpenCode delegation
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+posixTest("wmux-agent-run enforces a structured blocked outcome without sandboxing Codex", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-agent-run-outcome-"));
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  const executable = path.join(bin, "codex");
+  fs.writeFileSync(executable, `#!/usr/bin/env python3
+import json,os,sys
+schema_path=sys.argv[sys.argv.index('--output-schema')+1]
+with open(os.environ['CAPTURE_PATH'],'w',encoding='utf-8') as handle:
+    json.dump({'argv':sys.argv[1:],'stdin':sys.stdin.read(),'schema':json.load(open(schema_path,encoding='utf-8'))},handle)
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({'outcome':'blocked','summary':'remote service unavailable'})}}))
+`);
+  fs.chmodSync(executable, 0o755);
+  const capture = path.join(dir, "capture.json");
+  const prompt = "private structured task";
+  try {
+    const request = {
+      runId: "run-outcome",
+      runtime: "codex",
+      prompt,
+      directory: dir,
+      writeAccess: true,
+      unattended: false,
+      sandboxMode: "danger-full-access",
+      resultFormat: "outcome-v1",
+    };
+    const completed = spawnSync(helper, [], {
+      input: `${Buffer.from(JSON.stringify(request)).toString("base64")}\n`,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CAPTURE_PATH: capture },
+    });
+    assert.equal(completed.status, 0, completed.stderr);
+    const result = decodeResult(completed.stdout);
+    assert.deepEqual(result, {
+      runId: "run-outcome",
+      runtime: "codex",
+      ok: false,
+      outcome: "blocked",
+      result: "remote service unavailable",
+      error: "remote service unavailable",
+    });
+    const captured = JSON.parse(fs.readFileSync(capture, "utf8"));
+    assert.deepEqual(captured.argv.slice(0, 3), ["--sandbox", "danger-full-access", "exec"]);
+    assert.equal(captured.argv.includes("--ask-for-approval"), false);
+    assert.equal(captured.stdin, prompt);
+    assert.deepEqual(captured.schema.properties.outcome.enum, ["completed", "blocked", "failed"]);
+    assert.equal(captured.argv.includes(prompt), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

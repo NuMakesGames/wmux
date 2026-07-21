@@ -20,19 +20,21 @@ const windowsBootstrapEnvKeys = new Set([
   "WMUX_TERMINAL_ANSI_PALETTE",
   "KITTY_WINDOW_ID",
 ]);
-const windowsRequiredHelperNames = [
-  "wmux-agent-event",
-  "wmux-console-theme",
-  "wmux-copy",
-  "wmux-heartbeat",
-  "wmux-hooks",
-  "wmux-media",
-  "wmux-notify",
-  "wmux-run",
-  "wmux-stream-agent-service",
-  "wmux-title",
-  "wmux-windows-agent-service",
-  "wmux-windows-setup",
+const windowsRequiredHelperFiles = [
+  "wmux-agent-event.ps1",
+  "wmux-agent-run.cmd",
+  "wmux-agent-run.py",
+  "wmux-console-theme.ps1",
+  "wmux-copy.ps1",
+  "wmux-heartbeat.ps1",
+  "wmux-hooks.ps1",
+  "wmux-media.ps1",
+  "wmux-notify.ps1",
+  "wmux-run.ps1",
+  "wmux-stream-agent-service.ps1",
+  "wmux-title.ps1",
+  "wmux-windows-agent-service.ps1",
+  "wmux-windows-setup.ps1",
 ];
 const windowsClipboardAliasNames = ["wmux-clip", "wclip", "wmclip"];
 const WINDOWS_AGENT_RELEASE_PLACEHOLDER = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__";
@@ -280,7 +282,7 @@ try {
   $VersionDoc = Get-Content -LiteralPath (Join-Path $HelperDir 'bundle-version.json') -Raw | ConvertFrom-Json
   $BundleVersion = [string]$VersionDoc.bundleVersion
 } catch {}
-$HelperNames = @(${windowsRequiredHelperNames.map((name) => psSingleQuote(`${name}.ps1`)).join(", ")})
+$HelperNames = @(${windowsRequiredHelperFiles.map((name) => psSingleQuote(name)).join(", ")})
 $Helpers = [ordered]@{}
 $HelperCount = 0
 foreach ($Helper in $HelperNames) {
@@ -409,6 +411,14 @@ const windowsHelperFiles = (): Array<{ name: string; content: string }> => [
   {
     name: "wmux-agent-profile.cmd",
     content: pythonCmdShim("wmux-agent-profile.py"),
+  },
+  {
+    name: "wmux-agent-run.py",
+    content: localScript("wmux-agent-run"),
+  },
+  {
+    name: "wmux-agent-run.cmd",
+    content: pythonCmdShim("wmux-agent-run.py"),
   },
 ];
 

@@ -403,6 +403,129 @@ test("wmuxctl delegate drives the staged runner, lifecycle, and close-on-success
   }
 });
 
+test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and structured outcome", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wmuxctl-windows-delegate-"));
+  const promptPath = path.join(root, "prompt.md");
+  const prompt = "import the requested catalog";
+  fs.writeFileSync(promptPath, prompt);
+  const inputs: Array<Record<string, unknown>> = [];
+  const lifecycle: Array<Record<string, unknown>> = [];
+  let runId = "";
+  let upgradeCount = 0;
+  const machine = { id: "windows-runner", kind: "powershell-ssh", platform: "windows", reachable: true };
+  const workspace = {
+    id: "ws_windows_delegate",
+    machineId: "windows-runner",
+    activeTabId: "tab_windows_delegate",
+    tabs: [{
+      id: "tab_windows_delegate",
+      activePaneId: "pane_windows_delegate",
+      panes: [{ id: "pane_windows_delegate", machineId: "windows-runner" }],
+    }],
+  };
+  const jsonResponse = (response: http.ServerResponse, body: unknown, status = 200) => {
+    response.writeHead(status, { "content-type": "application/json" });
+    response.end(JSON.stringify(body));
+  };
+  const server = http.createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/api/bootstrap") {
+      jsonResponse(response, { machines: [machine], workspaces: [workspace] });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/workspaces") {
+      request.resume();
+      request.on("end", () => jsonResponse(response, { workspace, state: {} }, 201));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/workspaces/ws_windows_delegate/title") {
+      request.resume();
+      request.on("end", () => jsonResponse(response, {}));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/agent-events") {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        lifecycle.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        jsonResponse(response, {}, 201);
+      });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/panes/pane_windows_delegate/input") {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        inputs.push(body);
+        if (inputs.length === 3) {
+          const delegated = JSON.parse(Buffer.from(body.data, "base64").toString("utf8"));
+          runId = delegated.runId;
+          assert.deepEqual(delegated, {
+            runId,
+            runtime: "codex",
+            prompt,
+            directory: "T:\\git\\example\\project",
+            unattended: false,
+            writeAccess: true,
+            title: "Windows catalog import",
+            sandboxMode: "danger-full-access",
+            resultFormat: "outcome-v1",
+          });
+        }
+        jsonResponse(response, {});
+      });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  server.on("upgrade", (request, socket) => {
+    upgradeCount += 1;
+    const key = request.headers["sec-websocket-key"];
+    assert.equal(typeof key, "string");
+    const accept = crypto.createHash("sha1").update(`${key}${websocketGuid}`).digest("base64");
+    socket.write([
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${accept}`,
+      "",
+      "",
+    ].join("\r\n"));
+    let replay = "PS T:\\git\\example\\project> ";
+    if (upgradeCount === 2) replay = "WMUX_AGENT_READY\r\n";
+    if (upgradeCount === 3) {
+      const result = Buffer.from(JSON.stringify({
+        runId,
+        runtime: "codex",
+        ok: true,
+        outcome: "completed",
+        result: "catalog imported",
+        error: "",
+      })).toString("base64");
+      replay = `WMUX_AGENT_RESULT ${result}\r\nWMUX_AGENT_DONE ${runId} 0\r\n`;
+    }
+    socket.end(websocketFrame({ type: "ready", paneId: "pane_windows_delegate", replay }));
+  });
+
+  const url = await listen(server);
+  try {
+    const delegated = await cli(url, [
+      "delegate", "codex", "windows-runner", "--directory", "T:\\git\\example\\project",
+      "--prompt-file", promptPath, "--title", "Windows catalog import", "--write-access",
+      "--sandbox", "danger-full-access", "--structured-outcome",
+    ]);
+    const result = JSON.parse(delegated.stdout);
+    assert.equal(result.state, "completed");
+    assert.equal(result.outcome, "completed");
+    assert.equal(result.result, "catalog imported");
+    assert.deepEqual(inputs.slice(0, 2).map((body) => body.data), ["wmux-agent-run", "\r"]);
+    assert.deepEqual(lifecycle.map((event) => event.status), ["running", "completed"]);
+  } finally {
+    await close(server);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("wmuxctl delegate recovers a completed result from durable lifecycle status", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wmuxctl-delegate-recover-"));
   const promptPath = path.join(root, "prompt.md");

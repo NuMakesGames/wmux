@@ -417,8 +417,8 @@ Windows panes stage matching helpers when a new pane starts.
 | `wmux-media` | Render images, audio, or video through the browser |
 | `wmux-copy` / `wclip` | Hand text to the browser clipboard |
 | `wmux-hooks` | Install Claude, Codex, or OpenCode lifecycle hooks |
-| `wmuxctl delegate` | Run a visible one-shot OpenCode, Codex, or Claude task on a POSIX target |
-| `wmux-agent-run` | Internal POSIX staged runner used by agent delegation |
+| `wmuxctl delegate` | Run a visible one-shot agent task on a supported POSIX or Windows target |
+| `wmux-agent-run` | Internal cross-platform staged runner used by agent delegation |
 | `wmux-agent-profile` | Plan/apply agent profiles, add skills, and bootstrap pinned tools |
 | `wmux-doctor` | Report host, pane, and durability health |
 
@@ -465,7 +465,8 @@ trust step.
 parity is not included.
 
 `wmuxctl delegate` provides the same visible one-shot delegation path for
-OpenCode, Codex, and Claude on POSIX local/SSH targets. It accepts the prompt
+OpenCode, Codex, and Claude on POSIX local/SSH targets, plus Codex on Windows
+PowerShell-over-SSH targets. It accepts the prompt
 from a file or stdin, creates a fresh durable agent workspace, starts the staged
 `wmux-agent-run` transport, records lifecycle events, and returns a bounded
 result plus the direct workspace URL.
@@ -480,6 +481,9 @@ wmuxctl delegate codex linux-box --directory /srv/project \
   --prompt-file /tmp/task.md --title "Review authentication"
 wmuxctl delegate claude linux-box --directory /srv/project \
   --prompt-file /tmp/fix.md --title "Fix authentication" --write-access
+wmuxctl delegate codex windows-box --directory 'T:\git\example\project' \
+  --prompt-file /tmp/import.md --title "Import catalog" --write-access \
+  --sandbox danger-full-access --structured-outcome
 ```
 
 Codex defaults to its read-only sandbox and Claude defaults to plan permission
@@ -492,6 +496,11 @@ target. For OpenCode, the staged runner probes the installed CLI and uses its
 advertised `--auto` or `--dangerously-skip-permissions` option, failing closed
 if neither is available. Prompts are sent through pane stdin rather than shell
 arguments and are redacted from returned terminal output.
+`--sandbox danger-full-access` disables Codex filesystem and network sandboxing
+without enabling the separate unattended approval option.
+`--structured-outcome` requires Codex to report `completed`, `blocked`, or
+`failed` with a summary, so a normal process exit cannot turn blocked work into
+a successful result.
 
 Delegations leave their durable workspace open by default;
 `--close-on-success` (`close_on_success` in the OpenCode tool) closes only after
