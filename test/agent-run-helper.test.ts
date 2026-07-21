@@ -41,11 +41,18 @@ class TtyInput:
 module.os.name = "nt"
 sys.stdin = TtyInput()
 print(json.dumps(module.request_from_stdin(), sort_keys=True))
+print(json.dumps(module.wrap_windows_batch_command(
+    ["C:\\\\tools\\\\codex.CMD", "--sandbox", "danger-full-access", "exec", "-"],
+    platform="nt",
+    comspec="C:\\\\Windows\\\\System32\\\\cmd.exe",
+)))
 `;
   const completed = spawnSync("python3", ["-c", probe, helper], { encoding: "utf8" });
   assert.equal(completed.status, 0, completed.stderr);
   assert.match(completed.stdout, /WMUX_AGENT_READY/);
   assert.match(completed.stdout, /"runId": "windows-input"/);
+  assert.match(completed.stdout, /\["C:\\\\Windows\\\\System32\\\\cmd\.exe", "\/d", "\/s", "\/c"/);
+  assert.match(completed.stdout, /codex\.CMD/);
 });
 
 posixTest("wmux-agent-run adapts OpenCode, Codex, and Claude without putting prompts in argv", () => {

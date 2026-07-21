@@ -290,6 +290,14 @@ def command_for(request, runtime, directory, env, schema_path=None):
     return argv, directory
 
 
+def wrap_windows_batch_command(argv, platform=None, comspec=None):
+    platform = os.name if platform is None else platform
+    if platform != "nt" or os.path.splitext(argv[0])[1].lower() not in {".bat", ".cmd"}:
+        return argv
+    shell = comspec or os.environ.get("COMSPEC") or "cmd.exe"
+    return [shell, "/d", "/s", "/c", subprocess.list2cmdline(argv)]
+
+
 def nested_text(value):
     if isinstance(value, str):
         return value
@@ -357,6 +365,7 @@ def main():
             if os.name != "nt":
                 os.chmod(schema_path, 0o600)
         argv, cwd = command_for(request, runtime, directory, env, schema_path)
+        argv = wrap_windows_batch_command(argv)
     except FileNotFoundError as error:
         if schema_path:
             try:
