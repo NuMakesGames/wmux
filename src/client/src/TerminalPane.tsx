@@ -15,7 +15,7 @@ import {
   type KittyMaterializedImage,
   type KittyPlaceholderStripState,
 } from "./kitty-graphics";
-import { ensureWmuxFonts, WMUX_MONO_FONT_FAMILY } from "./fonts";
+import { ensureWmuxFonts, terminalFontFamilyStack } from "./fonts";
 import { ensureGhostty } from "./terminal-loader";
 import { configureTerminalInput } from "./terminal-input";
 import { isTerminalProtocolResponse } from "../../shared/terminal-protocol";
@@ -117,6 +117,7 @@ interface Props {
   appleKeybindings: boolean;
   unreadCount: number;
   machines: MachineStatus[];
+  terminalFontFamily: string;
   terminalFontSize: number;
   terminalScrollbackRows: number;
   mediaItems: TerminalMedia[];
@@ -143,6 +144,7 @@ export const TerminalPane = memo(function TerminalPane({
   appleKeybindings,
   unreadCount,
   machines,
+  terminalFontFamily,
   terminalFontSize,
   terminalScrollbackRows,
   mediaItems,
@@ -281,6 +283,7 @@ export const TerminalPane = memo(function TerminalPane({
     let windowBlurListener: (() => void) | undefined;
     let pageShowListener: (() => void) | undefined;
     let visibilityChangeListener: (() => void) | undefined;
+    let fontLoadingDoneListener: (() => void) | undefined;
     let rectangularSelection: RectangularSelection | undefined;
     let contextMenuSelection = "";
     let pendingCursorPlacement: { sequence: string; x: number; y: number } | null = null;
@@ -1034,12 +1037,12 @@ export const TerminalPane = memo(function TerminalPane({
     };
 
     const start = async () => {
-      await Promise.all([ensureGhostty(), ensureWmuxFonts()]);
+      await Promise.all([ensureGhostty(), ensureWmuxFonts(terminalFontFamily, terminalFontSize)]);
       if (cancelled || !containerRef.current) return;
       const term = new Terminal({
         cursorBlink: true,
         fontSize: terminalFontSize,
-        fontFamily: WMUX_MONO_FONT_FAMILY,
+        fontFamily: terminalFontFamilyStack(terminalFontFamily),
         scrollback: terminalScrollbackRows,
         theme: colorScheme.terminal,
       });
@@ -1124,6 +1127,21 @@ export const TerminalPane = memo(function TerminalPane({
       fitAddonRef.current = fitAddon;
       fitAddon.fit();
       refreshMetrics(term);
+      if ("fonts" in document) {
+        fontLoadingDoneListener = () => {
+          if (cancelled || terminalRef.current !== term || !term.renderer) return;
+          const family = term.options.fontFamily;
+          // FontFaceSet completion does not invalidate an existing canvas.
+          // A whitespace-only option transition forces Ghostty to remeasure
+          // and redraw synchronously without changing the CSS family stack.
+          term.options.fontFamily = `${family} `;
+          term.options.fontFamily = family;
+          fitAddon?.fit();
+          refreshMetrics(term);
+        };
+        document.fonts.addEventListener("loadingdone", fontLoadingDoneListener);
+        void document.fonts.ready.then(() => fontLoadingDoneListener?.());
+      }
       scrollDisposable = term.onScroll((position) => setViewportY(position));
       renderDisposable = term.onRender(() => {
         terminalLatency.recordRender(pane.id, performance.now());
@@ -1515,6 +1533,9 @@ export const TerminalPane = memo(function TerminalPane({
       if (windowBlurListener) window.removeEventListener("blur", windowBlurListener);
       if (pageShowListener) window.removeEventListener("pageshow", pageShowListener);
       if (visibilityChangeListener) document.removeEventListener("visibilitychange", visibilityChangeListener);
+      if (fontLoadingDoneListener && "fonts" in document) {
+        document.fonts.removeEventListener("loadingdone", fontLoadingDoneListener);
+      }
       if (terminalHostShell && touchPointerDownListener) terminalHostShell.removeEventListener("pointerdown", touchPointerDownListener);
       if (terminalHostShell && touchPointerMoveListener) terminalHostShell.removeEventListener("pointermove", touchPointerMoveListener);
       if (terminalHostShell && touchPointerUpListener) terminalHostShell.removeEventListener("pointerup", touchPointerUpListener);
@@ -1546,13 +1567,21 @@ export const TerminalPane = memo(function TerminalPane({
     const term = terminalRef.current;
     terminalFontSizeRef.current = terminalFontSize;
     if (!term?.renderer) return;
-    term.renderer.setFontSize(terminalFontSize);
-    requestAnimationFrame(() => {
-      fitAddonRef.current?.fit();
-      const metrics = readCellMetrics(term);
-      if (metrics) setTerminalMetrics(metrics);
+    let cancelled = false;
+    void ensureWmuxFonts(terminalFontFamily, terminalFontSize).then(() => {
+      if (cancelled || !term.renderer) return;
+      term.options.fontSize = terminalFontSize;
+      term.options.fontFamily = terminalFontFamilyStack(terminalFontFamily);
+      requestAnimationFrame(() => {
+        fitAddonRef.current?.fit();
+        const metrics = readCellMetrics(term);
+        if (metrics) setTerminalMetrics(metrics);
+      });
     });
-  }, [terminalFontSize]);
+    return () => {
+      cancelled = true;
+    };
+  }, [terminalFontFamily, terminalFontSize]);
 
   useEffect(() => {
     const term = terminalRef.current;
@@ -1593,6 +1622,7 @@ export const TerminalPane = memo(function TerminalPane({
         title: runTitle(lastRun),
       }
     : undefined;
+  const resolvedTerminalFontFamily = terminalFontFamilyStack(terminalFontFamily);
 
   return (
     <section
@@ -1629,8 +1659,17 @@ export const TerminalPane = memo(function TerminalPane({
           if (event.pointerType !== "touch") terminalRef.current?.focus();
         }}
       >
-        <div ref={containerRef} className="terminal-host" />
-        <div ref={predictionLayerRef} className="terminal-input-prediction-layer" aria-hidden="true" />
+        <div
+          ref={containerRef}
+          className="terminal-host"
+          style={{ fontFamily: resolvedTerminalFontFamily }}
+        />
+        <div
+          ref={predictionLayerRef}
+          className="terminal-input-prediction-layer"
+          style={{ fontFamily: resolvedTerminalFontFamily }}
+          aria-hidden="true"
+        />
         {!terminalReady ? (
           <div className="terminal-startup-status" role="status" aria-live="polite">
             <span className="terminal-startup-spinner" aria-hidden="true" />
