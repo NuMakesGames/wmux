@@ -514,7 +514,9 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
       "",
     ].join("\r\n"));
     let replay = "PS T:\\git\\example\\project> ";
-    if (upgradeCount >= 2) replay = "OpenAI Codex · directory: T:\\git\\example\\project › Implement a feature\r\n";
+    if (upgradeCount >= 2) {
+      replay = `WMUX_CODEX_START_${runId}\r\nOpenAI Codex · directory: T:\\git\\example\\project › Implement a feature\r\n`;
+    }
     socket.end(websocketFrame({ type: "ready", paneId: "pane_windows_delegate", replay }));
   });
 

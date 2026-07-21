@@ -634,12 +634,13 @@ def powershell_single_quote(value: str, label: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def windows_codex_command(args: argparse.Namespace) -> str:
+def windows_codex_command(args: argparse.Namespace, ready_marker: str) -> str:
     sandbox = args.sandbox or ("workspace-write" if args.write_access else "read-only")
     parts = [
         f"$env:WMUX_DELEGATED_RUN={powershell_single_quote('1', 'delegation environment')}",
         "Remove-Item Env:WMUX_DELEGATION_RUN_ID -ErrorAction SilentlyContinue",
         f"Set-Location -LiteralPath {powershell_single_quote(args.directory, 'delegation directory')}",
+        f"Write-Output {powershell_single_quote(ready_marker, 'Codex readiness marker')}",
         f"codex --sandbox {powershell_single_quote(sandbox, 'sandbox mode')} --no-alt-screen",
     ]
     if args.model:
@@ -915,6 +916,7 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
             run_id=run_id,
         )
         if is_windows:
+            ready_pattern = CODEX_READY_PATTERN
             if not reused:
                 info["shellReadySeconds"] = round(
                     wait_for_shell_ready(
@@ -927,18 +929,20 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
                     ),
                     3,
                 )
+                ready_marker = f"WMUX_CODEX_START_{run_id}"
                 submit_line(
                     client,
                     info["paneId"],
-                    windows_codex_command(args),
+                    windows_codex_command(args, ready_marker),
                     True,
                     args.cols,
                     args.rows,
                 )
+                ready_pattern = rf"(?s){re.escape(ready_marker)}.*?OpenAI Codex.*?›(?:\s|$)"
             wait_for_output(
                 client,
                 info["paneId"],
-                CODEX_READY_PATTERN,
+                ready_pattern,
                 args.ready_timeout,
                 args.cols,
                 args.rows,
