@@ -159,6 +159,36 @@ test("ready holds every empty durable-refresh replay, including a late attach to
   }
 });
 
+test("output watchers receive raw replay instead of a rendered checkpoint", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-session-output-replay-"));
+  const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
+  const state = new StateStore([machine], path.join(dir, "state.json"));
+  const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+  const manager = new SessionManager(state, [machine]);
+  const client = socket();
+  const session = {
+    pane,
+    pid: 42,
+    isExited: false,
+    replayOutput: "WMUX_AGENT_READY\n",
+    attachReplay: { data: "rendered checkpoint", kind: "checkpoint" as const },
+  };
+  const internals = manager as unknown as {
+    ensureSession: (candidate: typeof pane, cols: number, rows: number) => typeof session;
+  };
+  internals.ensureSession = () => session;
+  try {
+    manager.watchOutput(pane.id, client, 80, 24);
+    const ready = await waitForMessage(client, (message) => message.type === "ready");
+    assert.equal(ready.replayKind, "raw");
+    assert.equal(ready.replay, "WMUX_AGENT_READY\n");
+  } finally {
+    fake(client).close();
+    manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("offline registered machines reject new session creation", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-session-offline-"));
   const machine: MachineConfig = {
@@ -338,6 +368,40 @@ test("terminal-generated response metadata survives client message parsing", () 
     type: "input",
     data: "text",
   });
+  assert.deepEqual(parseClientMessage(JSON.stringify({ type: "input", data: "x", sequence: 42 })), {
+    type: "input",
+    data: "x",
+    sequence: 42,
+  });
+  assert.equal(parseClientMessage(JSON.stringify({ type: "input", data: "x", sequence: 0 })), null);
+  assert.equal(parseClientMessage(JSON.stringify({ type: "input", data: "x", sequence: 1.5 })), null);
+});
+
+test("pane output acknowledges each browser's latest input sequence without tagging output watchers", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wmux-session-input-ack-"));
+  const machine: MachineConfig = { id: "local", name: "Local", kind: "local", command: ["/bin/sh"] };
+  const state = new StateStore([machine], path.join(dir, "state.json"));
+  const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+  const manager = new SessionManager(state, [machine]);
+  const client = socket();
+  const watcher = socket();
+  const internals = manager as unknown as {
+    sockets: Map<string, Set<WebSocket>>;
+    outputWatchers: Map<string, Set<WebSocket>>;
+    socketState: Map<WebSocket, { paneId: string; cols: number; rows: number; inputSequence?: number }>;
+    broadcastOutput: (paneId: string, data: string) => void;
+  };
+  try {
+    internals.sockets.set(pane.id, new Set([client]));
+    internals.outputWatchers.set(pane.id, new Set([watcher]));
+    internals.socketState.set(client, { paneId: pane.id, cols: 80, rows: 24, inputSequence: 7 });
+    internals.broadcastOutput(pane.id, "echo");
+    assert.deepEqual(fake(client).sent.at(-1), { type: "output", paneId: pane.id, data: "echo", inputSequence: 7 });
+    assert.deepEqual(fake(watcher).sent.at(-1), { type: "output", paneId: pane.id, data: "echo" });
+  } finally {
+    manager.disposeAll();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("server recognizes terminal replies from stale browser clients", () => {
@@ -535,6 +599,47 @@ test(
       spawnSync("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" });
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  },
+);
+
+test(
+  "output watchers receive replay from durable tmux panes",
+  { skip: process.platform === "win32" || spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 },
+  async () => {
+    const machine: MachineConfig = {
+      id: "local",
+      name: "Local",
+      kind: "local",
+      shell: "/bin/sh",
+      sessionBackend: "tmux",
+    };
+    await withState(machine, async (state) => {
+      const pane = state.snapshot().workspaces[0].tabs[0].panes[0];
+      const sessionName = durableSessionName(pane.id);
+      const manager = new SessionManager(state, [machine]);
+      const first = socket();
+      try {
+        manager.watchOutput(pane.id, first, 80, 24);
+        await waitForMessage(first, (message) => message.type === "ready");
+        fake(first).close();
+
+        assert.equal(manager.writePane(pane.id, "printf 'durable-output-marker\\n'\r", 80, 24), true);
+        const internals = manager as unknown as {
+          sessions: Map<string, { replayOutput: string }>;
+        };
+        await waitForCondition(() => internals.sessions.get(pane.id)?.replayOutput.includes("durable-output-marker") === true);
+
+        const second = socket();
+        manager.watchOutput(pane.id, second, 80, 24);
+        const ready = await waitForMessage(second, (message) => message.type === "ready");
+        assert.equal(ready.outputOnly, true);
+        assert.match(ready.replay, /durable-output-marker/);
+        fake(second).close();
+      } finally {
+        manager.disposeAll();
+        spawnSync("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" });
+      }
+    });
   },
 );
 

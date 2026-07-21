@@ -17,6 +17,7 @@ interface Props {
   unreadByPaneId: Map<string, number>;
   mediaByPaneId: Map<string, TerminalMedia[]>;
   runsByPaneId: Map<string, TerminalRun>;
+  pendingPaneLabels: ReadonlyMap<string, string>;
   focusActivePaneSignal?: number;
   onActivatePane: (tabId: string, paneId: string) => void;
   onSplit: (tabId: string, paneId: string, direction: SplitDirection, machineId?: string) => void;
@@ -44,6 +45,7 @@ export const LayoutView = memo(function LayoutView({
   unreadByPaneId,
   mediaByPaneId,
   runsByPaneId,
+  pendingPaneLabels,
   focusActivePaneSignal = 0,
   onActivatePane,
   onSplit,
@@ -132,6 +134,7 @@ export const LayoutView = memo(function LayoutView({
           terminalScrollbackRows={terminalScrollbackRows}
           mediaItems={mediaByPaneId.get(pane.id) ?? emptyMedia}
           lastRun={runsByPaneId.get(pane.id)}
+          pendingLabel={pendingPaneLabels.get(pane.id)}
           focusSignal={viewActive && tab.activePaneId === pane.id ? focusActivePaneSignal : 0}
           onActivatePane={onActivatePane}
           onSplit={onSplit}
@@ -187,6 +190,7 @@ interface LayoutPaneProps {
   terminalScrollbackRows: number;
   mediaItems: TerminalMedia[];
   lastRun?: TerminalRun;
+  pendingLabel?: string;
   focusSignal: number;
   onActivatePane: (tabId: string, paneId: string) => void;
   onSplit: (tabId: string, paneId: string, direction: SplitDirection, machineId?: string) => void;
@@ -215,6 +219,7 @@ const LayoutPane = memo(function LayoutPane({
   terminalScrollbackRows,
   mediaItems,
   lastRun,
+  pendingLabel,
   focusSignal,
   onActivatePane,
   onSplit,
@@ -247,6 +252,7 @@ const LayoutPane = memo(function LayoutPane({
       terminalScrollbackRows={terminalScrollbackRows}
       mediaItems={mediaItems}
       lastRun={lastRun}
+      pendingLabel={pendingLabel}
       focusSignal={focusSignal}
       onActivate={onActivate}
       onSplit={onPaneSplit}
