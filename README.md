@@ -722,7 +722,8 @@ The workspace drawer includes tabs and split panes; only the active split is sho
 Mobile overlays use scrollable semantic controls, safe-area insets, and 44px touch targets.
 Chrome collapses while the software keyboard is open without destroying the active terminal session.
 A pane opens in Chat when it has recent agent context and in Term otherwise; an explicit choice is remembered for that pane in the current browser tab.
-While the terminal keyboard is open, a compact Esc/Tab/Ctrl/arrow row supplies keys that phone keyboards commonly omit.
+While the terminal keyboard is open, a compact Paste/Esc/Tab/Ctrl/arrow row supplies clipboard access and keys that phone keyboards commonly omit.
+Paste reads clipboard text directly when the browser permits it and otherwise opens a manual paste field for HTTP and restricted mobile browsers.
 Explicit pane, tab, and workspace closes require confirmation before their backing sessions are killed.
 
 The web app manifest and owned home-screen icons support standalone installation without changing the private-network deployment boundary.

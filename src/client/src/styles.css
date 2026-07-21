@@ -5687,7 +5687,7 @@ button.active-tool {
 
   .mobile-terminal-keys {
     align-items: stretch;
-    grid-template-columns: repeat(7, minmax(44px, 1fr));
+    grid-template-columns: repeat(8, minmax(44px, 1fr));
     min-width: 0;
     overflow-x: auto;
     border-top: 1px solid var(--line);
@@ -5716,6 +5716,91 @@ button.active-tool {
 
   .mobile-terminal-keys button.active {
     background: var(--panel-3);
+    color: var(--gold);
+  }
+
+  .mobile-paste-backdrop {
+    position: fixed;
+    z-index: 95;
+    inset: 0;
+    display: grid;
+    align-items: end;
+    background: rgba(0, 0, 0, 0.78);
+    padding:
+      var(--wmux-mobile-top-inset)
+      var(--wmux-mobile-right-inset)
+      max(0px, env(safe-area-inset-bottom))
+      var(--wmux-mobile-left-inset);
+  }
+
+  .mobile-paste-dialog {
+    display: grid;
+    gap: 12px;
+    width: 100%;
+    max-height: min(86dvh, 620px);
+    overflow: auto;
+    border: 1px solid var(--gold-dim);
+    background: var(--black);
+    padding: 16px;
+    color: var(--text);
+    font-family: var(--wmux-mono-font);
+  }
+
+  .mobile-paste-dialog header {
+    display: grid;
+    gap: 5px;
+  }
+
+  .mobile-paste-dialog header span {
+    color: var(--gold-dim);
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+  }
+
+  .mobile-paste-dialog header strong {
+    color: var(--ivory);
+    font-size: 18px;
+    text-transform: uppercase;
+  }
+
+  .mobile-paste-dialog p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .mobile-paste-dialog textarea {
+    width: 100%;
+    min-height: 120px;
+    resize: vertical;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--terminal-background);
+    padding: 10px;
+    color: var(--terminal-foreground);
+    font: 400 16px/1.4 var(--wmux-mono-font);
+  }
+
+  .mobile-paste-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .mobile-paste-actions button {
+    min-height: 48px;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    background: var(--panel);
+    color: var(--text);
+    font: 800 12px/1 var(--wmux-mono-font);
+    text-transform: uppercase;
+  }
+
+  .mobile-paste-actions button.primary {
+    border-color: var(--gold-dim);
     color: var(--gold);
   }
 
