@@ -125,6 +125,26 @@ The returned workspace has `id`, `activeTabId`, and the active pane under `tabs[
 http://127.0.0.1:3478/workspaces/<workspaceId>/tabs/<tabId>
 ```
 
+For terminal-attached POSIX agent sessions, use the staged interactive path:
+
+```bash
+wmuxctl tui opencode linux-box --directory /srv/project --no-prompt
+wmuxctl tui codex linux-box --directory /srv/project --prompt-file /tmp/task.md
+printf '%s' 'Review the change.' | wmuxctl tui claude linux-box --directory /srv/project
+cat /tmp/task.md | wmuxctl tui codex linux-box --directory /srv/project --prompt-file -
+wmuxctl tui opencode linux-box --directory /srv/project --no-prompt --accept-trust
+wmuxctl tui codex linux-box --directory /srv/project --no-prompt --gate-timeout 8
+```
+
+It creates a fresh workspace, revalidates the reachable machine immediately before launch, and never closes an interactive workspace.
+The helper waits for the exact `WMUX_AGENT_TUI_ACK <runId>` before starting the child.
+Prompts stay out of the helper command and launch JSON, are sent as one bracketed paste, and use a separate Enter request only after fresh child output and the positive finite `--gate-timeout` observation (default five seconds).
+`--accept-trust` only selects a recognized numbered `1` yes/trust/continue repository-trust choice; login, credentials, generic onboarding, and unknown first-run layouts fail closed for manual handling.
+The bounded observation adds startup latency and cannot prove readiness for a gate that appears later without a common upstream readiness signal.
+On child exit, the supervisor emits `WMUX_AGENT_TUI_EXIT <runId> <code>` and quarantines input; Ctrl-C returns the pane to its invoking shell.
+`WMUX_PUBLIC_URL`/`--public-url` must be an absolute credential-free HTTP(S) base without a query or fragment.
+`localUrl` uses the API base (including an intentional path prefix), `publicUrl` falls back to it, and `url` prefers the public handoff.
+
 Set a manual title when the workspace is for a user-visible task:
 
 ```bash

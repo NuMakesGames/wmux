@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import posixpath
 import re
@@ -31,6 +32,9 @@ TERMINAL_DELEGATION_STATES = frozenset(
     {"completed", "blocked", "failed", "error", "cancelled", "stopped", "timed_out", "interrupted"}
 )
 CODEX_READY_PATTERN = r"(?s)OpenAI Codex.*?›(?:\s|$)"
+# Bracketed paste is an input protocol, not an escaping boundary. Preserve TAB
+# and LF, normalize CRLF below, and reject bare CR plus every other C0/C1/DEL.
+UNSAFE_TUI_PROMPT_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 class DelegationObservationError(RuntimeError):
@@ -467,6 +471,40 @@ def workspace_url(base_url: str, workspace_id: str, tab_id: str) -> str:
     return f"{base_url.rstrip('/')}/workspaces/{urllib.parse.quote(workspace_id)}/tabs/{urllib.parse.quote(tab_id)}"
 
 
+def safe_http_base(value: str, label: str) -> str:
+    candidate = value.rstrip("/")
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        _port = parsed.port
+    except ValueError as error:
+        raise SystemExit(f"wmuxctl: {label} must be a valid absolute HTTP(S) URL") from error
+    if (
+        not candidate
+        or any(ord(character) <= 32 or ord(character) == 127 for character in candidate)
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SystemExit(
+            f"wmuxctl: {label} must be an absolute credential-free HTTP(S) URL without a query or fragment"
+        )
+    return candidate
+
+
+def safe_public_url(value: str, fallback: str) -> str:
+    return safe_http_base(value if value else fallback, "--public-url/WMUX_PUBLIC_URL")
+
+
+def urls(base_url: str, public_url: str, workspace_id: str, tab_id: str) -> dict[str, str]:
+    local = workspace_url(base_url, workspace_id, tab_id)
+    public = workspace_url(safe_public_url(public_url, base_url), workspace_id, tab_id)
+    return {"url": public, "localUrl": local, "publicUrl": public}
+
+
 def print_json(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
@@ -866,6 +904,309 @@ def read_delegate_prompt(args: argparse.Namespace) -> str:
     return prompt
 
 
+def read_tui_prompt(args: argparse.Namespace) -> str | None:
+    sources = int(bool(args.prompt_file)) + int(bool(args.no_prompt))
+    if sources > 1:
+        raise SystemExit("wmuxctl: --no-prompt conflicts with --prompt-file")
+    if args.no_prompt:
+        return None
+    if args.prompt_file and args.prompt_file != "-":
+        try:
+            with Path(args.prompt_file).open("r", encoding="utf-8", newline="") as handle:
+                prompt = handle.read()
+        except (OSError, UnicodeError) as error:
+            raise SystemExit(f"wmuxctl: cannot read TUI prompt: {error}") from error
+    elif args.prompt_file == "-" or not sys.stdin.isatty():
+        try:
+            prompt = sys.stdin.buffer.read().decode("utf-8")
+        except UnicodeError as error:
+            raise SystemExit(f"wmuxctl: cannot read TUI prompt: {error}") from error
+    else:
+        raise SystemExit("wmuxctl: provide --prompt-file, pipe a prompt on stdin, or use --no-prompt")
+    prompt = prompt.replace("\r\n", "\n")
+    if not prompt or len(prompt.encode("utf-8")) > 128 * 1024:
+        raise SystemExit("wmuxctl: TUI prompt must be 1..131072 UTF-8 bytes")
+    if UNSAFE_TUI_PROMPT_CONTROL.search(prompt):
+        raise SystemExit(
+            "wmuxctl: TUI prompt contains an unsafe terminal control character; only TAB and LF are allowed"
+        )
+    return prompt
+
+
+def require_posix_machine(client: WmuxClient, machine_id: str) -> dict[str, Any]:
+    payload = client.bootstrap()
+    machine = next((item for item in payload.get("machines", []) if item.get("id") == machine_id), None)
+    if not machine or machine.get("reachable") is not True:
+        raise SystemExit(f"wmuxctl: machine is not reachable: {machine_id}")
+    if machine.get("kind") not in {"local", "ssh"} or machine.get("platform") not in {"linux", "mac"}:
+        raise SystemExit("wmuxctl: interactive TUI requires a POSIX local or SSH target")
+    return machine
+
+
+def machine_identity(machine: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    # Deliberately omit volatile reachability/health prose while pinning the
+    # connection descriptor exposed by bootstrap, including dynamic sources.
+    keys = ("id", "kind", "platform", "source", "endpoint", "host", "user", "port", "address", "sessionBackend")
+    return tuple((key, machine.get(key)) for key in keys if isinstance(machine.get(key), (str, int, bool, type(None))))
+
+
+def validate_tui_args(args: argparse.Namespace) -> None:
+    for key in ("timeout", "ready_timeout", "gate_timeout"):
+        value = getattr(args, key)
+        if not math.isfinite(value) or value <= 0:
+            raise SystemExit(f"wmuxctl: --{key.replace('_', '-')} must be positive and finite")
+    for key in ("cols", "rows"):
+        if not 1 <= getattr(args, key) <= 1000:
+            raise SystemExit(f"wmuxctl: --{key} must be between 1 and 1000")
+    for key in ("title", "model", "opencode_agent"):
+        value = getattr(args, key)
+        if not isinstance(value, str) or len(value) > 512 or "\x00" in value:
+            raise SystemExit(f"wmuxctl: invalid --{key.replace('_', '-')}")
+    if args.opencode_agent and args.runtime != "opencode":
+        raise SystemExit("wmuxctl: --opencode-agent is only valid for OpenCode")
+    if not posixpath.isabs(args.directory) or len(args.directory) > 4096 or "\x00" in args.directory:
+        raise SystemExit("wmuxctl: TUI directory must be an absolute POSIX path of at most 4096 characters")
+
+
+def replay_digest(client: WmuxClient, pane_id: str, cols: int, rows: int) -> tuple[str, str]:
+    replay = str(client.read_pane_output(pane_id, cols, rows).get("replay") or "")
+    return hashlib.sha256(replay.encode("utf-8")).hexdigest(), replay
+
+
+def helper_failure(replay: str, run_id: str) -> str:
+    payload: dict[str, Any] | None = None
+    done_code: int | None = None
+    tui_exit_code: int | None = None
+    for line in clean_terminal_text(replay).splitlines():
+        if line.startswith("WMUX_AGENT_RESULT "):
+            try:
+                candidate = json.loads(
+                    base64.b64decode(line.removeprefix("WMUX_AGENT_RESULT "), validate=True).decode("utf-8")
+                )
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(candidate, dict) and candidate.get("runId") == run_id and candidate.get("ok") is False:
+                payload = candidate
+        match = re.fullmatch(r"WMUX_AGENT_DONE ([A-Za-z0-9._-]+) (-?\d+)", line)
+        if match and match.group(1) == run_id:
+            done_code = int(match.group(2))
+        match = re.fullmatch(r"WMUX_AGENT_TUI_EXIT ([A-Za-z0-9._-]+) (-?\d+)", line)
+        if match and match.group(1) == run_id:
+            tui_exit_code = int(match.group(2))
+    if payload is not None:
+        detail = payload.get("error") or payload.get("result")
+        return detail if isinstance(detail, str) and detail.strip() else "interactive helper rejected the launch request"
+    if done_code is not None and done_code != 0:
+        return f"interactive helper failed with exit code {done_code}"
+    if tui_exit_code is not None:
+        return f"interactive runtime exited with code {tui_exit_code}"
+    return ""
+
+
+def wait_for_helper_marker(
+    client: WmuxClient,
+    pane_id: str,
+    previous: str,
+    marker: str,
+    run_id: str,
+    timeout: float,
+    cols: int,
+    rows: int,
+) -> str:
+    started = time.monotonic()
+    while True:
+        digest, replay = replay_digest(client, pane_id, cols, rows)
+        failure = helper_failure(replay, run_id)
+        if failure:
+            raise SystemExit(f"wmuxctl: interactive helper failed: {failure}")
+        if digest != previous and marker in clean_terminal_text(replay).splitlines():
+            return replay
+        elapsed = time.monotonic() - started
+        if elapsed >= timeout:
+            raise SystemExit(f"wmuxctl: timed out after {timeout:g}s waiting for interactive helper marker {marker!r}")
+        time.sleep(min(0.25, timeout - elapsed))
+
+
+TRUST_PROMPT = re.compile(
+    r"(?:do you trust (?:the contents of )?(?:this|the current) (?:directory|folder|repository)|"
+    r"trust this (?:directory|folder|repository)|repository trust)",
+    re.I,
+)
+TRUST_CHOICE = re.compile(r"^(?:[>❯]\s*)?1[.)]?\s+(?:yes|trust|continue)", re.I)
+LOGIN_PROMPT = re.compile(
+    r"^(?:sign[ -]?in(?: required| to .*)?|log[ -]?in(?: required| to .*)?|authentication required|"
+    r"enter (?:your )?(?:api key|access token|credentials?)|paste (?:your )?(?:api key|access token)|"
+    r"(?:open|visit) .*(?:device code|authenticate))\s*[:?]?\s*$",
+    re.I,
+)
+FIRST_RUN_PROMPT = re.compile(
+    r"^(?:press (?:enter|return|any key) to continue|first[ -]?run setup(?: required)?|"
+    r"let'?s get started|complete (?:the )?(?:initial )?setup|"
+    r"welcome[^\n]*(?:let'?s get started|complete setup)|"
+    r"(?:choose|select) (?:a |your )?(?:theme|color scheme|login method))\s*[:?]?\s*$",
+    re.I,
+)
+UNKNOWN_GATE = re.compile(
+    r"^(?:would you like to .*[?]|(?:select|choose) (?:an? |your )?[^:]{1,80}:|.*\[(?:y/n|Y/n|y/N)\]\s*)$",
+    re.I,
+)
+UI_CHOICE = re.compile(r"^(?:[>❯*•]\s*)?(?:\d+[.)]?\s+|\[[ xX]\]\s*)?(?:yes|no|continue|cancel|exit|trust|sign in|log in).*$", re.I)
+
+
+def active_tui_lines(replay: str) -> list[str]:
+    lines = [line.strip(" \t│┃┆┇┊┋┌┐└┘┏┓┗┛─━") for line in clean_terminal_text(replay).splitlines()]
+    return [line for line in lines if line][-12:]
+
+
+def classify_tui_gate(replay: str) -> str:
+    lines = active_tui_lines(replay)
+    for index, line in enumerate(lines):
+        if TRUST_PROMPT.search(line):
+            trailing = lines[index + 1 :]
+            if any(TRUST_CHOICE.search(candidate) for candidate in trailing) and all(
+                UI_CHOICE.search(candidate) for candidate in trailing
+            ):
+                return "trust"
+            if not trailing or all(
+                UI_CHOICE.search(candidate) or UNKNOWN_GATE.fullmatch(candidate) for candidate in trailing
+            ):
+                return "unknown-first-run"
+    for index, line in enumerate(lines):
+        if LOGIN_PROMPT.fullmatch(line):
+            trailing = lines[index + 1 :]
+            if not trailing or all(UI_CHOICE.search(candidate) for candidate in trailing):
+                return "login"
+    for index, line in enumerate(lines):
+        if FIRST_RUN_PROMPT.fullmatch(line) or UNKNOWN_GATE.fullmatch(line):
+            trailing = lines[index + 1 :]
+            if not trailing or all(UI_CHOICE.search(candidate) for candidate in trailing):
+                return "unknown-first-run"
+    return ""
+
+
+def wait_for_tui_snapshot(
+    client: WmuxClient,
+    pane_id: str,
+    previous_digest: str,
+    run_id: str,
+    timeout: float,
+    cols: int,
+    rows: int,
+    observe_gates: bool = True,
+    gate_timeout: float = 0,
+) -> tuple[str, str]:
+    """Require fresh child output, then continuously observe bounded startup gates."""
+    started = time.monotonic()
+    first_change_at: float | None = None
+    latest_replay = ""
+    while True:
+        digest, replay = replay_digest(client, pane_id, cols, rows)
+        failure = helper_failure(replay, run_id)
+        if failure:
+            raise SystemExit(f"wmuxctl: interactive helper failed: {failure}")
+        changed = digest != previous_digest
+        if changed or first_change_at is not None:
+            gate = classify_tui_gate(replay)
+            if gate:
+                return replay, gate
+        if changed:
+            latest_replay = replay
+            first_change_at = first_change_at or time.monotonic()
+            if not observe_gates:
+                return latest_replay, ""
+        elif first_change_at is not None:
+            latest_replay = replay
+        now = time.monotonic()
+        if first_change_at is not None and now - first_change_at >= gate_timeout:
+            return latest_replay, ""
+        elapsed = now - started
+        if first_change_at is None and elapsed >= timeout:
+            raise SystemExit(f"wmuxctl: timed out after {timeout:g}s waiting for post-start TUI output")
+        remaining = timeout - elapsed if first_change_at is None else gate_timeout - (now - first_change_at)
+        time.sleep(min(0.1, max(0, remaining)))
+
+
+def cmd_tui(client: WmuxClient, args: argparse.Namespace) -> int:
+    validate_tui_args(args)
+    prompt = read_tui_prompt(args)
+    public_base = safe_public_url(args.public_url, client.url)
+    initial_machine = require_posix_machine(client, args.machine)
+    initial_identity = machine_identity(initial_machine)
+    workspace, _state = client.create_workspace(args.machine)
+    info = describe_workspace(client.url, workspace)
+    info.update(urls(client.url, public_base, info["workspaceId"], info["tabId"]))
+    info.update({"runId": str(uuid.uuid4()), "runtime": args.runtime, "state": "failed", "closed": False,
+                 "promptSubmitted": False, "activityVerified": False})
+    try:
+        client.set_workspace_title(info["workspaceId"], args.title or f"{args.runtime.capitalize()} TUI")
+        wait_for_shell_ready(client, info["paneId"], info["machineId"], args.ready_timeout, args.cols, args.rows)
+        before, _ = replay_digest(client, info["paneId"], args.cols, args.rows)
+        # Recheck after pane creation so a dynamic registration cannot drift.
+        current_machine = require_posix_machine(client, args.machine)
+        if machine_identity(current_machine) != initial_identity:
+            raise SystemExit("wmuxctl: machine identity changed before TUI launch")
+        submit_line(client, info["paneId"], f"wmux-agent-run tui {info['runId']}", True, args.cols, args.rows)
+        ready = wait_for_helper_marker(
+            client, info["paneId"], before, f"WMUX_AGENT_TUI_READY {info['runId']}", info["runId"],
+            args.ready_timeout, args.cols, args.rows,
+        )
+        ready_digest = hashlib.sha256(ready.encode()).hexdigest()
+        request: dict[str, Any] = {"runId": info["runId"], "runtime": args.runtime, "directory": args.directory}
+        if args.model:
+            request["model"] = args.model
+        if args.runtime == "opencode" and args.opencode_agent:
+            request["agent"] = args.opencode_agent
+        encoded = base64.b64encode(json.dumps(request, separators=(",", ":")).encode()).decode()
+        submit_line(client, info["paneId"], encoded, True, args.cols, args.rows)
+        launched = wait_for_helper_marker(
+            client, info["paneId"], ready_digest, f"WMUX_AGENT_TUI_LAUNCH {info['runId']}", info["runId"],
+            args.ready_timeout, args.cols, args.rows,
+        )
+        launch_digest = hashlib.sha256(launched.encode()).hexdigest()
+        # The helper cannot start the child until this unique acknowledgement;
+        # after it, alternate-screen checkpoints may replace the launch marker.
+        submit_line(client, info["paneId"], f"WMUX_AGENT_TUI_ACK {info['runId']}", True, args.cols, args.rows)
+        launched, gate = wait_for_tui_snapshot(
+            client, info["paneId"], launch_digest, info["runId"], args.ready_timeout, args.cols, args.rows,
+            gate_timeout=args.gate_timeout,
+        )
+        launch_digest = hashlib.sha256(launched.encode()).hexdigest()
+        if gate == "trust":
+            if not args.accept_trust:
+                raise SystemExit("wmuxctl: repository-trust prompt detected; rerun with --accept-trust after review")
+            submit_line(client, info["paneId"], "1", True, args.cols, args.rows)
+            launched, gate = wait_for_tui_snapshot(
+                client, info["paneId"], launch_digest, info["runId"], args.ready_timeout, args.cols, args.rows,
+                gate_timeout=args.gate_timeout,
+            )
+            launch_digest = hashlib.sha256(launched.encode()).hexdigest()
+            if gate:
+                raise SystemExit("wmuxctl: TUI remained at a safety prompt after trust response")
+        elif gate:
+            raise SystemExit(f"wmuxctl: {gate} prompt detected; refusing to automate it")
+        info["state"] = "ready"
+        if prompt is not None:
+            paste = "\x1b[200~" + prompt + "\x1b[201~"
+            if len(paste.encode()) >= 256 * 1024:
+                raise SystemExit("wmuxctl: bracketed prompt exceeds pane input limit")
+            client.send_input(info["paneId"], paste, args.cols, args.rows)
+            pasted, _gate = wait_for_tui_snapshot(
+                client, info["paneId"], launch_digest, info["runId"], args.timeout, args.cols, args.rows, False
+            )
+            client.send_input(info["paneId"], "\r", args.cols, args.rows)
+            wait_for_tui_snapshot(
+                client, info["paneId"], hashlib.sha256(pasted.encode()).hexdigest(), info["runId"],
+                args.timeout, args.cols, args.rows, False,
+            )
+            info.update({"state": "active", "promptSubmitted": True, "activityVerified": True})
+        print_json(info)
+        return 0
+    except SystemExit as error:
+        info["error"] = redact_delegate_text(str(error), [prompt or "", client.token])
+        print_json(info)
+        return 1
+
+
 def decode_agent_result(output: str, run_id: str) -> tuple[dict[str, Any], int]:
     payload: dict[str, Any] | None = None
     exit_code: int | None = None
@@ -894,8 +1235,12 @@ def decode_agent_result(output: str, run_id: str) -> tuple[dict[str, Any], int]:
 def redact_delegate_text(value: Any, secrets: list[str], limit: int = 64_000) -> str:
     text = value if isinstance(value, str) else ""
     for secret in secrets:
-        if secret:
-            text = text.replace(secret, "[redacted]")
+        if not secret:
+            continue
+        forms = {secret, json.dumps(secret, ensure_ascii=False)[1:-1], json.dumps(secret)[1:-1]}
+        for form in forms:
+            if form:
+                text = text.replace(form, "[redacted]")
     encoded = text.encode("utf-8")
     if len(encoded) > limit:
         text = encoded[:limit].decode("utf-8", errors="ignore")
@@ -1351,6 +1696,7 @@ def cmd_ps(client: WmuxClient, args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Interact with a wmux API.")
     parser.add_argument("--url", default=default_url(), help=f"wmux base URL (default: {DEFAULT_URL})")
+    parser.add_argument("--public-url", default=os.environ.get("WMUX_PUBLIC_URL", ""), help="safe public http(s) base URL for handoff links")
     parser.add_argument("--token-path", default=None, help="token file path when WMUX_TOKEN is unset")
     parser.add_argument("--automation-token-path", default=None, help="automation token file path")
     parser.add_argument("--scoped-auth", action="store_true", help="require automation auth and disable compatibility fallback")
@@ -1459,6 +1805,23 @@ def build_parser() -> argparse.ArgumentParser:
     delegate.add_argument("--rows", type=int, default=36)
     delegate.set_defaults(func=cmd_delegate)
 
+    tui = subparsers.add_parser("tui", help="start a visible interactive OpenCode, Codex, or Claude TUI on a POSIX target")
+    tui.add_argument("runtime", choices=("opencode", "codex", "claude"), help="agent CLI to start")
+    tui.add_argument("machine", help="reachable POSIX machine id")
+    tui.add_argument("--directory", required=True, help="absolute target working directory")
+    tui.add_argument("--prompt-file", default="", help="UTF-8 prompt file; use - or pipe stdin")
+    tui.add_argument("--no-prompt", action="store_true", help="start the TUI without submitting a prompt")
+    tui.add_argument("--accept-trust", action="store_true", help="accept only a recognized repository-trust prompt")
+    tui.add_argument("--title", default="", help="manual workspace title")
+    tui.add_argument("--model", default="", help="optional runtime model")
+    tui.add_argument("--opencode-agent", default="", help="optional OpenCode agent name")
+    tui.add_argument("--timeout", type=float, default=30, help="prompt/activity verification timeout in seconds")
+    tui.add_argument("--ready-timeout", type=float, default=30, help="shell/helper readiness timeout in seconds")
+    tui.add_argument("--gate-timeout", type=float, default=5, help="post-start safety-gate observation in seconds (default: 5)")
+    tui.add_argument("--cols", type=int, default=120)
+    tui.add_argument("--rows", type=int, default=36)
+    tui.set_defaults(func=cmd_tui)
+
     output = subparsers.add_parser("output", help="print the bounded replay buffer for a pane")
     output.add_argument("pane", help="pane id")
     output.add_argument("--raw", action="store_true", help="preserve terminal escape sequences")
@@ -1519,7 +1882,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    client = WmuxClient(args.url, default_token(args.token_path, args.automation_token_path, args.scoped_auth))
+    client = WmuxClient(
+        safe_http_base(args.url, "--url/WMUX_URL"),
+        default_token(args.token_path, args.automation_token_path, args.scoped_auth),
+    )
     return args.func(client, args)
 
 
