@@ -311,6 +311,23 @@ test("navigates, persists, filters, and moves nested workspaces", async ({ page,
     await page.getByRole("button", { name: `Move ${child.name}` }).press("Enter");
     const moveDialog = page.getByRole("dialog", { name: `Move ${child.name}` });
     await expect(moveDialog).toBeVisible();
+    if (testInfo.project.name.startsWith("mobile-")) {
+      const actionBoxes = await moveDialog.locator(".workspace-move-actions button").evaluateAll((buttons) => buttons.map((button) => {
+        const rect = button.getBoundingClientRect();
+        return {
+          left: Math.round(rect.left),
+          right: Math.round(rect.right),
+          top: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+      }));
+      expect(actionBoxes).toHaveLength(4);
+      expect(actionBoxes.every((box) => box.left === actionBoxes[0].left && box.width === actionBoxes[0].width)).toBe(true);
+      expect(actionBoxes.every((box, index) => box.height >= 44 && box.right <= page.viewportSize()!.width && (
+        index === 0 || box.top > actionBoxes[index - 1].top
+      ))).toBe(true);
+    }
     await moveDialog.getByRole("button", { name: "Move out one level" }).click();
     await expect.poll(async () => {
       const response = await request.get("/api/bootstrap");
