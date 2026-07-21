@@ -523,8 +523,7 @@ export class StateStore extends EventEmitter {
       (candidate) => candidate.paneId === target.pane.id && candidate.agent === agent,
     );
     const runId = suppliedRunId || (
-      ACTIVE_AGENT_STATUSES.has(status)
-      && latestAgentEvent
+      latestAgentEvent
       && ACTIVE_AGENT_STATUSES.has(latestAgentEvent.status)
         ? cleanDelegationRunId(latestAgentEvent.runId)
         : ""

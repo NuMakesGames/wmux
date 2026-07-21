@@ -410,8 +410,12 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
   fs.writeFileSync(promptPath, prompt);
   const inputs: Array<Record<string, unknown>> = [];
   const lifecycle: Array<Record<string, unknown>> = [];
+  const agentEvents: Array<Record<string, unknown>> = [];
+  const completedRuns = new Set<string>();
   let runId = "";
   let upgradeCount = 0;
+  let promptSubmitted = false;
+  let createRequests = 0;
   const machine = { id: "windows-runner", kind: "powershell-ssh", platform: "win", reachable: true };
   const workspace = {
     id: "ws_windows_delegate",
@@ -422,6 +426,7 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
       activePaneId: "pane_windows_delegate",
       panes: [{ id: "pane_windows_delegate", machineId: "windows-runner" }],
     }],
+    manualTitle: "",
   };
   const jsonResponse = (response: http.ServerResponse, body: unknown, status = 200) => {
     response.writeHead(status, { "content-type": "application/json" });
@@ -429,24 +434,32 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
   };
   const server = http.createServer((request, response) => {
     if (request.method === "GET" && request.url === "/api/bootstrap") {
-      jsonResponse(response, { machines: [machine], workspaces: [workspace] });
+      jsonResponse(response, { machines: [machine], workspaces: [workspace], agentEvents, delegations: [] });
       return;
     }
     if (request.method === "POST" && request.url === "/api/workspaces") {
+      createRequests += 1;
       request.resume();
       request.on("end", () => jsonResponse(response, { workspace, state: {} }, 201));
       return;
     }
     if (request.method === "POST" && request.url === "/api/workspaces/ws_windows_delegate/title") {
       request.resume();
-      request.on("end", () => jsonResponse(response, {}));
+      request.on("end", () => {
+        workspace.manualTitle = "Windows catalog import";
+        jsonResponse(response, {});
+      });
       return;
     }
     if (request.method === "POST" && request.url === "/api/agent-events") {
       const chunks: Buffer[] = [];
       request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       request.on("end", () => {
-        lifecycle.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        const event = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        lifecycle.push(event);
+        runId = event.runId;
+        promptSubmitted = false;
+        agentEvents.unshift(event);
         jsonResponse(response, {}, 201);
       });
       return;
@@ -457,24 +470,32 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
       request.on("end", () => {
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         inputs.push(body);
-        if (body.data === "\r" && inputs.length > 2) {
-          const encoded = inputs.slice(2, -1).map((input) => input.data).join("");
-          const delegated = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-          runId = delegated.runId;
-          assert.deepEqual(delegated, {
-            runId,
-            runtime: "codex",
-            prompt,
-            directory: "T:\\git\\example\\project",
-            unattended: false,
-            writeAccess: true,
-            title: "Windows catalog import",
-            sandboxMode: "danger-full-access",
-            resultFormat: "outcome-v1",
-          });
-        }
+        if (body.data === "\r" && inputs.some((input) => input.data === "\u001b[201~")) promptSubmitted = true;
         jsonResponse(response, {});
       });
+      return;
+    }
+    if (request.method === "GET" && request.url === `/api/delegations/${runId}`) {
+      if (promptSubmitted && !completedRuns.has(runId)) {
+        completedRuns.add(runId);
+        agentEvents.unshift({
+          ...agentEvents[0],
+          id: `complete-${runId}`,
+          status: "completed",
+          message: JSON.stringify({ outcome: "completed", summary: "catalog imported" }),
+        });
+      }
+      jsonResponse(response, promptSubmitted ? {
+        delegation: {
+          runId,
+          state: "completed",
+          runtime: "codex",
+          title: "Windows catalog import",
+          summary: "Codex delegation completed",
+          result: JSON.stringify({ outcome: "completed", summary: "catalog imported" }),
+          error: "",
+        },
+      } : { delegation: { runId, state: "running" } });
       return;
     }
     response.writeHead(404).end();
@@ -493,18 +514,7 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
       "",
     ].join("\r\n"));
     let replay = "PS T:\\git\\example\\project> ";
-    if (upgradeCount === 2) replay = "WMUX_AGENT_READY\r\n";
-    if (upgradeCount === 3) {
-      const result = Buffer.from(JSON.stringify({
-        runId,
-        runtime: "codex",
-        ok: true,
-        outcome: "completed",
-        result: "catalog imported",
-        error: "",
-      })).toString("base64");
-      replay = `WMUX_AGENT_RESULT ${result}\r\nWMUX_AGENT_DONE ${runId} 0\r\n`;
-    }
+    if (upgradeCount >= 2) replay = "OpenAI Codex\r\n\r\n› Implement a feature\r\n";
     socket.end(websocketFrame({ type: "ready", paneId: "pane_windows_delegate", replay }));
   });
 
@@ -519,10 +529,37 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
     assert.equal(result.state, "completed");
     assert.equal(result.outcome, "completed");
     assert.equal(result.result, "catalog imported");
-    assert.deepEqual(inputs.slice(0, 2).map((body) => body.data), ["wmux-agent-run", "\r"]);
-    assert.ok(inputs.slice(2, -1).length > 1);
-    assert.ok(inputs.slice(2, -1).every((body) => String(body.data).length <= 256));
-    assert.deepEqual(lifecycle.map((event) => event.status), ["running", "completed"]);
+    const launch = String(inputs[0].data);
+    assert.match(launch, /WMUX_DELEGATED_RUN='1'/);
+    assert.match(launch, /Remove-Item Env:WMUX_DELEGATION_RUN_ID/);
+    assert.match(launch, /Set-Location -LiteralPath 'T:\\git\\example\\project'/);
+    assert.match(launch, /codex --sandbox 'danger-full-access' --no-alt-screen/);
+    assert.doesNotMatch(launch, /--ask-for-approval never/);
+    assert.doesNotMatch(launch, new RegExp(prompt.slice(0, 30)));
+    assert.deepEqual(inputs.slice(0, 3).map((body) => body.data), [launch, "\r", "\u001b[200~"]);
+    const pasteEnd = inputs.findIndex((body) => body.data === "\u001b[201~");
+    assert.ok(pasteEnd > 3);
+    const submittedPrompt = inputs.slice(3, pasteEnd).map((body) => body.data).join("");
+    assert.match(submittedPrompt, new RegExp(prompt.slice(0, 30)));
+    assert.match(submittedPrompt, /Return the entire final response as exactly one JSON object/);
+    assert.ok(inputs.slice(3, pasteEnd).every((body) => String(body.data).length <= 256));
+    assert.equal(inputs[pasteEnd + 1].data, "\r");
+    assert.deepEqual(lifecycle.map((event) => event.status), ["running"]);
+
+    const firstInputCount = inputs.length;
+    const secondDelegation = await cli(url, [
+      "delegate", "codex", "windows-runner", "--directory", "T:\\git\\example\\project",
+      "--prompt-file", promptPath, "--title", "Windows catalog import", "--write-access",
+      "--sandbox", "danger-full-access", "--structured-outcome",
+    ]);
+    const secondResult = JSON.parse(secondDelegation.stdout);
+    assert.equal(secondResult.state, "completed");
+    assert.equal(secondResult.reused, true);
+    assert.notEqual(secondResult.runId, result.runId);
+    assert.equal(createRequests, 1);
+    assert.equal(inputs[firstInputCount].data, "\u001b[200~");
+    assert.equal(inputs.slice(firstInputCount).some((body) => String(body.data).includes("codex --sandbox")), false);
+    assert.deepEqual(lifecycle.map((event) => event.status), ["running", "running"]);
   } finally {
     await close(server);
     fs.rmSync(root, { recursive: true, force: true });

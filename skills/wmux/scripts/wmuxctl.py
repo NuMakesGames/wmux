@@ -617,11 +617,45 @@ def submit_line(client: WmuxClient, pane_id: str, line: str, enter: bool, cols: 
     return len(text.encode("utf-8")) + (1 if enter else 0)
 
 
-def submit_windows_request(client: WmuxClient, pane_id: str, encoded: str, cols: int, rows: int) -> int:
-    for offset in range(0, len(encoded), 256):
-        client.send_input(pane_id, encoded[offset:offset + 256], cols, rows)
+def submit_interactive_prompt(client: WmuxClient, pane_id: str, prompt: str, cols: int, rows: int) -> int:
+    client.send_input(pane_id, "\x1b[200~", cols, rows)
+    for offset in range(0, len(prompt), 256):
+        client.send_input(pane_id, prompt[offset:offset + 256], cols, rows)
+    client.send_input(pane_id, "\x1b[201~", cols, rows)
+    time.sleep(0.1)
     client.send_input(pane_id, "\r", cols, rows)
-    return len(encoded.encode("utf-8")) + 1
+    return len(prompt.encode("utf-8")) + 13
+
+
+def powershell_single_quote(value: str, label: str) -> str:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise SystemExit(f"wmuxctl: {label} cannot contain control characters")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def windows_codex_command(args: argparse.Namespace) -> str:
+    sandbox = args.sandbox or ("workspace-write" if args.write_access else "read-only")
+    parts = [
+        f"$env:WMUX_DELEGATED_RUN={powershell_single_quote('1', 'delegation environment')}",
+        "Remove-Item Env:WMUX_DELEGATION_RUN_ID -ErrorAction SilentlyContinue",
+        f"Set-Location -LiteralPath {powershell_single_quote(args.directory, 'delegation directory')}",
+        f"codex --sandbox {powershell_single_quote(sandbox, 'sandbox mode')} --no-alt-screen",
+    ]
+    if args.model:
+        parts[-1] += f" --model {powershell_single_quote(args.model, 'model')}"
+    if args.unattended:
+        parts[-1] += " --ask-for-approval never"
+    return "; ".join(parts)
+
+
+def interactive_delegate_prompt(prompt: str, structured_outcome: bool) -> str:
+    if not structured_outcome:
+        return prompt
+    return prompt + (
+        "\n\nReturn the entire final response as exactly one JSON object with these string fields: "
+        '{"outcome":"completed|blocked|failed","summary":"concise summary"}. '
+        "Choose exactly one listed outcome, emit no other fields, and do not use Markdown fences or surrounding text."
+    )
 
 
 def cmd_send(client: WmuxClient, args: argparse.Namespace) -> int:
@@ -709,6 +743,7 @@ def wait_for_delegation_result(
     timeout: float,
     cols: int,
     rows: int,
+    structured_outcome: bool = False,
 ) -> tuple[bool, Any, int, bool, float, str]:
     started = time.monotonic()
     done_pattern = re.compile(rf"(?m)^WMUX_AGENT_DONE {re.escape(run_id)} -?\d+$")
@@ -753,7 +788,39 @@ def wait_for_delegation_result(
             if durable_state in TERMINAL_DELEGATION_STATES:
                 ok = durable_state == "completed"
                 detail = durable.get("result") if ok else durable.get("error") or durable.get("summary")
-                return ok, detail, 0 if ok else 1, True, time.monotonic() - started, durable_state
+                outcome = durable_state
+                if ok and structured_outcome:
+                    try:
+                        parsed = json.loads(detail)
+                    except (TypeError, json.JSONDecodeError):
+                        parsed = None
+                    if not isinstance(parsed, dict) or set(parsed) != {"outcome", "summary"}:
+                        return (
+                            False,
+                            "Codex did not return the required structured outcome.",
+                            1,
+                            True,
+                            time.monotonic() - started,
+                            "failed",
+                        )
+                    outcome = parsed.get("outcome")
+                    summary = parsed.get("summary")
+                    if (
+                        outcome not in {"completed", "blocked", "failed"}
+                        or not isinstance(summary, str)
+                        or not summary.strip()
+                    ):
+                        return (
+                            False,
+                            "Codex did not return the required structured outcome.",
+                            1,
+                            True,
+                            time.monotonic() - started,
+                            "failed",
+                        )
+                    ok = outcome == "completed"
+                    detail = summary.strip()
+                return ok, detail, 0 if ok else 1, True, time.monotonic() - started, outcome
 
         remaining = timeout - (time.monotonic() - started)
         if remaining > 0:
@@ -784,47 +851,124 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
         raise SystemExit("wmuxctl: structured outcomes currently require the Codex runtime")
 
     title = args.title or f"{args.runtime.capitalize()} delegation"
-    workspace, _state = client.create_workspace(args.machine)
+    workspace = None
+    reused = False
+    if is_windows and args.title:
+        candidates = [
+            candidate
+            for candidate in bootstrap.get("workspaces", [])
+            if candidate.get("machineId") == args.machine and workspace_title(candidate) == title
+        ]
+        candidates.sort(key=lambda candidate: candidate.get("updatedAt") or candidate.get("createdAt") or "", reverse=True)
+        for candidate in candidates:
+            candidate_info = describe_workspace(client.url, candidate)
+            latest_event = next(
+                (
+                    event
+                    for event in bootstrap.get("agentEvents", [])
+                    if event.get("paneId") == candidate_info["paneId"]
+                    and event.get("agent") == "codex"
+                    and event.get("runId")
+                ),
+                None,
+            )
+            if not latest_event:
+                continue
+            active_delegation = next(
+                (
+                    delegation
+                    for delegation in bootstrap.get("delegations", [])
+                    if delegation.get("runId") == latest_event.get("runId")
+                    and delegation.get("state") not in TERMINAL_DELEGATION_STATES
+                ),
+                None,
+            )
+            if active_delegation:
+                raise SystemExit(f"wmuxctl: Codex workspace {title!r} is already running a delegated task")
+            workspace = candidate
+            reused = True
+            break
+    if workspace is None:
+        workspace, _state = client.create_workspace(args.machine)
     info = describe_workspace(client.url, workspace)
     run_id = str(uuid.uuid4())
     secrets = [prompt, client.token]
     try:
-        client.set_workspace_title(workspace["id"], title)
+        if not reused:
+            client.set_workspace_title(workspace["id"], title)
         client.record_agent_event(
             info["workspaceId"], info["tabId"], info["paneId"], args.runtime, "running", title,
             f"{args.runtime.capitalize()} delegation running",
             run_id=run_id,
         )
-        info["shellReadySeconds"] = round(
-            wait_for_shell_ready(client, info["paneId"], info["machineId"], args.ready_timeout, args.cols, args.rows), 3
-        )
-        submit_line(client, info["paneId"], "wmux-agent-run", True, args.cols, args.rows)
-        wait_for_output(client, info["paneId"], r"(?m)^WMUX_AGENT_READY$", args.ready_timeout, args.cols, args.rows)
         if is_windows:
-            # ConPTY can publish the child's first output just before Windows
-            # finishes transferring foreground console input to that child.
-            time.sleep(0.5)
-        request = {
-            "runId": run_id,
-            "runtime": args.runtime,
-            "prompt": prompt,
-            "directory": args.directory,
-            "unattended": args.unattended,
-            "writeAccess": args.write_access,
-            "title": title,
-        }
-        if args.sandbox:
-            request["sandboxMode"] = args.sandbox
-        if args.structured_outcome:
-            request["resultFormat"] = "outcome-v1"
-        if args.model:
-            request["model"] = args.model
-        if args.runtime == "opencode" and args.opencode_agent:
-            request["agent"] = args.opencode_agent
-        encoded = base64.b64encode(json.dumps(request, separators=(",", ":")).encode()).decode()
-        if is_windows:
-            submit_windows_request(client, info["paneId"], encoded, args.cols, args.rows)
+            if not reused:
+                info["shellReadySeconds"] = round(
+                    wait_for_shell_ready(
+                        client,
+                        info["paneId"],
+                        info["machineId"],
+                        args.ready_timeout,
+                        args.cols,
+                        args.rows,
+                    ),
+                    3,
+                )
+                submit_line(
+                    client,
+                    info["paneId"],
+                    windows_codex_command(args),
+                    True,
+                    args.cols,
+                    args.rows,
+                )
+            wait_for_output(
+                client,
+                info["paneId"],
+                r"(?m)^\s*›(?:\s|$)",
+                args.ready_timeout,
+                args.cols,
+                args.rows,
+            )
+            submit_interactive_prompt(
+                client,
+                info["paneId"],
+                interactive_delegate_prompt(prompt, args.structured_outcome),
+                args.cols,
+                args.rows,
+            )
         else:
+            info["shellReadySeconds"] = round(
+                wait_for_shell_ready(
+                    client,
+                    info["paneId"],
+                    info["machineId"],
+                    args.ready_timeout,
+                    args.cols,
+                    args.rows,
+                ),
+                3,
+            )
+            submit_line(client, info["paneId"], "wmux-agent-run", True, args.cols, args.rows)
+            wait_for_output(client, info["paneId"], r"(?m)^WMUX_AGENT_READY$", args.ready_timeout, args.cols, args.rows)
+            request = {
+                "runId": run_id,
+                "runtime": args.runtime,
+                "prompt": prompt,
+                "directory": args.directory,
+                "unattended": args.unattended,
+                "writeAccess": args.write_access,
+                "title": title,
+            }
+            if args.sandbox:
+                request["sandboxMode"] = args.sandbox
+            if args.structured_outcome:
+                request["resultFormat"] = "outcome-v1"
+            if args.model:
+                request["model"] = args.model
+            if args.runtime == "opencode" and args.opencode_agent:
+                request["agent"] = args.opencode_agent
+            encoded = base64.b64encode(json.dumps(request, separators=(",", ":")).encode()).decode()
             submit_line(client, info["paneId"], encoded, True, args.cols, args.rows)
         ok, detail_source, exit_code, recovered, elapsed, outcome = wait_for_delegation_result(
             client,
@@ -833,6 +977,7 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
             args.timeout,
             args.cols,
             args.rows,
+            args.structured_outcome and is_windows,
         )
         detail = redact_delegate_text(detail_source, secrets)
         if not detail:
@@ -852,6 +997,7 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
             "result": detail if ok else "",
             "error": "" if ok else detail,
             "closed": False,
+            "reused": reused,
         })
         if outcome == "blocked":
             info["state"] = "blocked"
@@ -1092,7 +1238,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--rows", type=int, default=36)
     run.set_defaults(func=cmd_run, enter=True)
 
-    delegate = subparsers.add_parser("delegate", help="run a visible one-shot OpenCode, Codex, or Claude task")
+    delegate = subparsers.add_parser("delegate", help="run a visible OpenCode, Codex, or Claude task")
     delegate.add_argument("runtime", choices=("opencode", "codex", "claude"), help="agent CLI to run in the target pane")
     delegate.add_argument("machine", help="reachable POSIX or Windows machine id")
     delegate.add_argument("--directory", required=True, help="absolute target working directory")
