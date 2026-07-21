@@ -27,6 +27,7 @@ WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 TERMINAL_DELEGATION_STATES = frozenset(
     {"completed", "blocked", "failed", "error", "cancelled", "stopped", "timed_out", "interrupted"}
 )
+CODEX_READY_PATTERN = r"(?s)OpenAI Codex.*?›(?:\s|$)"
 
 
 class DelegationObservationError(RuntimeError):
@@ -894,6 +895,18 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
     run_id = str(uuid.uuid4())
     secrets = [prompt, client.token]
     try:
+        if is_windows and reused:
+            replay = str(
+                client.read_pane_output(
+                    info["paneId"],
+                    args.cols,
+                    args.rows,
+                    timeout=min(args.ready_timeout, 10),
+                ).get("replay")
+                or ""
+            )
+            if re.search(r"(?m)^PS [^\n>]*>\s*$", clean_terminal_text(replay)):
+                reused = False
         if not reused:
             client.set_workspace_title(workspace["id"], title)
         client.record_agent_event(
@@ -925,7 +938,7 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
             wait_for_output(
                 client,
                 info["paneId"],
-                r"(?m)^\s*›(?:\s|$)",
+                CODEX_READY_PATTERN,
                 args.ready_timeout,
                 args.cols,
                 args.rows,
