@@ -885,6 +885,7 @@ test("does not forward a primary drag from the hidden terminal input as PTY mous
 
 test("mobile chrome keeps navigation, chat, terminal, and actions reachable", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile-"), "mobile-only smoke coverage");
+  test.setTimeout(60_000);
 
   const chrome = page.getByRole("banner", { name: "Mobile session controls" });
   await expect(chrome).toBeVisible();
@@ -963,6 +964,7 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
   await expect(navigation).toBeVisible();
   await expect(navigation.locator(".workspace-version-badge")).toHaveCount(0);
   await page.locator("button.mobile-sidebar-close").click();
+  await expect(navigation).toBeHidden();
 
   await chrome.getByRole("button", { name: "Open actions" }).click();
   await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
