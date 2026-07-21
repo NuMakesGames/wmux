@@ -223,6 +223,7 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
   private ready = false;
   private pendingResize: { cols: number; rows: number } | undefined;
   private pendingInput: Array<{ data: string; terminalResponse: boolean }> = [];
+  private inputQueue: Promise<void> = Promise.resolve();
   private stopped = false;
   private paused = false;
   private lastTransportWarningAt = 0;
@@ -278,9 +279,12 @@ export class WindowsAgentSession extends EventEmitter<AgentEvents> {
       this.pendingInput.push({ data, terminalResponse });
       return;
     }
-    void this.post(`/sessions/${encodeURIComponent(this.pane.id)}/input`, {
-      dataBase64: Buffer.from(data, "utf8").toString("base64"),
-      terminalResponse,
+    this.inputQueue = this.inputQueue.then(async () => {
+      if (this.exited || this.stopped) return;
+      await this.post(`/sessions/${encodeURIComponent(this.pane.id)}/input`, {
+        dataBase64: Buffer.from(data, "utf8").toString("base64"),
+        terminalResponse,
+      });
     }).catch((error) => this.reportTransportFailure("input", error));
   }
 

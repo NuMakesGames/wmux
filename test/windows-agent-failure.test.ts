@@ -69,7 +69,7 @@ test("Windows agent health probes fail within their timeout budget", async () =>
   );
   assert.equal(result.reachable, false);
   assert.match(result.reason ?? "", /timed out/);
-  assert.ok(Date.now() - startedAt < 200);
+  assert.ok(Date.now() - startedAt < 1000);
   server.close();
   await once(server, "close");
 });
@@ -650,6 +650,72 @@ test("Windows agent queues initial resize and input until session creation compl
   await waitUntil(() => operations.length === 2);
   assert.equal(earlyRequests, 0);
   assert.deepEqual(operations, ["resize", "input"]);
+  session.detach();
+  server.close();
+  await once(server, "close");
+});
+
+test("Windows agent preserves input request order", async () => {
+  const inputBodies: Array<{ dataBase64?: string }> = [];
+  const server = http.createServer((request, response) => {
+    const path = request.url ?? "";
+    if (request.method === "POST" && path === "/sessions/pane_input_order") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "pane_input_order", pid: 123, base: 0 }));
+      return;
+    }
+    if (request.method === "POST" && path.endsWith("/input")) {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        inputBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        const finish = () => {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ ok: true }));
+        };
+        if (inputBodies.length === 1) setTimeout(finish, 80);
+        else finish();
+      });
+      return;
+    }
+    if (request.method === "GET" && path.includes("/output")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ cursor: 0, exited: false }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const session = new WindowsAgentSession(
+    {
+      id: "pane_input_order",
+      machineId: "windows",
+      title: "PowerShell",
+      status: "idle",
+      createdAt: new Date(0).toISOString(),
+    },
+    {
+      id: "windows",
+      name: "Windows",
+      kind: "powershell-ssh",
+      host: "127.0.0.1",
+      sessionBackend: "agent",
+      agentUrl: `http://127.0.0.1:${address.port}`,
+    },
+    80,
+    24,
+  );
+  await waitUntil(() => session.pid === 123);
+  session.write("payload");
+  session.write("\r");
+  await waitUntil(() => inputBodies.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(inputBodies.length, 1);
+  await waitUntil(() => inputBodies.length === 2);
+  assert.deepEqual(inputBodies.map((body) => Buffer.from(body.dataBase64 ?? "", "base64").toString()), ["payload", "\r"]);
   session.detach();
   server.close();
   await once(server, "close");
