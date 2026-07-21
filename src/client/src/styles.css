@@ -5249,6 +5249,11 @@ button.active-tool {
     touch-action: none;
   }
 
+  .terminal-input-prediction-layer {
+    right: var(--wmux-mobile-right-inset);
+    left: var(--wmux-mobile-left-inset);
+  }
+
   .open-tui-pane-toolbar > .open-tui-canvas {
     display: none;
   }

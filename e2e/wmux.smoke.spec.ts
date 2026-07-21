@@ -747,6 +747,14 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
     const style = window.getComputedStyle(element);
     return { left: style.paddingLeft, right: style.paddingRight };
   })).toEqual({ left: "32px", right: "48px" });
+  await expect.poll(() => activePane.locator(".terminal-input-prediction-layer").evaluate((element) => {
+    const hostRect = element.parentElement!.getBoundingClientRect();
+    const layerRect = element.getBoundingClientRect();
+    return {
+      left: Math.round(layerRect.left - hostRect.left),
+      right: Math.round(hostRect.right - layerRect.right),
+    };
+  })).toEqual({ left: 32, right: 48 });
   const chromeInsets = await page.locator(".open-tui-mobile-chrome-canvas").evaluate((canvas) => {
     const chromeRect = canvas.parentElement!.getBoundingClientRect();
     const canvasRect = canvas.getBoundingClientRect();

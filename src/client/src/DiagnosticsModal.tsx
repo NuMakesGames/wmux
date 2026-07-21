@@ -110,11 +110,11 @@ export function DiagnosticsModal({ report, loading, error, onRefresh, onClose }:
 }
 
 const formatLatency = (value: number | null): string => {
-  if (value === null) return "—";
+  if (value === null) return "-";
   return `${value.toFixed(value < 10 ? 1 : 0)} ms`;
 };
 
-const formatChars = (value: number | null): string => value === null ? "—" : `${Math.round(value)} chars`;
+const formatChars = (value: number | null): string => value === null ? "-" : `${Math.round(value)} chars`;
 
 function LatencyDiagnostics({
   snapshot,
