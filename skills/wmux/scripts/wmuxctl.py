@@ -762,7 +762,7 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
     if not machine or machine.get("reachable") is not True:
         raise SystemExit(f"wmuxctl: machine is not reachable: {args.machine}")
     is_posix = machine.get("kind") in {"local", "ssh"} and machine.get("platform") in {"linux", "mac"}
-    is_windows = machine.get("kind") == "powershell-ssh" and machine.get("platform") == "windows"
+    is_windows = machine.get("kind") == "powershell-ssh" and machine.get("platform") in {"win", "windows"}
     if not is_posix and not is_windows:
         raise SystemExit("wmuxctl: delegated agent runs require a POSIX local/SSH or Windows PowerShell SSH target")
     if is_posix and (not posixpath.isabs(args.directory) or "\x00" in args.directory):

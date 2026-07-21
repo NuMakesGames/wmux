@@ -412,7 +412,7 @@ test("wmuxctl delegates Codex directly to Windows with an explicit sandbox and s
   const lifecycle: Array<Record<string, unknown>> = [];
   let runId = "";
   let upgradeCount = 0;
-  const machine = { id: "windows-runner", kind: "powershell-ssh", platform: "windows", reachable: true };
+  const machine = { id: "windows-runner", kind: "powershell-ssh", platform: "win", reachable: true };
   const workspace = {
     id: "ws_windows_delegate",
     machineId: "windows-runner",
