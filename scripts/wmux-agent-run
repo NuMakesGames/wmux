@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 MAX_LINE = 1_100_000
@@ -18,6 +19,17 @@ TERMINATION_GRACE = 2.0
 HELP_PROBE_TIMEOUT = 5.0
 MAX_HELP_OUTPUT = 256 * 1024
 RUNTIMES = {"opencode", "codex", "claude"}
+SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
+RESULT_FORMATS = {"outcome-v1"}
+OUTCOME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "outcome": {"type": "string", "enum": ["completed", "blocked", "failed"]},
+        "summary": {"type": "string"},
+    },
+    "required": ["outcome", "summary"],
+    "additionalProperties": False,
+}
 
 
 def bounded(value):
@@ -46,20 +58,44 @@ def fail(run_id, message, code=2):
 
 def request_from_stdin():
     tty_state = None
-    if sys.stdin.isatty():
+    if sys.stdin.isatty() and os.name == "nt":
+        import msvcrt
+
+        print("WMUX_AGENT_READY", flush=True)
+        while True:
+            characters = []
+            while True:
+                character = msvcrt.getwch()
+                if character in {"\r", "\n"}:
+                    break
+                if character == "\x03":
+                    raise KeyboardInterrupt
+                if character in {"\x00", "\xe0"}:
+                    msvcrt.getwch()
+                    continue
+                characters.append(character)
+                if len("".join(characters).encode("utf-8")) > MAX_LINE:
+                    raise ValueError("request is too large")
+            if characters:
+                print(flush=True)
+                line = "".join(characters).encode("utf-8")
+                break
+    elif sys.stdin.isatty():
         import termios
 
         tty_state = termios.tcgetattr(sys.stdin.fileno())
         quiet = termios.tcgetattr(sys.stdin.fileno())
         quiet[3] &= ~termios.ECHO
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, quiet)
-    try:
-        print("WMUX_AGENT_READY", flush=True)
-        line = sys.stdin.buffer.readline(MAX_LINE + 1)
-    finally:
-        if tty_state is not None:
+        try:
+            print("WMUX_AGENT_READY", flush=True)
+            line = sys.stdin.buffer.readline(MAX_LINE + 1)
+        finally:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, tty_state)
             print(flush=True)
+    else:
+        print("WMUX_AGENT_READY", flush=True)
+        line = sys.stdin.buffer.readline(MAX_LINE + 1)
     if len(line) > MAX_LINE:
         raise ValueError("request is too large")
     try:
@@ -83,8 +119,9 @@ def validate(request):
         raise ValueError("runtime must be opencode, codex, or claude")
     if not isinstance(prompt, str) or not prompt or len(prompt.encode()) > MAX_PROMPT:
         raise ValueError("invalid prompt")
-    if not isinstance(directory, str) or not directory.startswith("/") or len(directory) > 4096 or "\x00" in directory:
+    if not isinstance(directory, str) or len(directory) > 4096 or "\x00" in directory:
         raise ValueError("invalid directory")
+    directory = os.path.abspath(os.path.expanduser(directory))
     if not os.path.isdir(directory):
         raise ValueError("directory does not exist")
     for key in ("agent", "model", "title"):
@@ -93,6 +130,14 @@ def validate(request):
     for key in ("unattended", "writeAccess"):
         if key in request and not isinstance(request[key], bool):
             raise ValueError("invalid %s" % key)
+    sandbox_mode = request.get("sandboxMode")
+    if sandbox_mode is not None and sandbox_mode not in SANDBOX_MODES:
+        raise ValueError("sandboxMode must be read-only, workspace-write, or danger-full-access")
+    result_format = request.get("resultFormat")
+    if result_format is not None and result_format not in RESULT_FORMATS:
+        raise ValueError("resultFormat must be outcome-v1")
+    if result_format and runtime != "codex":
+        raise ValueError("structured outcomes currently require the Codex runtime")
     return run_id, runtime, prompt, directory
 
 
@@ -114,6 +159,15 @@ def process_group_alive(pgid):
 
 def stop_process_group(child, signum, grace=TERMINATION_GRACE):
     if child is None:
+        return
+    if os.name == "nt":
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
         return
     pgid = child.pid
     if process_group_alive(pgid):
@@ -195,7 +249,7 @@ def opencode_auto_option(executable, env):
     raise ValueError("installed OpenCode does not advertise an auto-approval option")
 
 
-def command_for(request, runtime, directory, env):
+def command_for(request, runtime, directory, env, schema_path=None):
     executable = shutil.which(runtime)
     if not executable:
         raise FileNotFoundError("%s executable not found" % runtime)
@@ -216,12 +270,16 @@ def command_for(request, runtime, directory, env):
             argv.append(opencode_auto_option(executable, env))
         return argv, None
     if runtime == "codex":
-        argv = [executable, "--sandbox", "workspace-write" if write_access else "read-only"]
+        sandbox_mode = request.get("sandboxMode") or ("workspace-write" if write_access else "read-only")
+        argv = [executable, "--sandbox", sandbox_mode]
         if unattended:
             argv.extend(["--ask-for-approval", "never"])
         if model:
             argv.extend(["--model", model])
-        argv.extend(["exec", "--json", "-C", directory, "-"])
+        argv.extend(["exec", "--json", "-C", directory])
+        if schema_path:
+            argv.extend(["--output-schema", schema_path])
+        argv.append("-")
         return argv, None
     argv = [executable, "-p", "--verbose", "--input-format", "text", "--output-format", "stream-json"]
     argv.extend(["--permission-mode", "acceptEdits" if write_access else "plan"])
@@ -230,6 +288,28 @@ def command_for(request, runtime, directory, env):
     if model:
         argv.extend(["--model", model])
     return argv, directory
+
+
+def prepare_windows_command(argv, platform=None, exists=None, which=None):
+    platform = os.name if platform is None else platform
+    exists = os.path.isfile if exists is None else exists
+    which = shutil.which if which is None else which
+    if platform != "nt" or os.path.splitext(argv[0])[1].lower() not in {".bat", ".cmd"}:
+        return argv, False
+    powershell_script = os.path.splitext(argv[0])[0] + ".ps1"
+    powershell = which("pwsh") or which("powershell")
+    if powershell and exists(powershell_script):
+        return [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            powershell_script,
+            *argv[1:],
+        ], False
+    return argv, True
 
 
 def nested_text(value):
@@ -267,8 +347,22 @@ def parse_event(runtime, parsed):
     return "", ""
 
 
+def parse_structured_outcome(value):
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("Codex did not return the required structured outcome") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("Codex did not return the required structured outcome")
+    outcome, summary = parsed.get("outcome"), parsed.get("summary")
+    if outcome not in {"completed", "blocked", "failed"} or not isinstance(summary, str) or not summary.strip():
+        raise ValueError("Codex returned an invalid structured outcome")
+    return outcome, summary.strip()
+
+
 def main():
     run_id = "unknown"
+    schema_path = None
     try:
         request = request_from_stdin()
         candidate = request.get("runId")
@@ -278,13 +372,30 @@ def main():
         env = os.environ.copy()
         env["WMUX_DELEGATED_RUN"] = "1"
         env["WMUX_DELEGATION_RUN_ID"] = run_id
-        argv, cwd = command_for(request, runtime, directory, env)
+        if request.get("resultFormat") == "outcome-v1":
+            descriptor, schema_path = tempfile.mkstemp(prefix="wmux-agent-outcome-", suffix=".json")
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(OUTCOME_SCHEMA, handle, separators=(",", ":"))
+            if os.name != "nt":
+                os.chmod(schema_path, 0o600)
+        argv, cwd = command_for(request, runtime, directory, env, schema_path)
+        argv, use_shell = prepare_windows_command(argv)
     except FileNotFoundError as error:
+        if schema_path:
+            try:
+                os.unlink(schema_path)
+            except OSError:
+                pass
         return fail(run_id, str(error), 127)
     except ValueError as error:
+        if schema_path:
+            try:
+                os.unlink(schema_path)
+            except OSError:
+                pass
         return fail(run_id, str(error))
 
-    result, error = "", ""
+    result, error, last_text = "", "", ""
     prompt_forms = {prompt, json.dumps(prompt, ensure_ascii=False)[1:-1], json.dumps(prompt)[1:-1]}
     child = None
     previous_handlers = {}
@@ -292,7 +403,11 @@ def main():
     def forward_signal(signum, _frame):
         raise ForwardedSignal(signum)
 
-    for signum in (signal.SIGTERM, signal.SIGHUP):
+    forwarded_signals = tuple(
+        candidate for candidate in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None))
+        if candidate is not None
+    )
+    for signum in forwarded_signals:
         previous_handlers[signum] = signal.signal(signum, forward_signal)
     try:
         child = subprocess.Popen(
@@ -305,7 +420,9 @@ def main():
             encoding="utf-8",
             errors="replace",
             env=env,
-            start_new_session=True,
+            shell=use_shell,
+            start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
         assert child.stdin is not None and child.stdout is not None
         child.stdin.write(prompt)
@@ -324,6 +441,7 @@ def main():
             text, failure = parse_event(runtime, parsed)
             if text:
                 result = append_bounded(result, text)
+                last_text = text
             if failure:
                 error = append_bounded(error, failure)
         code = child.wait()
@@ -334,13 +452,37 @@ def main():
         stop_process_group(child, forwarded.signum)
         return 128 + forwarded.signum
     except OSError as exc:
-        stop_process_group(child, signal.SIGKILL, 0)
+        stop_process_group(child, getattr(signal, "SIGKILL", signal.SIGTERM), 0)
         return fail(run_id, str(exc), 127)
     finally:
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
-    ok = code == 0 and not error
-    emit("WMUX_AGENT_RESULT", {"runId": run_id, "runtime": runtime, "ok": ok, "result": bounded(result), "error": bounded(error)})
+        if schema_path:
+            try:
+                os.unlink(schema_path)
+            except OSError:
+                pass
+    outcome = "completed"
+    if request.get("resultFormat") == "outcome-v1" and not error:
+        try:
+            outcome, result = parse_structured_outcome(last_text)
+        except ValueError as exc:
+            outcome, error = "failed", str(exc)
+    elif code != 0 or error:
+        outcome = "failed"
+    ok = code == 0 and not error and outcome == "completed"
+    if outcome != "completed" and not error:
+        error = result
+    payload = {
+        "runId": run_id,
+        "runtime": runtime,
+        "ok": ok,
+        "result": bounded(result),
+        "error": bounded(error),
+    }
+    if request.get("resultFormat") == "outcome-v1":
+        payload["outcome"] = outcome
+    emit("WMUX_AGENT_RESULT", payload)
     print("WMUX_AGENT_DONE %s %d" % (run_id, code), flush=True)
     return code
 

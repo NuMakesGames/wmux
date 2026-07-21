@@ -47,6 +47,12 @@ test("bundle stages and runs the agent profile helper", () => {
   assert.match(bootstrap, /apply --quiet/);
 });
 
+test("bundle stages the cross-platform one-shot agent runner for Windows panes", () => {
+  const bundle = buildWindowsHelperBundle(machine);
+  assert.ok(bundle.files.some((file) => file.name === "wmux-agent-run.py"));
+  assert.ok(bundle.files.some((file) => file.name === "wmux-agent-run.cmd"));
+});
+
 test("registered Windows bootstrap makes missing profile auth optional", () => {
   const bootstrap = buildWindowsPowerShellBootstrap({ ...machine, source: "registered" }, undefined, {});
   assert.match(bootstrap, /wmux-agent-profile\.cmd/);

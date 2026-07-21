@@ -21,7 +21,7 @@ const windowsBootstrapEnvKeys = new Set([
   "KITTY_WINDOW_ID",
   "WMUX_BROWSER_AUTH_MODE",
 ]);
-const windowsRequiredHelperNames = [
+const windowsPowerShellHelperBaseNames = [
   "wmux-agent-event",
   "wmux-console-theme",
   "wmux-copy",
@@ -34,6 +34,11 @@ const windowsRequiredHelperNames = [
   "wmux-title",
   "wmux-windows-agent-service",
   "wmux-windows-setup",
+];
+const windowsRequiredHelperFiles = [
+  ...windowsPowerShellHelperBaseNames.map((name) => `${name}.ps1`),
+  "wmux-agent-run.cmd",
+  "wmux-agent-run.py",
 ];
 const windowsClipboardAliasNames = ["wmux-clip", "wclip", "wmclip"];
 const WINDOWS_AGENT_RELEASE_PLACEHOLDER = "__WMUX_WINDOWS_AGENT_RELEASE_VERSION__";
@@ -286,7 +291,7 @@ try {
   $VersionDoc = Get-Content -LiteralPath (Join-Path $HelperDir 'bundle-version.json') -Raw | ConvertFrom-Json
   $BundleVersion = [string]$VersionDoc.bundleVersion
 } catch {}
-$HelperNames = @(${windowsRequiredHelperNames.map((name) => psSingleQuote(`${name}.ps1`)).join(", ")})
+$HelperNames = @(${windowsRequiredHelperFiles.map((name) => psSingleQuote(name)).join(", ")})
 $Helpers = [ordered]@{}
 $HelperCount = 0
 foreach ($Helper in $HelperNames) {
@@ -379,7 +384,10 @@ try {
 } | ConvertTo-Json -Depth 8 -Compress
 `;
 
-const windowsPowerShellHelperNames = (): string[] => [...windowsRequiredHelperNames, ...windowsClipboardAliasNames];
+const windowsPowerShellHelperNames = (): string[] => [
+  ...windowsPowerShellHelperBaseNames,
+  ...windowsClipboardAliasNames,
+];
 const windowsPowerShellSourceName = (name: string): string =>
   windowsClipboardAliasNames.includes(name) ? "wmux-copy.ps1" : `${name}.ps1`;
 
@@ -415,6 +423,14 @@ const windowsHelperFiles = (): Array<{ name: string; content: string }> => [
   {
     name: "wmux-agent-profile.cmd",
     content: pythonCmdShim("wmux-agent-profile.py"),
+  },
+  {
+    name: "wmux-agent-run.py",
+    content: localScript("wmux-agent-run"),
+  },
+  {
+    name: "wmux-agent-run.cmd",
+    content: pythonCmdShim("wmux-agent-run.py"),
   },
 ];
 

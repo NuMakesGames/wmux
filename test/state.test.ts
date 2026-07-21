@@ -611,17 +611,25 @@ test("a new run interrupts the previous delegation without interrupting duplicat
   });
 });
 
-test("runless active hooks inherit the current delegation without interrupting it", () => {
+test("runless hooks inherit the current delegation through terminal completion", () => {
   withTempState((filePath) => {
     const store = new StateStore(machines, filePath);
     const paneId = store.snapshot().workspaces[0].tabs[0].panes[0].id;
     store.recordAgentEvent({ paneId, runId: "run-durable", agent: "codex", status: "running", summary: "Starting" });
     const hook = store.recordAgentEvent({ paneId, agent: "codex", status: "running", summary: "Prompt submitted" });
+    const stop = store.recordAgentEvent({
+      paneId,
+      agent: "codex",
+      status: "completed",
+      summary: "Prompt completed",
+      message: "Finished work",
+    });
 
     assert.equal(hook.agentEvent.runId, "run-durable");
-    assert.equal(store.delegationForRun("run-durable")?.state, "running");
-    assert.equal(store.interruptAgentForPane(paneId), true);
-    assert.equal(store.delegationForRun("run-durable")?.state, "interrupted");
+    assert.equal(stop.agentEvent.runId, "run-durable");
+    assert.equal(store.delegationForRun("run-durable")?.state, "completed");
+    assert.equal(store.delegationForRun("run-durable")?.result, "Finished work");
+    assert.equal(store.interruptAgentForPane(paneId), false);
   });
 });
 
