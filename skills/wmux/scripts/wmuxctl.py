@@ -800,6 +800,10 @@ def cmd_delegate(client: WmuxClient, args: argparse.Namespace) -> int:
         )
         submit_line(client, info["paneId"], "wmux-agent-run", True, args.cols, args.rows)
         wait_for_output(client, info["paneId"], r"(?m)^WMUX_AGENT_READY$", args.ready_timeout, args.cols, args.rows)
+        if is_windows:
+            # ConPTY can publish the child's first output just before Windows
+            # finishes transferring foreground console input to that child.
+            time.sleep(0.5)
         request = {
             "runId": run_id,
             "runtime": args.runtime,
