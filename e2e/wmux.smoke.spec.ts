@@ -209,6 +209,55 @@ test("creates a workspace through the command palette and preserves its direct l
   await expect(page).toHaveURL(new RegExp(`${directPath.replaceAll("/", "\\/")}$`));
 });
 
+test("workspace tooltips expose the active pane session identifier", async ({ page, request }, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "desktop hover coverage");
+  test.setTimeout(60_000);
+
+  const response = await request.post("/api/workspaces", { data: { machineId: "local" } });
+  expect(response.ok()).toBeTruthy();
+  const payload = await response.json() as {
+    workspace: {
+      id: string;
+      name: string;
+      activeTabId: string;
+      tabs: Array<{ id: string; activePaneId: string; panes: Array<{ id: string }> }>;
+    };
+  };
+  const workspace = payload.workspace;
+  const tab = workspace.tabs.find((candidate) => candidate.id === workspace.activeTabId);
+  const pane = tab?.panes.find((candidate) => candidate.id === tab.activePaneId);
+  expect(pane).toBeTruthy();
+  if (!pane) throw new Error("active session is unavailable");
+
+  try {
+    await page.goto("/?legacy=1");
+    await expect(page.locator("main.app-shell")).toBeVisible({ timeout: 20_000 });
+    const workspaceRow = page.locator(`a.workspace-item[href^="/workspaces/${workspace.id}/"]`);
+    await expect(workspaceRow).toHaveAttribute("title", new RegExp(`Session ${pane.id}`));
+
+    await page.goto("/");
+    await expect(page.locator("main.app-shell")).toBeVisible({ timeout: 20_000 });
+    const canvas = page.locator(".open-tui-sidebar canvas");
+    await expect(canvas).toBeVisible();
+    const found = await canvas.evaluate((element: HTMLCanvasElement, expected) => {
+      const rect = element.getBoundingClientRect();
+      for (let y = 0; y < rect.height; y += 3) {
+        element.dispatchEvent(new PointerEvent("pointermove", {
+          bubbles: true,
+          clientX: rect.left + 40,
+          clientY: rect.top + y,
+          pointerId: 98,
+        }));
+        if (element.title.includes(expected)) return true;
+      }
+      return false;
+    }, `Session ${pane.id}`);
+    expect(found).toBe(true);
+  } finally {
+    await request.delete(`/api/workspaces/${workspace.id}`);
+  }
+});
+
 test("navigates, persists, filters, and moves nested workspaces", async ({ page, request }, testInfo) => {
   test.setTimeout(60_000);
   const { child, root } = await createNestedWorkspacePair(request);

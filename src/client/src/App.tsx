@@ -25,6 +25,7 @@ import type { OpenTuiSidebarMachine, OpenTuiSidebarWorkspace } from "./OpenTuiSi
 import { OpenTuiTopbar } from "./OpenTuiTopbar";
 import { applyClientViewToState, loadActivePaneSelections, loadActiveTabSelections, markWorkspaceNotificationsReadInState, parseRouteTarget, workspaceTabPath } from "./route-state";
 import { compactMiddlePath, normalizeUserPath } from "./path-display";
+import { formatSessionReference } from "./session-reference";
 import {
   applyHealthDelta,
   bootstrapSatisfiesHealthDelta,
@@ -466,6 +467,7 @@ export function App() {
             agentCreated: workspace.createdBy === "agent",
             agentName: latestAgentName,
             agentStatus: latestAgent ? agentStatusClass(latestAgent.status) : undefined,
+            sessionId: pane?.id,
             versionStatus: version?.status,
             versionLabel: version?.label,
             versionDetail: version?.detail,
@@ -1477,6 +1479,7 @@ export function App() {
                 hostContext,
                 version?.detail,
                 cwd,
+                formatSessionReference(pane?.id),
               ].filter(Boolean).join(" / ");
               const latestAgentStatus = latestAgent ? agentStatusClass(latestAgent.status) : "";
               const hasBell = treeRow.ownActivity.bell || treeRow.hiddenActivity.bell;
