@@ -290,9 +290,26 @@ def command_for(request, runtime, directory, env, schema_path=None):
     return argv, directory
 
 
-def requires_windows_shell(argv, platform=None):
+def prepare_windows_command(argv, platform=None, exists=None, which=None):
     platform = os.name if platform is None else platform
-    return platform == "nt" and os.path.splitext(argv[0])[1].lower() in {".bat", ".cmd"}
+    exists = os.path.isfile if exists is None else exists
+    which = shutil.which if which is None else which
+    if platform != "nt" or os.path.splitext(argv[0])[1].lower() not in {".bat", ".cmd"}:
+        return argv, False
+    powershell_script = os.path.splitext(argv[0])[0] + ".ps1"
+    powershell = which("pwsh") or which("powershell")
+    if powershell and exists(powershell_script):
+        return [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            powershell_script,
+            *argv[1:],
+        ], False
+    return argv, True
 
 
 def nested_text(value):
@@ -362,7 +379,7 @@ def main():
             if os.name != "nt":
                 os.chmod(schema_path, 0o600)
         argv, cwd = command_for(request, runtime, directory, env, schema_path)
-        use_shell = requires_windows_shell(argv)
+        argv, use_shell = prepare_windows_command(argv)
     except FileNotFoundError as error:
         if schema_path:
             try:
