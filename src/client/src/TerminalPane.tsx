@@ -18,7 +18,12 @@ import {
 import { ensureWmuxFonts, terminalFontFamilyStack } from "./fonts";
 import { ensureGhostty } from "./terminal-loader";
 import { configureTerminalInput } from "./terminal-input";
-import { mobileTerminalKeySequences, oneShotControlSequence } from "./mobile-terminal-keys";
+import {
+  mobileTerminalArrowSequence,
+  mobileTerminalKeySequences,
+  oneShotControlSequence,
+  type MobileTerminalArrow,
+} from "./mobile-terminal-keys";
 import { isTerminalProtocolResponse } from "../../shared/terminal-protocol";
 import { OpenTuiPaneToolbar } from "./OpenTuiPaneToolbar";
 import { writeBrowserClipboard } from "./clipboard";
@@ -1374,11 +1379,9 @@ export const TerminalPane = memo(function TerminalPane({
         let data = rawData;
         if (mobileControlArmedRef.current) {
           const control = oneShotControlSequence(data);
-          if (control !== undefined) {
-            data = control;
-            mobileControlArmedRef.current = false;
-            setMobileControlArmed(false);
-          }
+          mobileControlArmedRef.current = false;
+          setMobileControlArmed(false);
+          if (control !== undefined) data = control;
         }
         const terminalResponse = isTerminalProtocolResponse(data);
         if (!terminalResponse) inputEpochRef.current += 1;
@@ -1660,6 +1663,9 @@ export const TerminalPane = memo(function TerminalPane({
     terminalInputRef.current(data);
     terminalRef.current?.focus();
   };
+  const sendMobileTerminalArrow = (arrow: MobileTerminalArrow) => {
+    sendMobileTerminalKey(mobileTerminalArrowSequence(arrow, terminalRef.current?.getMode(1) ?? false));
+  };
 
   return (
     <section
@@ -1766,10 +1772,10 @@ export const TerminalPane = memo(function TerminalPane({
         >
           Ctrl
         </button>
-        <button type="button" aria-label="Arrow left" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalKey(mobileTerminalKeySequences.arrowLeft)}>←</button>
-        <button type="button" aria-label="Arrow down" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalKey(mobileTerminalKeySequences.arrowDown)}>↓</button>
-        <button type="button" aria-label="Arrow up" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalKey(mobileTerminalKeySequences.arrowUp)}>↑</button>
-        <button type="button" aria-label="Arrow right" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalKey(mobileTerminalKeySequences.arrowRight)}>→</button>
+        <button type="button" aria-label="Arrow left" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalArrow("left")}>←</button>
+        <button type="button" aria-label="Arrow down" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalArrow("down")}>↓</button>
+        <button type="button" aria-label="Arrow up" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalArrow("up")}>↑</button>
+        <button type="button" aria-label="Arrow right" onPointerDown={(event) => event.preventDefault()} onClick={() => sendMobileTerminalArrow("right")}>→</button>
       </div>
       {visibleMediaItems.length > 0 ? (
         <div className="media-shelf">

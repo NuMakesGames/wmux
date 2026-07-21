@@ -964,6 +964,13 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
   test.skip(!testInfo.project.name.startsWith("mobile-"), "mobile-only smoke coverage");
   test.setTimeout(60_000);
 
+  const terminalOutputWriters = new Set<(data: string) => void>();
+  await page.routeWebSocket(/\/ws\/panes\//, (browserSocket) => {
+    const serverSocket = browserSocket.connectToServer();
+    browserSocket.onMessage((message) => serverSocket.send(message));
+    serverSocket.onMessage((message) => browserSocket.send(message));
+    terminalOutputWriters.add((data) => browserSocket.send(JSON.stringify({ type: "output", data })));
+  });
   await page.addInitScript(() => {
     const sent: string[] = [];
     const originalSend = WebSocket.prototype.send;
@@ -1059,6 +1066,58 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
         }
       }),
   )).toEqual(expect.arrayContaining(["\x1b", "\x03"]));
+  await terminalKeys.getByRole("button", { name: "Ctrl" }).click();
+  await page.keyboard.insertText("ß");
+  await expect(terminalKeys.getByRole("button", { name: "Ctrl" })).toHaveAttribute("aria-pressed", "false");
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages
+      .flatMap((message) => {
+        try {
+          const parsed = JSON.parse(message) as { type?: string; data?: string };
+          return parsed.type === "input" ? [parsed.data] : [];
+        } catch {
+          return [];
+        }
+      }),
+  )).toEqual(expect.arrayContaining(["ß"]));
+  const unicodeInputs = await page.evaluate(() =>
+    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages
+      .flatMap((message) => {
+        try {
+          const parsed = JSON.parse(message) as { type?: string; data?: string };
+          return parsed.type === "input" ? [parsed.data] : [];
+        } catch {
+          return [];
+        }
+      }),
+  );
+  expect(unicodeInputs).not.toContain("\x13");
+  for (const writeTerminalOutput of terminalOutputWriters) writeTerminalOutput("\x1b[?1h");
+  await terminalKeys.getByRole("button", { name: "Arrow up" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages
+      .flatMap((message) => {
+        try {
+          const parsed = JSON.parse(message) as { type?: string; data?: string };
+          return parsed.type === "input" ? [parsed.data] : [];
+        } catch {
+          return [];
+        }
+      }),
+  )).toEqual(expect.arrayContaining(["\x1bOA"]));
+  for (const writeTerminalOutput of terminalOutputWriters) writeTerminalOutput("\x1b[?1l");
+  await terminalKeys.getByRole("button", { name: "Arrow down" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __wmuxMobileSocketMessages: string[] }).__wmuxMobileSocketMessages
+      .flatMap((message) => {
+        try {
+          const parsed = JSON.parse(message) as { type?: string; data?: string };
+          return parsed.type === "input" ? [parsed.data] : [];
+        } catch {
+          return [];
+        }
+      }),
+  )).toEqual(expect.arrayContaining(["\x1b[B"]));
   await page.setViewportSize(fullViewport!);
   await expect(page.locator("main.app-shell")).not.toHaveClass(/mobile-keyboard-open/);
 

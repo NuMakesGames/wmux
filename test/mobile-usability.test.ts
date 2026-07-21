@@ -9,7 +9,11 @@ import {
   pruneMobileSurfaceModes,
   saveMobileSurfaceModes,
 } from "../src/client/src/mobile-surface-mode.ts";
-import { mobileTerminalKeySequences, oneShotControlSequence } from "../src/client/src/mobile-terminal-keys.ts";
+import {
+  mobileTerminalArrowSequence,
+  mobileTerminalKeySequences,
+  oneShotControlSequence,
+} from "../src/client/src/mobile-terminal-keys.ts";
 
 const memoryStorage = (initial: Record<string, string> = {}) => {
   const values = new Map(Object.entries(initial));
@@ -42,14 +46,22 @@ test("mobile terminal keys use exact escape sequences and one-shot control bytes
   assert.deepEqual(mobileTerminalKeySequences, {
     escape: "\x1b",
     tab: "\t",
-    arrowUp: "\x1b[A",
-    arrowDown: "\x1b[B",
-    arrowRight: "\x1b[C",
-    arrowLeft: "\x1b[D",
   });
+  assert.deepEqual(
+    (["up", "down", "right", "left"] as const).map((arrow) => [
+      mobileTerminalArrowSequence(arrow, false),
+      mobileTerminalArrowSequence(arrow, true),
+    ]),
+    [["\x1b[A", "\x1bOA"], ["\x1b[B", "\x1bOB"], ["\x1b[C", "\x1bOC"], ["\x1b[D", "\x1bOD"]],
+  );
+  assert.equal(oneShotControlSequence("a"), "\x01");
   assert.equal(oneShotControlSequence("c"), "\x03");
   assert.equal(oneShotControlSequence("D"), "\x04");
-  assert.equal(oneShotControlSequence("["), "\x1b");
+  assert.equal(oneShotControlSequence("Z"), "\x1a");
+  assert.equal(oneShotControlSequence("ß"), undefined);
+  assert.equal(oneShotControlSequence("é"), undefined);
+  assert.equal(oneShotControlSequence("@"), undefined);
+  assert.equal(oneShotControlSequence("["), undefined);
   assert.equal(oneShotControlSequence("ab"), undefined);
   assert.equal(oneShotControlSequence("1"), undefined);
 });
