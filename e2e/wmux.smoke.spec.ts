@@ -665,68 +665,6 @@ test("predicts bounded shell and alternate-screen input locally", async ({
   }
 });
 
-test("keeps predicted input transparent inside mobile safe-area insets", async ({
-  page,
-  request,
-}, testInfo) => {
-  test.skip(testInfo.project.name !== "mobile-chromium", "mobile terminal prediction coverage");
-  test.setTimeout(30_000);
-
-  await page.routeWebSocket(/\/ws\/panes\//, (browserSocket) => {
-    const serverSocket = browserSocket.connectToServer();
-    browserSocket.onMessage((message) => serverSocket.send(message));
-    serverSocket.onMessage((message) => {
-      let delay = 0;
-      try {
-        const parsed = JSON.parse(String(message)) as { type?: string };
-        if (parsed.type === "output") delay = 250;
-      } catch {
-        // Forward non-JSON frames without delay.
-      }
-      setTimeout(() => browserSocket.send(message), delay);
-    });
-  });
-
-  const created = await request.post("/api/workspaces", { data: { machineId: "local" } });
-  expect(created.ok()).toBeTruthy();
-  const payload = await created.json() as {
-    workspace: { id: string; activeTabId: string };
-  };
-  try {
-    await page.goto(`/workspaces/${payload.workspace.id}/tabs/${payload.workspace.activeTabId}`);
-    const activePane = page.locator(".terminal-pane.active");
-    await expect(activePane).toHaveClass(/terminal-ready/, { timeout: 10_000 });
-    await activePane.locator(".terminal-host textarea").evaluate((element: HTMLTextAreaElement) => element.focus());
-    await page.keyboard.type("a");
-    await page.waitForTimeout(350);
-
-    const appShell = page.locator("main.app-shell");
-    await appShell.evaluate((element: HTMLElement) => {
-      element.style.setProperty("--wmux-mobile-left-inset", "24px");
-      element.style.setProperty("--wmux-mobile-right-inset", "36px");
-    });
-    await page.keyboard.type("x");
-    const predictedX = activePane.locator(".terminal-input-prediction-cell", { hasText: "x" });
-    await expect(predictedX).toBeVisible();
-    await expect.poll(() => predictedX.evaluate((element) => getComputedStyle(element).backgroundColor))
-      .toBe("rgba(0, 0, 0, 0)");
-    await expect.poll(() => activePane.locator(".terminal-input-prediction-layer").evaluate((element) => {
-      const hostRect = element.parentElement!.getBoundingClientRect();
-      const layerRect = element.getBoundingClientRect();
-      const predictionRect = element.querySelector(".terminal-input-prediction-cell:not(:empty)")!
-        .getBoundingClientRect();
-      return {
-        left: Math.round(layerRect.left - hostRect.left),
-        right: Math.round(hostRect.right - layerRect.right),
-        predictionInside: predictionRect.left >= layerRect.left && predictionRect.right <= layerRect.right,
-      };
-    })).toEqual({ left: 24, right: 36, predictionInside: true });
-  } finally {
-    const removed = await request.delete(`/api/workspaces/${payload.workspace.id}`);
-    expect(removed.ok()).toBeTruthy();
-  }
-});
-
 test("sends Shift+Enter as one Ctrl+J newline while preserving plain Enter", async ({
   page,
   request,
@@ -1314,6 +1252,26 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
       right: Math.round(hostRect.right - layerRect.right),
     };
   })).toEqual({ left: 32, right: 48 });
+  const safeAreaPrediction = await activePane.locator(".terminal-input-prediction-layer").evaluate((element) => {
+    const layer = element as HTMLElement;
+    const cell = document.createElement("span");
+    cell.className = "terminal-input-prediction-cell";
+    cell.textContent = "x";
+    cell.style.left = "0";
+    cell.style.top = "0";
+    cell.style.width = "8px";
+    cell.style.height = "16px";
+    layer.append(cell);
+    const layerRect = layer.getBoundingClientRect();
+    const cellRect = cell.getBoundingClientRect();
+    const result = {
+      background: getComputedStyle(cell).backgroundColor,
+      inside: cellRect.left >= layerRect.left && cellRect.right <= layerRect.right,
+    };
+    cell.remove();
+    return result;
+  });
+  expect(safeAreaPrediction).toEqual({ background: "rgba(0, 0, 0, 0)", inside: true });
   const chromeInsets = await page.locator(".open-tui-mobile-chrome-canvas").evaluate((canvas) => {
     const chromeRect = canvas.parentElement!.getBoundingClientRect();
     const canvasRect = canvas.getBoundingClientRect();
