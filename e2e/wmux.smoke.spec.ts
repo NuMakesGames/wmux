@@ -1255,8 +1255,8 @@ test("mobile chrome keeps navigation, chat, terminal, and actions reachable", as
   const navigation = page.getByRole("complementary", { name: "Workspace navigation" });
   await expect(navigation).toBeVisible();
   await expect(navigation.locator(".workspace-version-badge")).toHaveCount(0);
-  const moveTarget = navigation.getByRole("button", { name: /^Move / }).first();
-  await expect.poll(() => moveTarget.evaluate((element) => {
+  const workspaceOptionsTarget = navigation.getByRole("button", { name: /^Workspace options for / }).first();
+  await expect.poll(() => workspaceOptionsTarget.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return { width: Math.round(rect.width), height: Math.round(rect.height) };
   })).toEqual({ width: 44, height: 44 });
