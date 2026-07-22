@@ -3332,7 +3332,7 @@ button.active-tool {
 }
 
 .terminal-input-prediction-cell {
-  background: var(--terminal-background);
+  background: transparent;
 }
 
 .terminal-input-prediction-cursor {
