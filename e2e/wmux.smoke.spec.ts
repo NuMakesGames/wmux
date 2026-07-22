@@ -596,6 +596,11 @@ test("predicts bounded shell and alternate-screen input locally", async ({
     await page.keyboard.type("x");
     const predictedX = activePane.locator(".terminal-input-prediction-cell", { hasText: "x" });
     await expect(predictedX).toBeVisible();
+    await expect.poll(() => predictedX.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .toBe("rgba(0, 0, 0, 0)");
+    await expect.poll(() => activePane.locator(".terminal-input-prediction-cell").first().evaluate((element) =>
+      getComputedStyle(element).backgroundColor,
+    )).toBe("rgb(16, 17, 20)");
     const predictedXLeft = await predictedX.evaluate((element: HTMLElement) => element.style.left);
     await page.keyboard.press("Backspace");
     await expect.poll(() => activePane.locator(".terminal-input-prediction-cursor")
@@ -604,6 +609,23 @@ test("predicts bounded shell and alternate-screen input locally", async ({
 
     await page.keyboard.press("Backspace");
     await page.waitForTimeout(350);
+    await page.keyboard.type("PS1=$'\\e[30;46mP>' bash --noprofile --norc -i");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(600);
+    await page.keyboard.type("a");
+    await page.waitForTimeout(350);
+    await page.keyboard.type("x");
+    const predictedColoredX = activePane.locator(".terminal-input-prediction-cell", { hasText: "x" });
+    await expect(predictedColoredX).toBeVisible();
+    await expect.poll(() => predictedColoredX.evaluate((element) => ({
+      background: getComputedStyle(element).backgroundColor,
+      foreground: getComputedStyle(element).color,
+    }))).toEqual({ background: "rgb(101, 185, 199)", foreground: "rgb(27, 29, 34)" });
+    await page.keyboard.press("Control+C");
+    await page.waitForTimeout(350);
+    await page.keyboard.type("exit");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(500);
     await page.keyboard.type("printf '\\033[?1049h\\033[2J\\033[HREADY\\r\\n'");
     await page.keyboard.press("Enter");
     await page.waitForTimeout(600);
@@ -637,6 +659,68 @@ test("predicts bounded shell and alternate-screen input locally", async ({
     await expect(diagnostics.locator(".latency-row", { hasText: /SHELL::PREDICTED/i }).locator("span").nth(1)).not.toHaveText("0");
     await expect(diagnostics.locator(".latency-row", { hasText: /SHELL::CANVAS/i }).locator("span").nth(1)).not.toHaveText("0");
     await expect(diagnostics.locator(".latency-row", { hasText: /TUI::PREDICTED/i }).locator("span").nth(1)).not.toHaveText("0");
+  } finally {
+    const removed = await request.delete(`/api/workspaces/${payload.workspace.id}`);
+    expect(removed.ok()).toBeTruthy();
+  }
+});
+
+test("keeps predicted input transparent inside mobile safe-area insets", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-chromium", "mobile terminal prediction coverage");
+  test.setTimeout(30_000);
+
+  await page.routeWebSocket(/\/ws\/panes\//, (browserSocket) => {
+    const serverSocket = browserSocket.connectToServer();
+    browserSocket.onMessage((message) => serverSocket.send(message));
+    serverSocket.onMessage((message) => {
+      let delay = 0;
+      try {
+        const parsed = JSON.parse(String(message)) as { type?: string };
+        if (parsed.type === "output") delay = 250;
+      } catch {
+        // Forward non-JSON frames without delay.
+      }
+      setTimeout(() => browserSocket.send(message), delay);
+    });
+  });
+
+  const created = await request.post("/api/workspaces", { data: { machineId: "local" } });
+  expect(created.ok()).toBeTruthy();
+  const payload = await created.json() as {
+    workspace: { id: string; activeTabId: string };
+  };
+  try {
+    await page.goto(`/workspaces/${payload.workspace.id}/tabs/${payload.workspace.activeTabId}`);
+    const activePane = page.locator(".terminal-pane.active");
+    await expect(activePane).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+    await activePane.locator(".terminal-host textarea").evaluate((element: HTMLTextAreaElement) => element.focus());
+    await page.keyboard.type("a");
+    await page.waitForTimeout(350);
+
+    const appShell = page.locator("main.app-shell");
+    await appShell.evaluate((element: HTMLElement) => {
+      element.style.setProperty("--wmux-mobile-left-inset", "24px");
+      element.style.setProperty("--wmux-mobile-right-inset", "36px");
+    });
+    await page.keyboard.type("x");
+    const predictedX = activePane.locator(".terminal-input-prediction-cell", { hasText: "x" });
+    await expect(predictedX).toBeVisible();
+    await expect.poll(() => predictedX.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .toBe("rgba(0, 0, 0, 0)");
+    await expect.poll(() => activePane.locator(".terminal-input-prediction-layer").evaluate((element) => {
+      const hostRect = element.parentElement!.getBoundingClientRect();
+      const layerRect = element.getBoundingClientRect();
+      const predictionRect = element.querySelector(".terminal-input-prediction-cell:not(:empty)")!
+        .getBoundingClientRect();
+      return {
+        left: Math.round(layerRect.left - hostRect.left),
+        right: Math.round(hostRect.right - layerRect.right),
+        predictionInside: predictionRect.left >= layerRect.left && predictionRect.right <= layerRect.right,
+      };
+    })).toEqual({ left: 24, right: 36, predictionInside: true });
   } finally {
     const removed = await request.delete(`/api/workspaces/${payload.workspace.id}`);
     expect(removed.ok()).toBeTruthy();
@@ -753,6 +837,26 @@ test("persists a color scheme and applies it to the shared chrome palette", asyn
     await expect.poll(() => page.locator("html").evaluate((element) =>
       element.style.getPropertyValue("--black"),
     )).toBe("#282a36");
+
+    await page.routeWebSocket(/\/ws\/panes\//, (browserSocket) => {
+      const serverSocket = browserSocket.connectToServer();
+      browserSocket.onMessage((message) => serverSocket.send(message));
+      serverSocket.onMessage((message) => setTimeout(() => browserSocket.send(message), 250));
+    });
+    await page.reload();
+    const activePane = page.locator(".terminal-pane.active");
+    await expect(activePane).toHaveClass(/terminal-ready/, { timeout: 10_000 });
+    await activePane.locator(".terminal-host textarea").evaluate((element: HTMLTextAreaElement) => element.focus());
+    await page.keyboard.type("a");
+    await page.waitForTimeout(350);
+    await page.keyboard.type("x");
+    const predictedX = activePane.locator(".terminal-input-prediction-cell", { hasText: "x" });
+    await expect(predictedX).toBeVisible();
+    await expect.poll(() => predictedX.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .toBe("rgba(0, 0, 0, 0)");
+    await expect.poll(() => activePane.locator(".terminal-input-prediction-cell").first().evaluate((element) =>
+      getComputedStyle(element).backgroundColor,
+    )).toBe("rgb(40, 42, 54)");
   } finally {
     const restored = await request.post("/api/settings", { data: originalSettings });
     expect(restored.ok()).toBeTruthy();
